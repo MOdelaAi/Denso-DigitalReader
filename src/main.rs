@@ -11,6 +11,12 @@ const PRESETS: [(u32, u32); 4] = [
 struct Settings {
     width: u32,
     height: u32,
+    #[serde(default = "default_dark")]
+    dark: bool,
+}
+
+fn default_dark() -> bool {
+    true
 }
 
 fn settings_path() -> Option<std::path::PathBuf> {
@@ -24,13 +30,12 @@ fn load_settings() -> Settings {
     settings_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Settings { width: 1600, height: 900 })
+        .unwrap_or(Settings { width: 1600, height: 900, dark: true })
 }
 
-fn save_settings(width: u32, height: u32) {
+fn save_settings(settings: &Settings) {
     if let Some(path) = settings_path() {
-        let s = Settings { width, height };
-        if let Ok(json) = serde_json::to_string_pretty(&s) {
+        if let Ok(json) = serde_json::to_string_pretty(settings) {
             let _ = std::fs::write(path, json);
         }
     }
@@ -52,13 +57,24 @@ fn main() -> Result<(), slint::PlatformError> {
         .unwrap_or(2) as i32;
     app.set_resolution_index(index);
 
+    app.global::<Theme>().set_dark(settings.dark);
+
     let app_weak = app.as_weak();
     app.on_apply_resolution(move |index| {
         let (w, h) = PRESETS[index as usize];
-        save_settings(w, h);
+        let mut s = load_settings();
+        s.width = w;
+        s.height = h;
+        save_settings(&s);
         if let Some(app) = app_weak.upgrade() {
             app.window().set_size(slint::LogicalSize::new(w as f32, h as f32));
         }
+    });
+
+    app.on_theme_changed(move |dark| {
+        let mut s = load_settings();
+        s.dark = dark;
+        save_settings(&s);
     });
 
     app.run()
