@@ -160,8 +160,8 @@ component NetCard inherits Rectangle {
     }
 
     VerticalLayout {
-        padding: 12px;
-        spacing: 6px;
+        padding: 14px;
+        spacing: 10px;
 
         // ── Status ──
         HorizontalLayout {
@@ -191,19 +191,24 @@ component NetCard inherits Rectangle {
             background: Theme.panel-2;
         }
         if root.is-wifi : HorizontalLayout {
+            spacing: 6px;
             Text {
                 text: "Available networks";
                 color: Theme.txt-dim;
                 vertical-alignment: center;
-                horizontal-stretch: 1;
             }
+            HelpHint {
+                text: "Scan lists Wi-Fi networks in range. Click one to connect — 🔒 means a password is required.";
+                y: parent.height / 2 - self.height / 2;
+            }
+            Rectangle { horizontal-stretch: 1; }
             TextButton {
                 text: root.scanning ? "Scanning…" : "Scan";
                 clicked => { root.scan(); }
             }
         }
         if root.is-wifi : VerticalLayout {
-            spacing: 2px;
+            spacing: 4px;
             for net in root.networks : WifiRowItem {
                 ssid: net.ssid;
                 signal: net.signal;
@@ -245,7 +250,7 @@ component NetCard inherits Rectangle {
         }
 
         if root.is-static : VerticalLayout {
-            spacing: 6px;
+            spacing: 8px;
             FieldRow {
                 label: "IP";
                 text <=> root.ip;
