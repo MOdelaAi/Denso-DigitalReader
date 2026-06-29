@@ -10,6 +10,23 @@ component Eyebrow inherits Text {
     color: Theme.txt-faint;
 }
 
+// One labelled read-only spec row (label left, value right).
+component SpecRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    Text {
+        text: root.label;
+        color: Theme.txt-dim;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    Text {
+        text: root.value;
+        color: Theme.txt;
+        vertical-alignment: center;
+    }
+}
+
 // Quiet, hover-highlighted text button for secondary actions.
 component TextButton inherits Rectangle {
     in property <string> text;
@@ -63,6 +80,10 @@ export component SettingsModal inherits Rectangle {
     in-out property <int> resolution-index;
     in-out property <bool> fullscreen;
     in property <string> app-version;
+    in property <string> hw-os;
+    in property <string> hw-device;
+    in property <string> hw-ram;
+    in property <string> hw-storage;
     callback apply-resolution(int);
     callback theme-changed(bool);
     callback toggle-fullscreen(bool);
@@ -180,6 +201,17 @@ export component SettingsModal inherits Rectangle {
                                 toggled => { root.toggle-fullscreen(root.fullscreen); }
                             }
                         }
+                    }
+
+                    // ── System ──────────────────────────────
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        Eyebrow { text: "SYSTEM"; }
+                        SpecRow { label: "OS"; value: root.hw-os; }
+                        SpecRow { label: "Device"; value: root.hw-device; }
+                        SpecRow { label: "RAM"; value: root.hw-ram; }
+                        SpecRow { label: "Storage"; value: root.hw-storage; }
                     }
 
                     // ── About ───────────────────────────────
