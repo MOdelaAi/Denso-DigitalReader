@@ -1,6 +1,7 @@
 import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { SettingsModal } from "settings-modal.slint";
+import { NetStatus } from "settings/network.slint";
 
 // Re-export so Rust can reach the Theme global via app.global::<Theme>().
 export { Theme }
@@ -19,6 +20,10 @@ export component AppWindow inherits Window {
     in property <string> hw-device;
     in property <string> hw-ram;
     in property <string> hw-storage;
+    in property <NetStatus> eth;
+    in property <NetStatus> wifi;
+    in property <bool> net-loading;
+    callback refresh-network();
     callback apply-resolution(int);
     callback theme-changed(bool);
     callback toggle-fullscreen(bool);
@@ -59,6 +64,10 @@ export component AppWindow inherits Window {
         hw-device: root.hw-device;
         hw-ram: root.hw-ram;
         hw-storage: root.hw-storage;
+        eth: root.eth;
+        wifi: root.wifi;
+        net-loading: root.net-loading;
+        refresh-network => { root.refresh-network(); }
         apply-resolution(i) => { root.apply-resolution(i); }
         theme-changed(d) => { root.theme-changed(d); }
         toggle-fullscreen(f) => { root.toggle-fullscreen(f); }

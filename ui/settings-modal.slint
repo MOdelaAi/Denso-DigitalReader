@@ -8,6 +8,7 @@ import { Appearance } from "settings/appearance.slint";
 import { Display } from "settings/display.slint";
 import { System } from "settings/system.slint";
 import { About } from "settings/about.slint";
+import { Network, NetStatus } from "settings/network.slint";
 
 // Full-window modal: scrim + centered, elevated instrument-panel dialog
 // that hugs its content. Fades in on open.
@@ -19,6 +20,10 @@ export component SettingsModal inherits Rectangle {
     in property <string> hw-device;
     in property <string> hw-ram;
     in property <string> hw-storage;
+    in property <NetStatus> eth;
+    in property <NetStatus> wifi;
+    in property <bool> net-loading;
+    callback refresh-network();
     property <int> active-tab: 0;
     callback apply-resolution(int);
     callback theme-changed(bool);
@@ -98,7 +103,7 @@ export component SettingsModal inherits Rectangle {
                             NavItem { text: "Appearance"; selected: root.active-tab == 0; clicked => { root.active-tab = 0; } }
                             NavItem { text: "Display";    selected: root.active-tab == 1; clicked => { root.active-tab = 1; } }
                             NavItem { text: "System";     selected: root.active-tab == 2; clicked => { root.active-tab = 2; } }
-                            NavItem { text: "Network";    selected: root.active-tab == 3; clicked => { root.active-tab = 3; } }
+                            NavItem { text: "Network";    selected: root.active-tab == 3; clicked => { root.active-tab = 3; root.refresh-network(); } }
                             NavItem { text: "About";      selected: root.active-tab == 4; clicked => { root.active-tab = 4; } }
                         }
 
@@ -116,6 +121,12 @@ export component SettingsModal inherits Rectangle {
                             }
                             if root.active-tab == 2 : System {
                                 os: root.hw-os; device: root.hw-device; ram: root.hw-ram; storage: root.hw-storage;
+                            }
+                            if root.active-tab == 3 : Network {
+                                eth: root.eth;
+                                wifi: root.wifi;
+                                loading: root.net-loading;
+                                refresh => { root.refresh-network(); }
                             }
                             if root.active-tab == 4 : About { app-version: root.app-version; }
                         }

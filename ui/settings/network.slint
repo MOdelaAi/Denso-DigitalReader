@@ -1,0 +1,59 @@
+import { Theme } from "../theme.slint";
+import { Eyebrow } from "../widgets/eyebrow.slint";
+import { SpecRow } from "../widgets/spec-row.slint";
+import { TextButton } from "../widgets/text-button.slint";
+
+export struct NetStatus {
+    connected: bool,
+    ip: string,
+    gateway: string,
+    ssid: string,
+    signal: string,
+}
+
+// Connection card for one interface.
+component NetCard inherits Rectangle {
+    in property <string> title;
+    in property <NetStatus> status;
+    in property <bool> is-wifi;
+    background: Theme.panel-3;
+    border-radius: 8px;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+        HorizontalLayout {
+            Text {
+                text: root.title;
+                color: Theme.txt;
+                font-weight: 600;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.status.connected ? "Connected" : "Disconnected";
+                color: root.status.connected ? Theme.status-ok : Theme.status-neutral;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+        if root.is-wifi : SpecRow { label: "SSID"; value: root.status.ssid == "" ? "—" : root.status.ssid; }
+        if root.is-wifi : SpecRow { label: "Signal"; value: root.status.signal == "" ? "—" : root.status.signal; }
+        SpecRow { label: "IP"; value: root.status.ip == "" ? "—" : root.status.ip; }
+        SpecRow { label: "Gateway"; value: root.status.gateway == "" ? "—" : root.status.gateway; }
+    }
+}
+
+export component Network inherits VerticalLayout {
+    in property <NetStatus> eth;
+    in property <NetStatus> wifi;
+    in property <bool> loading;
+    callback refresh();
+    spacing: 12px;
+
+    HorizontalLayout {
+        Eyebrow { text: "NETWORK"; vertical-alignment: center; horizontal-stretch: 1; }
+        TextButton { text: root.loading ? "Loading…" : "Refresh"; clicked => { root.refresh(); } }
+    }
+    NetCard { title: "Ethernet"; status: root.eth; is-wifi: false; opacity: root.loading ? 0.5 : 1.0; }
+    NetCard { title: "Wi-Fi"; status: root.wifi; is-wifi: true; opacity: root.loading ? 0.5 : 1.0; }
+}
