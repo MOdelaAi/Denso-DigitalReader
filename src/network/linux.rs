@@ -1,8 +1,15 @@
-use super::{InterfaceStatus, NetworkBackend, NetworkSnapshot};
+use super::{InterfaceStatus, NetConfig, NetworkBackend, NetworkSnapshot};
 
 pub struct LinuxBackend;
 
 impl NetworkBackend for LinuxBackend {
+    fn apply_config(&self, _config: &NetConfig) -> Result<(), String> {
+        // TODO(device): nmcli `con mod`/`con up` (or netplan apply). Privileged
+        // and verified on the Jetson/Pi target, not this dev path. Report
+        // unimplemented so boot-reassert surfaces it non-fatally.
+        Err("network apply not yet implemented for Linux".into())
+    }
+
     fn snapshot(&self) -> NetworkSnapshot {
         let dev = run("nmcli", &["-t", "-f", "DEVICE,TYPE,STATE", "device"]);
         let (eth_dev, wifi_dev) = pick_devices(&dev);

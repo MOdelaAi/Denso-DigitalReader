@@ -1,8 +1,10 @@
 slint::include_modules!();
 
+mod db;
 mod settings;
 mod hardware;
 mod network;
+mod reader;
 
 use settings::Settings;
 use std::cell::RefCell;
@@ -20,7 +22,23 @@ fn to_net_status(s: &network::InterfaceStatus) -> NetStatus {
 
 fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
-    let state = Rc::new(RefCell::new(settings::load()));
+
+    let db_path = db::default_path();
+    let db_conn = Rc::new(db::open(&db_path).expect("open database"));
+    db::run_migrations(&db_conn).expect("run migrations");
+
+    // One-time migration of any pre-SQLite settings.json sitting beside the DB.
+    if let Some(dir) = db_path.parent() {
+        settings::import_legacy(&db_conn, &dir.join("settings.json"));
+    }
+
+    // The app owns network config: reassert it to the OS at boot. Non-fatal —
+    // a failed apply is logged, never blocks startup.
+    for (iface, err) in network::reassert(&db_conn, network::backend().as_ref()) {
+        eprintln!("network: failed to apply {iface} config: {err}");
+    }
+
+    let state = Rc::new(RefCell::new(settings::load(&db_conn)));
 
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
 
@@ -44,13 +62,14 @@ fn main() -> Result<(), slint::PlatformError> {
     // Resolution Apply — resize + persist (preserves other fields).
     let weak = app.as_weak();
     let st = state.clone();
+    let dbc = db_conn.clone();
     app.on_apply_resolution(move |index| {
         let (w, h) = settings::PRESETS[index as usize];
         {
             let mut s = st.borrow_mut();
             s.width = w;
             s.height = h;
-            settings::save(&s);
+            settings::save(&dbc, &s);
         }
         if let Some(app) = weak.upgrade() {
             app.window()
@@ -60,20 +79,22 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Theme toggle — instant persist.
     let st = state.clone();
+    let dbc = db_conn.clone();
     app.on_theme_changed(move |dark| {
         let mut s = st.borrow_mut();
         s.dark = dark;
-        settings::save(&s);
+        settings::save(&dbc, &s);
     });
 
     // Fullscreen toggle — apply + persist.
     let weak = app.as_weak();
     let st = state.clone();
+    let dbc = db_conn.clone();
     app.on_toggle_fullscreen(move |fullscreen| {
         {
             let mut s = st.borrow_mut();
             s.fullscreen = fullscreen;
-            settings::save(&s);
+            settings::save(&dbc, &s);
         }
         if let Some(app) = weak.upgrade() {
             app.window().set_fullscreen(fullscreen);
@@ -83,9 +104,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // Reset to defaults — persist defaults and reflect them in the UI.
     let weak = app.as_weak();
     let st = state.clone();
+    let dbc = db_conn.clone();
     app.on_reset_defaults(move || {
         let d = Settings::default();
-        settings::save(&d);
+        settings::save(&dbc, &d);
         if let Some(app) = weak.upgrade() {
             app.window().set_fullscreen(d.fullscreen);
             app.window()

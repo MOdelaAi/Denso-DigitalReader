@@ -1,4 +1,4 @@
-use super::{InterfaceStatus, NetworkBackend, NetworkSnapshot};
+use super::{InterfaceStatus, NetConfig, NetworkBackend, NetworkSnapshot};
 
 pub struct WindowsBackend;
 
@@ -7,6 +7,14 @@ impl NetworkBackend for WindowsBackend {
         let ipcfg = run("ipconfig", &[]);
         let wlan = run("netsh", &["wlan", "show", "interfaces"]);
         build_snapshot(&ipcfg, &wlan)
+    }
+
+    fn apply_config(&self, _config: &NetConfig) -> Result<(), String> {
+        // TODO(device): `netsh interface ip set address/dns`. The privileged
+        // apply path is verified on the Windows target, not this dev/CI path.
+        // Until then, report unimplemented so boot-reassert surfaces it
+        // non-fatally rather than silently claiming success.
+        Err("network apply not yet implemented for Windows".into())
     }
 }
 

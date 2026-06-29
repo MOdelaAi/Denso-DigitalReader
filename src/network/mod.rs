@@ -3,6 +3,26 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
+pub mod config;
+
+use rusqlite::Connection;
+
+/// User-editable, persisted network configuration for one interface. The app
+/// owns this (source of truth) and reasserts it to the OS on boot. The WiFi
+/// PSK is intentionally absent — it belongs in the OS secret store, never here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetConfig {
+    pub iface: String,            // "ethernet" | "wifi"
+    pub mode: String,             // "dhcp" | "static"
+    pub ip: Option<String>,
+    pub prefix: Option<u32>,      // CIDR length, e.g. 24
+    pub gateway: Option<String>,
+    pub dns1: Option<String>,
+    pub dns2: Option<String>,
+    pub ssid: Option<String>,     // wifi only
+    pub security: Option<String>, // wifi only (e.g. "wpa2"); the PSK is not stored
+}
+
 #[derive(Default, Clone, PartialEq, Debug)]
 pub struct InterfaceStatus {
     pub connected: bool,
@@ -20,6 +40,11 @@ pub struct NetworkSnapshot {
 
 pub trait NetworkBackend {
     fn snapshot(&self) -> NetworkSnapshot;
+
+    /// Push a saved configuration to the OS. Privileged (netsh / nmcli) and
+    /// fallible; returns a human-readable error so the caller can surface it
+    /// without crashing.
+    fn apply_config(&self, config: &NetConfig) -> Result<(), String>;
 }
 
 struct NullBackend;
@@ -27,6 +52,27 @@ impl NetworkBackend for NullBackend {
     fn snapshot(&self) -> NetworkSnapshot {
         NetworkSnapshot::default()
     }
+    fn apply_config(&self, _config: &NetConfig) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Reassert every saved interface configuration to the OS — the app is the
+/// source of truth, so this runs at boot. Best-effort and **non-fatal**: a
+/// failed apply (no privilege, adapter error) is collected and returned as
+/// `(iface, message)` rather than aborting startup.
+pub fn reassert(conn: &Connection, backend: &dyn NetworkBackend) -> Vec<(String, String)> {
+    let configs = match config::all(conn) {
+        Ok(c) => c,
+        Err(e) => return vec![("<db>".to_string(), e.to_string())],
+    };
+    let mut errors = Vec::new();
+    for c in configs {
+        if let Err(e) = backend.apply_config(&c) {
+            errors.push((c.iface, e));
+        }
+    }
+    errors
 }
 
 pub fn backend() -> Box<dyn NetworkBackend> {
@@ -47,6 +93,7 @@ pub fn backend() -> Box<dyn NetworkBackend> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     #[test]
     fn null_backend_is_all_disconnected() {
@@ -54,5 +101,89 @@ mod tests {
         assert!(!snap.ethernet.connected);
         assert!(!snap.wifi.connected);
         assert_eq!(snap.ethernet.ip, "");
+    }
+
+    /// Records which interfaces had `apply_config` called, and optionally fails
+    /// one of them, so reassert's orchestration can be asserted off-device.
+    struct FakeBackend {
+        applied: RefCell<Vec<String>>,
+        fail_iface: Option<String>,
+    }
+    impl FakeBackend {
+        fn new() -> Self {
+            FakeBackend { applied: RefCell::new(Vec::new()), fail_iface: None }
+        }
+        fn failing(iface: &str) -> Self {
+            FakeBackend { applied: RefCell::new(Vec::new()), fail_iface: Some(iface.into()) }
+        }
+    }
+    impl NetworkBackend for FakeBackend {
+        fn snapshot(&self) -> NetworkSnapshot {
+            NetworkSnapshot::default()
+        }
+        fn apply_config(&self, config: &NetConfig) -> Result<(), String> {
+            self.applied.borrow_mut().push(config.iface.clone());
+            if self.fail_iface.as_deref() == Some(config.iface.as_str()) {
+                Err("boom".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&c).unwrap();
+        c
+    }
+
+    fn cfg(iface: &str) -> NetConfig {
+        NetConfig {
+            iface: iface.into(),
+            mode: "dhcp".into(),
+            ip: None,
+            prefix: None,
+            gateway: None,
+            dns1: None,
+            dns2: None,
+            ssid: None,
+            security: None,
+        }
+    }
+
+    #[test]
+    fn reassert_applies_each_saved_config() {
+        let c = db();
+        config::save(&c, &cfg("ethernet")).unwrap();
+        config::save(&c, &cfg("wifi")).unwrap();
+
+        let backend = FakeBackend::new();
+        let errors = reassert(&c, &backend);
+
+        assert!(errors.is_empty());
+        assert_eq!(*backend.applied.borrow(), vec!["ethernet", "wifi"]);
+    }
+
+    #[test]
+    fn reassert_is_noop_with_no_saved_config() {
+        let c = db();
+        let backend = FakeBackend::new();
+        let errors = reassert(&c, &backend);
+        assert!(errors.is_empty());
+        assert!(backend.applied.borrow().is_empty());
+    }
+
+    #[test]
+    fn reassert_collects_errors_and_keeps_going() {
+        let c = db();
+        config::save(&c, &cfg("ethernet")).unwrap();
+        config::save(&c, &cfg("wifi")).unwrap();
+
+        let backend = FakeBackend::failing("ethernet");
+        let errors = reassert(&c, &backend);
+
+        // ethernet failed, but wifi was still attempted (non-fatal continue).
+        assert_eq!(errors, vec![("ethernet".to_string(), "boom".to_string())]);
+        assert_eq!(*backend.applied.borrow(), vec!["ethernet", "wifi"]);
     }
 }
