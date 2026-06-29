@@ -1,0 +1,79 @@
+import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "Denso Digital Reader";
+    width: 600px;
+    height: 400px;
+
+    property <bool> settings-open: false;
+
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+
+        // Top button bar
+        Rectangle {
+            height: 40px;
+            background: #2c2c2c;
+
+            HorizontalBox {
+                padding: 4px;
+                alignment: start;
+
+                Button {
+                    text: "Settings";
+                    clicked => { root.settings-open = true; }
+                }
+            }
+        }
+
+        // Main content area (empty for now)
+        Rectangle {
+            background: #1e1e1e;
+        }
+    }
+
+    // Modal overlay — shown when settings-open is true
+    if root.settings-open : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000099;
+
+        // Centered dialog box
+        Rectangle {
+            width: 360px;
+            height: 240px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            background: #3c3c3c;
+            border-radius: 8px;
+
+            VerticalBox {
+                padding: 20px;
+                spacing: 12px;
+
+                Text {
+                    text: "Settings";
+                    font-size: 18px;
+                    color: #ffffff;
+                }
+
+                Text {
+                    text: "Settings coming soon";
+                    color: #aaaaaa;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { }
+
+                HorizontalBox {
+                    alignment: end;
+                    Button {
+                        text: "Close";
+                        clicked => { root.settings-open = false; }
+                    }
+                }
+            }
+        }
+    }
+}
