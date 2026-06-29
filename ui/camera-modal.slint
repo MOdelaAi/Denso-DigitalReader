@@ -1,11 +1,13 @@
 import { Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { CloseGlyph } from "widgets/close-glyph.slint";
+import { GoldButton } from "widgets/gold-button.slint";
 
 // Placeholder camera modal: same chrome as the settings modal (scrim, centered
 // elevated dialog, fade-in, close), with a preview area to be filled in later.
 export component CameraModal inherits Rectangle {
     callback close();
+    callback add-camera();
 
     // Drives the fade-in (false -> true on creation).
     property <bool> shown: false;
@@ -93,10 +95,15 @@ export component CameraModal inherits Rectangle {
 
                     // ── Footer ──
                     HorizontalLayout {
+                        spacing: 8px;
                         Rectangle { horizontal-stretch: 1; }
                         Button {
                             text: "Close";
                             clicked => { root.close(); }
+                        }
+                        GoldButton {
+                            text: "Add Camera";
+                            clicked => { root.add-camera(); }
                         }
                     }
                 }

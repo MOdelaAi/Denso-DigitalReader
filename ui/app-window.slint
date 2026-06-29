@@ -110,5 +110,6 @@ export component AppWindow inherits Window {
     // Camera modal overlay (placeholder)
     if root.camera-open : CameraModal {
         close => { root.camera-open = false; }
+        add-camera => { /* TODO: open add-camera flow */ }
     }
 }
