@@ -20,11 +20,11 @@ pub fn collect() -> HardwareSpec {
 
     let device = System::host_name().unwrap_or_else(|| "Unknown".to_string());
 
-    let ram = format_bytes(sys.total_memory());
+    let ram = size_or_unknown(sys.total_memory());
 
     let disks = Disks::new_with_refreshed_list();
     let total_storage: u64 = disks.list().iter().map(|d| d.total_space()).sum();
-    let storage = format_bytes(total_storage);
+    let storage = size_or_unknown(total_storage);
 
     HardwareSpec { os, device, ram, storage }
 }
@@ -36,6 +36,14 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} TB", bytes as f64 / TB as f64)
     } else {
         format!("{} GB", bytes / GB)
+    }
+}
+
+fn size_or_unknown(bytes: u64) -> String {
+    if bytes == 0 {
+        "Unknown".to_string()
+    } else {
+        format_bytes(bytes)
     }
 }
 
@@ -61,5 +69,15 @@ mod tests {
     #[test]
     fn formats_sub_gigabyte_as_zero_gb() {
         assert_eq!(format_bytes(500_000_000), "0 GB");
+    }
+
+    #[test]
+    fn size_or_unknown_zero_is_unknown() {
+        assert_eq!(size_or_unknown(0), "Unknown");
+    }
+
+    #[test]
+    fn size_or_unknown_nonzero_formats() {
+        assert_eq!(size_or_unknown(16_000_000_000), "16 GB");
     }
 }
