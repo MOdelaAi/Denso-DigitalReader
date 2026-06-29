@@ -1,11 +1,13 @@
-import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, HorizontalBox, VerticalBox } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
     title: "Denso Digital Reader";
-    width: 600px;
-    height: 400px;
+    width: 1600px;
+    height: 900px;
 
     property <bool> settings-open: false;
+    in-out property <int> resolution-index: 2;
+    callback apply-resolution(int);
 
     VerticalBox {
         padding: 0px;
@@ -18,7 +20,7 @@ export component AppWindow inherits Window {
 
             HorizontalBox {
                 padding: 4px;
-                alignment: start;
+                alignment: end;
 
                 Button {
                     text: "Settings";
@@ -27,22 +29,19 @@ export component AppWindow inherits Window {
             }
         }
 
-        // Main content area (empty for now)
+        // Main content area
         Rectangle {
             background: #1e1e1e;
         }
     }
 
-    // Modal overlay — shown when settings-open is true
+    // Modal overlay
     if root.settings-open : Rectangle {
         width: 100%;
         height: 100%;
         background: #00000099;
 
-        // Centered dialog box
         Rectangle {
-            width: 360px;
-            height: 240px;
             x: (root.width - self.width) / 2;
             y: (root.height - self.height) / 2;
             background: #3c3c3c;
@@ -59,18 +58,30 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: "Settings coming soon";
-                    color: #aaaaaa;
-                    vertical-alignment: center;
+                    text: "Resolution";
+                    color: #cccccc;
                 }
 
-                Rectangle { }
+                ComboBox {
+                    model: ["800 × 600", "1280 × 720", "1600 × 900", "1920 × 1080"];
+                    current-index <=> root.resolution-index;
+                }
 
                 HorizontalBox {
                     alignment: end;
+                    spacing: 8px;
+
                     Button {
                         text: "Close";
                         clicked => { root.settings-open = false; }
+                    }
+
+                    Button {
+                        text: "Apply";
+                        clicked => {
+                            root.apply-resolution(root.resolution-index);
+                            root.settings-open = false;
+                        }
                     }
                 }
             }
