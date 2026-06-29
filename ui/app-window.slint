@@ -1,7 +1,7 @@
 import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { SettingsModal } from "settings-modal.slint";
-import { NetStatus, NetConfigUi } from "settings/network.slint";
+import { NetStatus, NetConfigUi, WifiRow } from "settings/network.slint";
 
 // Re-export so Rust can reach the Theme global via app.global::<Theme>().
 export { Theme }
@@ -27,8 +27,13 @@ export component AppWindow inherits Window {
     in property <NetConfigUi> wifi-config;
     in property <string> eth-config-status;
     in property <string> wifi-config-status;
+    in property <[WifiRow]> wifi-networks;
+    in property <bool> wifi-scanning;
+    in property <string> wifi-connect-status;
     callback refresh-network();
     callback apply-net-config(string, NetConfigUi);
+    callback scan-wifi();
+    callback connect-wifi(string, string);
     callback apply-resolution(int);
     callback theme-changed(bool);
     callback toggle-fullscreen(bool);
@@ -76,8 +81,13 @@ export component AppWindow inherits Window {
         wifi-config: root.wifi-config;
         eth-config-status: root.eth-config-status;
         wifi-config-status: root.wifi-config-status;
+        wifi-networks: root.wifi-networks;
+        wifi-scanning: root.wifi-scanning;
+        wifi-connect-status: root.wifi-connect-status;
         refresh-network => { root.refresh-network(); }
         apply-net-config(i, c) => { root.apply-net-config(i, c); }
+        scan-wifi => { root.scan-wifi(); }
+        connect-wifi(s, p) => { root.connect-wifi(s, p); }
         apply-resolution(i) => { root.apply-resolution(i); }
         theme-changed(d) => { root.theme-changed(d); }
         toggle-fullscreen(f) => { root.toggle-fullscreen(f); }

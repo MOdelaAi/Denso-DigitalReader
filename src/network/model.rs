@@ -34,3 +34,11 @@ pub struct NetworkSnapshot {
     pub ethernet: InterfaceStatus,
     pub wifi: InterfaceStatus,
 }
+
+/// One Wi-Fi network found by a scan. `secured` is false for open networks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub signal: String,
+    pub secured: bool,
+}

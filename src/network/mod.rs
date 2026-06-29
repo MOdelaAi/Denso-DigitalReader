@@ -11,7 +11,7 @@ mod linux;
 mod model;
 pub mod repo;
 
-pub use model::{InterfaceStatus, NetConfig, NetworkSnapshot};
+pub use model::{InterfaceStatus, NetConfig, NetworkSnapshot, WifiNetwork};
 
 use rusqlite::Connection;
 
@@ -22,6 +22,13 @@ pub trait NetworkBackend {
     /// fallible; returns a human-readable error so the caller can surface it
     /// without crashing.
     fn apply_config(&self, config: &NetConfig) -> Result<(), String>;
+
+    /// List Wi-Fi networks currently in range.
+    fn scan_wifi(&self) -> Result<Vec<WifiNetwork>, String>;
+
+    /// Join a Wi-Fi network. `password` is `None` for open networks; when
+    /// present it is handed to the OS secret store, never persisted by us.
+    fn connect_wifi(&self, ssid: &str, password: Option<&str>) -> Result<(), String>;
 }
 
 struct NullBackend;
@@ -30,6 +37,12 @@ impl NetworkBackend for NullBackend {
         NetworkSnapshot::default()
     }
     fn apply_config(&self, _config: &NetConfig) -> Result<(), String> {
+        Ok(())
+    }
+    fn scan_wifi(&self) -> Result<Vec<WifiNetwork>, String> {
+        Ok(Vec::new())
+    }
+    fn connect_wifi(&self, _ssid: &str, _password: Option<&str>) -> Result<(), String> {
         Ok(())
     }
 }
@@ -105,6 +118,12 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+        fn scan_wifi(&self) -> Result<Vec<WifiNetwork>, String> {
+            Ok(Vec::new())
+        }
+        fn connect_wifi(&self, _ssid: &str, _password: Option<&str>) -> Result<(), String> {
+            Ok(())
         }
     }
 

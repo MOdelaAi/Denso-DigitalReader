@@ -5,9 +5,9 @@
 
 use crate::settings::Settings;
 use crate::{hardware, network, settings};
-use crate::{AppWindow, NetConfigUi, NetStatus, Theme};
+use crate::{AppWindow, NetConfigUi, NetStatus, Theme, WifiRow};
 use rusqlite::Connection;
-use slint::ComponentHandle;
+use slint::{ComponentHandle, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -53,6 +53,15 @@ fn from_ui_config(iface: &str, u: &NetConfigUi) -> network::NetConfig {
         dns2: opt(&u.dns2),
         ssid: None,
         security: None,
+    }
+}
+
+/// Scanned network → view-model row.
+fn to_wifi_row(n: &network::WifiNetwork) -> WifiRow {
+    WifiRow {
+        ssid: n.ssid.clone().into(),
+        signal: n.signal.clone().into(),
+        secured: n.secured,
     }
 }
 
@@ -183,6 +192,52 @@ pub fn install_handlers(app: &AppWindow, db_conn: &Rc<Connection>, state: &State
                 app.set_eth_config_status(status);
             }
         }
+    });
+
+    // Wi-Fi scan — runs off-thread (netsh blocks), posts the list back.
+    let weak = app.as_weak();
+    app.on_scan_wifi(move || {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        app.set_wifi_scanning(true);
+        let weak2 = app.as_weak();
+        std::thread::spawn(move || {
+            let result = network::backend().scan_wifi();
+            let _ = weak2.upgrade_in_event_loop(move |app| {
+                match result {
+                    Ok(nets) => {
+                        let rows: Vec<WifiRow> = nets.iter().map(to_wifi_row).collect();
+                        app.set_wifi_networks(ModelRc::new(VecModel::from(rows)));
+                    }
+                    Err(e) => app.set_wifi_connect_status(format!("Scan failed: {e}").into()),
+                }
+                app.set_wifi_scanning(false);
+            });
+        });
+    });
+
+    // Wi-Fi connect — off-thread; empty password means an open network.
+    let weak = app.as_weak();
+    app.on_connect_wifi(move |ssid, password| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        app.set_wifi_connect_status(format!("Connecting to {ssid}…").into());
+        let ssid = ssid.to_string();
+        let password = password.to_string();
+        let weak2 = app.as_weak();
+        std::thread::spawn(move || {
+            let pw = (!password.is_empty()).then_some(password.as_str());
+            let result = network::backend().connect_wifi(&ssid, pw);
+            let _ = weak2.upgrade_in_event_loop(move |app| {
+                app.set_wifi_connect_status(match result {
+                    Ok(()) => format!("Connected to {ssid}"),
+                    Err(e) => format!("Error: {e}"),
+                }
+                .into());
+            });
+        });
     });
 
     // Network status refresh — runs off-thread, posts results back to the UI.

@@ -22,6 +22,71 @@ export struct NetConfigUi {
     dns2: string,
 }
 
+// A scanned Wi-Fi network.
+export struct WifiRow {
+    ssid: string,
+    signal: string,
+    secured: bool,
+}
+
+// One row in the scan list. Tapping expands it; a secured network reveals a
+// (masked) password field, an open one just a Connect button. The password
+// lives in a persistent property so Connect reads it regardless of layout.
+component WifiRowItem inherits VerticalLayout {
+    in property <string> ssid;
+    in property <string> signal;
+    in property <bool> secured;
+    callback connect(string); // password ("" for open networks)
+    property <bool> expanded: false;
+    in-out property <string> password;
+    spacing: 4px;
+
+    Rectangle {
+        height: 30px;
+        border-radius: 4px;
+        background: touch.has-hover ? Theme.panel-2 : transparent;
+        HorizontalLayout {
+            padding-left: 6px;
+            padding-right: 6px;
+            spacing: 8px;
+            Text {
+                text: root.ssid;
+                color: Theme.txt;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.secured ? "🔒" : "";
+                color: Theme.txt-faint;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.signal;
+                color: Theme.txt-faint;
+                vertical-alignment: center;
+            }
+        }
+        touch := TouchArea {
+            clicked => { root.expanded = !root.expanded; }
+        }
+    }
+
+    if root.expanded : HorizontalLayout {
+        spacing: 8px;
+        padding-left: 6px;
+        if root.secured : LineEdit {
+            placeholder-text: "Password";
+            input-type: InputType.password;
+            text <=> root.password;
+            horizontal-stretch: 1;
+        }
+        TextButton {
+            text: "Connect";
+            clicked => { root.connect(root.secured ? root.password : ""); }
+        }
+    }
+}
+
 // A labelled text input row. `text` is two-way so the card can read it back.
 component FieldRow inherits HorizontalLayout {
     in property <string> label;
@@ -50,6 +115,13 @@ component NetCard inherits Rectangle {
     in property <NetConfigUi> config;
     in property <string> config-status;
     callback apply(string, NetConfigUi);
+
+    // Wi-Fi scan/connect (only wired for the Wi-Fi card).
+    in property <[WifiRow]> networks;
+    in property <bool> scanning;
+    in property <string> connect-status;
+    callback scan();
+    callback connect(string, string); // ssid, password
 
     // Persistent edit state (survives the static fields being hidden).
     in-out property <string> ip;
@@ -95,6 +167,39 @@ component NetCard inherits Rectangle {
         if root.is-wifi : SpecRow { label: "Signal"; value: root.status.signal == "" ? "—" : root.status.signal; }
         SpecRow { label: "IP"; value: root.status.ip == "" ? "—" : root.status.ip; }
         SpecRow { label: "Gateway"; value: root.status.gateway == "" ? "—" : root.status.gateway; }
+
+        // ── Wi-Fi scan / connect ──
+        if root.is-wifi : Rectangle {
+            min-height: 1px;
+            max-height: 1px;
+            background: Theme.panel-2;
+        }
+        if root.is-wifi : HorizontalLayout {
+            Text {
+                text: "Available networks";
+                color: Theme.txt-dim;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            TextButton {
+                text: root.scanning ? "Scanning…" : "Scan";
+                clicked => { root.scan(); }
+            }
+        }
+        if root.is-wifi : VerticalLayout {
+            spacing: 2px;
+            for net in root.networks : WifiRowItem {
+                ssid: net.ssid;
+                signal: net.signal;
+                secured: net.secured;
+                connect(pw) => { root.connect(net.ssid, pw); }
+            }
+        }
+        if root.is-wifi && root.connect-status != "" : Text {
+            text: root.connect-status;
+            color: Theme.txt-dim;
+            font-size: 12px;
+        }
 
         // ── Divider ──
         Rectangle {
@@ -160,8 +265,13 @@ export component Network inherits VerticalLayout {
     in property <NetConfigUi> wifi-config;
     in property <string> eth-config-status;
     in property <string> wifi-config-status;
+    in property <[WifiRow]> wifi-networks;
+    in property <bool> wifi-scanning;
+    in property <string> wifi-connect-status;
     callback refresh();
     callback apply-config(string, NetConfigUi);
+    callback scan-wifi();
+    callback connect-wifi(string, string);
     spacing: 12px;
 
     HorizontalLayout {
@@ -186,7 +296,12 @@ export component Network inherits VerticalLayout {
         status: root.wifi;
         config: root.wifi-config;
         config-status: root.wifi-config-status;
+        networks: root.wifi-networks;
+        scanning: root.wifi-scanning;
+        connect-status: root.wifi-connect-status;
         opacity: root.loading ? 0.5 : 1.0;
         apply(i, c) => { root.apply-config(i, c); }
+        scan => { root.scan-wifi(); }
+        connect(s, p) => { root.connect-wifi(s, p); }
     }
 }

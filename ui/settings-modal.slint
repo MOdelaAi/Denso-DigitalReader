@@ -8,7 +8,7 @@ import { Appearance } from "settings/appearance.slint";
 import { Display } from "settings/display.slint";
 import { System } from "settings/system.slint";
 import { About } from "settings/about.slint";
-import { Network, NetStatus, NetConfigUi } from "settings/network.slint";
+import { Network, NetStatus, NetConfigUi, WifiRow } from "settings/network.slint";
 
 // Full-window modal: scrim + centered, elevated instrument-panel dialog
 // that hugs its content. Fades in on open.
@@ -27,8 +27,13 @@ export component SettingsModal inherits Rectangle {
     in property <NetConfigUi> wifi-config;
     in property <string> eth-config-status;
     in property <string> wifi-config-status;
+    in property <[WifiRow]> wifi-networks;
+    in property <bool> wifi-scanning;
+    in property <string> wifi-connect-status;
     callback refresh-network();
     callback apply-net-config(string, NetConfigUi);
+    callback scan-wifi();
+    callback connect-wifi(string, string);
     property <int> active-tab: 0;
     callback apply-resolution(int);
     callback theme-changed(bool);
@@ -147,8 +152,13 @@ export component SettingsModal inherits Rectangle {
                                     wifi-config: root.wifi-config;
                                     eth-config-status: root.eth-config-status;
                                     wifi-config-status: root.wifi-config-status;
+                                    wifi-networks: root.wifi-networks;
+                                    wifi-scanning: root.wifi-scanning;
+                                    wifi-connect-status: root.wifi-connect-status;
                                     refresh => { root.refresh-network(); }
                                     apply-config(i, c) => { root.apply-net-config(i, c); }
+                                    scan-wifi => { root.scan-wifi(); }
+                                    connect-wifi(s, p) => { root.connect-wifi(s, p); }
                                 }
                                 if root.active-tab == 4 : About { app-version: root.app-version; }
                             }
