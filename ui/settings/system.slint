@@ -1,0 +1,17 @@
+import { Theme } from "../theme.slint";
+import { Eyebrow } from "../widgets/eyebrow.slint";
+import { SpecRow } from "../widgets/spec-row.slint";
+
+export component System inherits VerticalLayout {
+    in property <string> os;
+    in property <string> device;
+    in property <string> ram;
+    in property <string> storage;
+    spacing: 8px;
+
+    Eyebrow { text: "SYSTEM"; }
+    SpecRow { label: "OS"; value: root.os; }
+    SpecRow { label: "Device"; value: root.device; }
+    SpecRow { label: "RAM"; value: root.ram; }
+    SpecRow { label: "Storage"; value: root.storage; }
+}

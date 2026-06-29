@@ -1,0 +1,22 @@
+import { Theme } from "../theme.slint";
+import { Eyebrow } from "../widgets/eyebrow.slint";
+
+export component About inherits VerticalLayout {
+    in property <string> app-version;
+    spacing: 6px;
+
+    Eyebrow { text: "ABOUT"; }
+    HorizontalLayout {
+        Text {
+            text: "Denso Digital Reader";
+            color: Theme.txt-dim;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: "v\{root.app-version}";
+            color: Theme.txt-faint;
+            vertical-alignment: center;
+        }
+    }
+}

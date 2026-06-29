@@ -1,0 +1,17 @@
+import { Theme } from "../theme.slint";
+
+export component SpecRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    Text {
+        text: root.label;
+        color: Theme.txt-dim;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    Text {
+        text: root.value;
+        color: Theme.txt;
+        vertical-alignment: center;
+    }
+}

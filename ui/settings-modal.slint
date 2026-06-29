@@ -1,78 +1,12 @@
-import { Button, ComboBox, Switch } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { GoldButton } from "widgets/gold-button.slint";
-
-// Eyebrow label that groups a section of settings.
-component Eyebrow inherits Text {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    color: Theme.txt-faint;
-}
-
-// One labelled read-only spec row (label left, value right).
-component SpecRow inherits HorizontalLayout {
-    in property <string> label;
-    in property <string> value;
-    Text {
-        text: root.label;
-        color: Theme.txt-dim;
-        vertical-alignment: center;
-        horizontal-stretch: 1;
-    }
-    Text {
-        text: root.value;
-        color: Theme.txt;
-        vertical-alignment: center;
-    }
-}
-
-// Quiet, hover-highlighted text button for secondary actions.
-component TextButton inherits Rectangle {
-    in property <string> text;
-    callback clicked;
-    height: 32px;
-    border-radius: 6px;
-    horizontal-stretch: 0;
-    background: touch.has-hover ? Theme.panel-3 : transparent;
-    animate background { duration: 120ms; easing: ease-out; }
-
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        Text {
-            text: root.text;
-            color: touch.has-hover ? Theme.txt : Theme.txt-faint;
-            vertical-alignment: center;
-        }
-    }
-
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
-// Header close affordance (hover-highlighted ✕).
-component CloseGlyph inherits Rectangle {
-    callback clicked;
-    width: 28px;
-    height: 28px;
-    border-radius: 6px;
-    background: touch.has-hover ? Theme.panel-3 : transparent;
-    animate background { duration: 120ms; easing: ease-out; }
-
-    Text {
-        text: "✕";
-        font-size: 14px;
-        color: touch.has-hover ? Theme.txt : Theme.txt-faint;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
+import { CloseGlyph } from "widgets/close-glyph.slint";
+import { TextButton } from "widgets/text-button.slint";
+import { Appearance } from "settings/appearance.slint";
+import { Display } from "settings/display.slint";
+import { System } from "settings/system.slint";
+import { About } from "settings/about.slint";
 
 // Full-window modal: scrim + centered, elevated instrument-panel dialog
 // that hugs its content. Fades in on open.
@@ -152,87 +86,22 @@ export component SettingsModal inherits Rectangle {
                         }
                     }
 
-                    // ── Appearance ──────────────────────────
-                    VerticalLayout {
-                        spacing: 10px;
-
-                        Eyebrow { text: "APPEARANCE"; }
-                        HorizontalLayout {
-                            Text {
-                                text: "Dark mode";
-                                color: Theme.txt;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
-                            Switch {
-                                text: "";
-                                checked <=> Theme.dark;
-                                toggled => { root.theme-changed(Theme.dark); }
-                            }
-                        }
+                    Appearance {
+                        theme-changed(d) => { root.theme-changed(d); }
                     }
-
-                    // ── Display ─────────────────────────────
-                    VerticalLayout {
-                        spacing: 12px;
-
-                        Eyebrow { text: "DISPLAY"; }
-                        VerticalLayout {
-                            spacing: 6px;
-                            Text {
-                                text: "Resolution";
-                                color: Theme.txt-dim;
-                            }
-                            ComboBox {
-                                model: ["800 × 600", "1280 × 720", "1600 × 900", "1920 × 1080"];
-                                current-index <=> root.resolution-index;
-                            }
-                        }
-                        HorizontalLayout {
-                            Text {
-                                text: "Fullscreen";
-                                color: Theme.txt;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
-                            Switch {
-                                text: "";
-                                checked <=> root.fullscreen;
-                                toggled => { root.toggle-fullscreen(root.fullscreen); }
-                            }
-                        }
+                    Display {
+                        resolution-index <=> root.resolution-index;
+                        fullscreen <=> root.fullscreen;
+                        apply-resolution(i) => { root.apply-resolution(i); }
+                        toggle-fullscreen(f) => { root.toggle-fullscreen(f); }
                     }
-
-                    // ── System ──────────────────────────────
-                    VerticalLayout {
-                        spacing: 8px;
-
-                        Eyebrow { text: "SYSTEM"; }
-                        SpecRow { label: "OS"; value: root.hw-os; }
-                        SpecRow { label: "Device"; value: root.hw-device; }
-                        SpecRow { label: "RAM"; value: root.hw-ram; }
-                        SpecRow { label: "Storage"; value: root.hw-storage; }
+                    System {
+                        os: root.hw-os;
+                        device: root.hw-device;
+                        ram: root.hw-ram;
+                        storage: root.hw-storage;
                     }
-
-                    // ── About ───────────────────────────────
-                    VerticalLayout {
-                        spacing: 6px;
-
-                        Eyebrow { text: "ABOUT"; }
-                        HorizontalLayout {
-                            Text {
-                                text: "Denso Digital Reader";
-                                color: Theme.txt-dim;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
-                            Text {
-                                text: "v\{root.app-version}";
-                                color: Theme.txt-faint;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
+                    About { app-version: root.app-version; }
 
                     // ── Footer ──────────────────────────────
                     VerticalLayout {
