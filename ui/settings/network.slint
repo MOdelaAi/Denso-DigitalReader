@@ -3,6 +3,7 @@ import { Theme } from "../theme.slint";
 import { Eyebrow } from "../widgets/eyebrow.slint";
 import { SpecRow } from "../widgets/spec-row.slint";
 import { TextButton } from "../widgets/text-button.slint";
+import { HelpHint } from "../widgets/help-hint.slint";
 
 export struct NetStatus {
     connected: bool,
@@ -97,8 +98,10 @@ component WifiRowItem inherits VerticalLayout {
 }
 
 // A labelled text input row. `text` is two-way so the card can read it back.
+// A non-empty `hint` adds a hover "?" explaining the field.
 component FieldRow inherits HorizontalLayout {
     in property <string> label;
+    in property <string> hint;
     in-out property <string> text;
     spacing: 8px;
     Text {
@@ -110,6 +113,10 @@ component FieldRow inherits HorizontalLayout {
     LineEdit {
         text <=> root.text;
         horizontal-stretch: 1;
+    }
+    if root.hint != "" : HelpHint {
+        text: root.hint;
+        y: parent.height / 2 - self.height / 2;
     }
 }
 
@@ -231,15 +238,39 @@ component NetCard inherits Rectangle {
                 model: ["DHCP", "Static"];
                 horizontal-stretch: 1;
             }
+            HelpHint {
+                text: "DHCP gets these settings automatically from the network. Static lets you set them by hand.";
+                y: parent.height / 2 - self.height / 2;
+            }
         }
 
         if root.is-static : VerticalLayout {
             spacing: 6px;
-            FieldRow { label: "IP"; text <=> root.ip; }
-            FieldRow { label: "Prefix"; text <=> root.prefix; }
-            FieldRow { label: "Gateway"; text <=> root.gateway; }
-            FieldRow { label: "DNS 1"; text <=> root.dns1; }
-            FieldRow { label: "DNS 2"; text <=> root.dns2; }
+            FieldRow {
+                label: "IP";
+                text <=> root.ip;
+                hint: "This device's address on the network, e.g. 192.168.1.50. Must be unique.";
+            }
+            FieldRow {
+                label: "Prefix";
+                text <=> root.prefix;
+                hint: "Subnet size as a CIDR prefix length (0–32). 24 means 255.255.255.0.";
+            }
+            FieldRow {
+                label: "Gateway";
+                text <=> root.gateway;
+                hint: "The router address that traffic to other networks is sent through.";
+            }
+            FieldRow {
+                label: "DNS 1";
+                text <=> root.dns1;
+                hint: "Primary DNS server, which resolves names to addresses, e.g. 8.8.8.8.";
+            }
+            FieldRow {
+                label: "DNS 2";
+                text <=> root.dns2;
+                hint: "Backup DNS server, used when the primary is unreachable. Optional.";
+            }
         }
 
         HorizontalLayout {
