@@ -56,13 +56,20 @@ fn from_ui_config(iface: &str, u: &NetConfigUi) -> network::NetConfig {
     }
 }
 
-/// Scanned network → view-model row.
-fn to_wifi_row(n: &network::WifiNetwork) -> WifiRow {
-    WifiRow {
-        ssid: n.ssid.clone().into(),
-        signal: n.signal.clone().into(),
-        secured: n.secured,
-    }
+/// Scanned networks → view-model rows: flag the currently-connected SSID and
+/// sort it to the top (stable, so the rest keep their scan order).
+fn wifi_rows(nets: &[network::WifiNetwork], current_ssid: &str) -> Vec<WifiRow> {
+    let mut rows: Vec<WifiRow> = nets
+        .iter()
+        .map(|n| WifiRow {
+            ssid: n.ssid.clone().into(),
+            signal: n.signal.clone().into(),
+            secured: n.secured,
+            connected: !current_ssid.is_empty() && n.ssid == current_ssid,
+        })
+        .collect();
+    rows.sort_by_key(|r| !r.connected); // connected (false→0) first
+    rows
 }
 
 /// Saved config for `iface`, or a DHCP default when none is stored yet.
@@ -201,13 +208,15 @@ pub fn install_handlers(app: &AppWindow, db_conn: &Rc<Connection>, state: &State
             return;
         };
         app.set_wifi_scanning(true);
+        // Last-known connected SSID (from status), to float it to the top.
+        let current_ssid = app.get_wifi().ssid.to_string();
         let weak2 = app.as_weak();
         std::thread::spawn(move || {
             let result = network::backend().scan_wifi();
             let _ = weak2.upgrade_in_event_loop(move |app| {
                 match result {
                     Ok(nets) => {
-                        let rows: Vec<WifiRow> = nets.iter().map(to_wifi_row).collect();
+                        let rows = wifi_rows(&nets, &current_ssid);
                         app.set_wifi_networks(ModelRc::new(VecModel::from(rows)));
                     }
                     Err(e) => app.set_wifi_connect_status(format!("Scan failed: {e}").into()),
@@ -257,4 +266,31 @@ pub fn install_handlers(app: &AppWindow, db_conn: &Rc<Connection>, state: &State
             });
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn net(ssid: &str) -> network::WifiNetwork {
+        network::WifiNetwork { ssid: ssid.into(), signal: "50%".into(), secured: true }
+    }
+
+    #[test]
+    fn wifi_rows_floats_connected_to_top_and_flags_it() {
+        let rows = wifi_rows(&[net("A"), net("HOME"), net("B")], "HOME");
+        assert_eq!(rows[0].ssid.as_str(), "HOME");
+        assert!(rows[0].connected);
+        // the rest keep scan order and are not flagged
+        assert_eq!(rows[1].ssid.as_str(), "A");
+        assert_eq!(rows[2].ssid.as_str(), "B");
+        assert!(!rows[1].connected && !rows[2].connected);
+    }
+
+    #[test]
+    fn wifi_rows_marks_none_when_no_current_ssid() {
+        let rows = wifi_rows(&[net("A"), net("B")], "");
+        assert!(rows.iter().all(|r| !r.connected));
+        assert_eq!(rows[0].ssid.as_str(), "A");
+    }
 }
