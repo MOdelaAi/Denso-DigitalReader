@@ -7,10 +7,10 @@
 /// PSK is intentionally absent — it belongs in the OS secret store, never here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetConfig {
-    pub iface: String,            // "ethernet" | "wifi"
-    pub mode: String,             // "dhcp" | "static"
+    pub iface: String, // "ethernet" | "wifi"
+    pub mode: String,  // "dhcp" | "static"
     pub ip: Option<String>,
-    pub prefix: Option<u32>,      // CIDR length, e.g. 24
+    pub prefix: Option<u32>, // CIDR length, e.g. 24
     pub gateway: Option<String>,
     pub dns1: Option<String>,
     pub dns2: Option<String>,

@@ -121,7 +121,10 @@ mod tests {
         let mut changed = static_eth();
         changed.ip = Some("10.0.0.9".into());
         save(&c, &changed).unwrap();
-        assert_eq!(load(&c, "ethernet").unwrap().unwrap().ip, Some("10.0.0.9".into()));
+        assert_eq!(
+            load(&c, "ethernet").unwrap().unwrap().ip,
+            Some("10.0.0.9".into())
+        );
         // still one row, not two
         assert_eq!(all(&c).unwrap().len(), 1);
     }

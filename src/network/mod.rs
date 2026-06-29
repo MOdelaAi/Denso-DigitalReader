@@ -3,10 +3,10 @@
 //! [`model`], persistence in [`repo`], OS-specific work in the platform
 //! adapters.
 
-#[cfg(windows)]
-mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(windows)]
+mod windows;
 
 mod model;
 pub mod repo;
@@ -101,10 +101,16 @@ mod tests {
     }
     impl FakeBackend {
         fn new() -> Self {
-            FakeBackend { applied: RefCell::new(Vec::new()), fail_iface: None }
+            FakeBackend {
+                applied: RefCell::new(Vec::new()),
+                fail_iface: None,
+            }
         }
         fn failing(iface: &str) -> Self {
-            FakeBackend { applied: RefCell::new(Vec::new()), fail_iface: Some(iface.into()) }
+            FakeBackend {
+                applied: RefCell::new(Vec::new()),
+                fail_iface: Some(iface.into()),
+            }
         }
     }
     impl NetworkBackend for FakeBackend {

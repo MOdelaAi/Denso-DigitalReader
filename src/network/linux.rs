@@ -31,7 +31,10 @@ impl NetworkBackend for LinuxBackend {
         let mut wifi = InterfaceStatus::default();
         if let Some(d) = wifi_dev {
             wifi = device_ip(&d);
-            let w = run("nmcli", &["-t", "-f", "ACTIVE,SSID,SIGNAL", "device", "wifi"]);
+            let w = run(
+                "nmcli",
+                &["-t", "-f", "ACTIVE,SSID,SIGNAL", "device", "wifi"],
+            );
             let (ssid, signal) = parse_wifi(&w);
             wifi.ssid = ssid;
             wifi.signal = signal;
