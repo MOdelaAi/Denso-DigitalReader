@@ -11,3 +11,8 @@ sysinfo = "0.33"
 
 [build-dependencies]
 slint-build = "1.17.0"
+
+# Windows-only: embed the .exe icon (resized from assets/icon.png).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
