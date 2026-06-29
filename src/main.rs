@@ -13,25 +13,26 @@ struct Settings {
     height: u32,
 }
 
-fn settings_path() -> std::path::PathBuf {
+fn settings_path() -> Option<std::path::PathBuf> {
     std::env::current_exe()
-        .unwrap()
+        .ok()?
         .parent()
-        .unwrap()
-        .join("settings.json")
+        .map(|p| p.join("settings.json"))
 }
 
 fn load_settings() -> Settings {
-    std::fs::read_to_string(settings_path())
-        .ok()
+    settings_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Settings { width: 1600, height: 900 })
 }
 
 fn save_settings(width: u32, height: u32) {
-    let s = Settings { width, height };
-    if let Ok(json) = serde_json::to_string_pretty(&s) {
-        let _ = std::fs::write(settings_path(), json);
+    if let Some(path) = settings_path() {
+        let s = Settings { width, height };
+        if let Ok(json) = serde_json::to_string_pretty(&s) {
+            let _ = std::fs::write(path, json);
+        }
     }
 }
 
