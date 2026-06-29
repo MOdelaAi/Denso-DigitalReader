@@ -61,5 +61,7 @@ the pure helpers are unit-tested off-device.
   handled — deferred to on-device validation.
 - Platform backend tests are `#[cfg(...)]`-gated, so the passing test count
   differs between Windows and Linux.
-- `*.png` is git-ignored (`assets/icon.png` is embedded at build time by
-  `build.rs`, not committed as a build output).
+- `target/` and `*.png` are git-ignored. `assets/icon.png` predates the `*.png`
+  rule and stays tracked: it is a committed source asset that `build.rs` converts
+  to `icon.ico` under `target/` at build time (the generated `.ico` is the build
+  output, not committed).

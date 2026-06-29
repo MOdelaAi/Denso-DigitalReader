@@ -50,7 +50,7 @@ Baseline: 50 tests pass on Windows (platform-gated tests differ on Linux).
 - Each feature module is `mod.rs` (API) / `model.rs` (domain type) / `repo.rs` (persistence only). Access policy is the repo's API surface, not SQL grants.
 - Persistence is one SQLite file with version-gated migrations in `db/migrations.rs`.
 - OS-specific work sits behind the `NetworkBackend` trait (`network/windows/`, `network/linux.rs`). Keep both platforms in sync.
-- `*.png` is git-ignored (see `.gitignore`).
+- `target/` and `*.png` are git-ignored (see `.gitignore`). `assets/icon.png` predates the `*.png` rule and stays tracked — it is a committed source asset that `build.rs` converts to `icon.ico` under `target/` at build time.
 
 ## Workflow
 
