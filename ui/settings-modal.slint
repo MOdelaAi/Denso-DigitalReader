@@ -59,7 +59,9 @@ export component SettingsModal inherits Rectangle {
             alignment: center;
 
             dialog := Rectangle {
-                width: 640px;
+                // Grow with the window up to a comfortable cap; shrink safely
+                // on small windows.
+                width: min(960px, root.width - 96px);
                 // Never exceed the window; the content pane scrolls instead.
                 max-height: root.height - 48px;
                 background: Theme.panel-2;
