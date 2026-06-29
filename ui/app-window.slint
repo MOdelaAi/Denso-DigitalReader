@@ -1,4 +1,5 @@
-import { Button, ComboBox, HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, HorizontalBox, Switch, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
 
 export component AppWindow inherits Window {
     title: "Denso Digital Reader";
@@ -8,6 +9,7 @@ export component AppWindow inherits Window {
     property <bool> settings-open: false;
     in-out property <int> resolution-index: 2;
     callback apply-resolution(int);
+    callback theme-changed(bool);
 
     VerticalBox {
         padding: 0px;
@@ -16,7 +18,7 @@ export component AppWindow inherits Window {
         // Top button bar
         Rectangle {
             height: 40px;
-            background: #2c2c2c;
+            background: Theme.panel-2;
 
             HorizontalBox {
                 padding: 4px;
@@ -31,7 +33,7 @@ export component AppWindow inherits Window {
 
         // Main content area
         Rectangle {
-            background: #1e1e1e;
+            background: Theme.panel;
         }
     }
 
@@ -39,12 +41,12 @@ export component AppWindow inherits Window {
     if root.settings-open : Rectangle {
         width: 100%;
         height: 100%;
-        background: #00000099;
+        background: Theme.overlay;
 
         Rectangle {
             x: (root.width - self.width) / 2;
             y: (root.height - self.height) / 2;
-            background: #3c3c3c;
+            background: Theme.panel-3;
             border-radius: 8px;
 
             VerticalBox {
@@ -54,12 +56,18 @@ export component AppWindow inherits Window {
                 Text {
                     text: "Settings";
                     font-size: 18px;
-                    color: #ffffff;
+                    color: Theme.txt;
+                }
+
+                Switch {
+                    text: "Dark mode";
+                    checked <=> Theme.dark;
+                    toggled => { root.theme-changed(Theme.dark); }
                 }
 
                 Text {
                     text: "Resolution";
-                    color: #cccccc;
+                    color: Theme.txt-mid;
                 }
 
                 ComboBox {

@@ -1,0 +1,48 @@
+export global Theme {
+    in property <bool> dark: true;
+
+    // backgrounds / panels
+    out property <color> bg-grad-1: dark ? #232323 : #e8e8e8;
+    out property <color> panel:     dark ? #202020 : #f5f5f5;
+    out property <color> panel-1:   dark ? #202020 : #f5f5f5;
+    out property <color> panel-2:   dark ? #343434 : #e2e2e2;
+    out property <color> panel-3:   dark ? #373737 : #dcdcdc;
+
+    // accent (gold)
+    out property <color> gold:     dark ? #ffc646 : #e69822;
+    out property <color> gold-300: dark ? #ffeb3b : #d4b400;
+    out property <color> gold-400: dark ? #face48 : #d9a520;
+    out property <color> gold-500: dark ? #f8cc47 : #d7a31f;
+
+    // text
+    out property <color> txt:           dark ? #ffffff : #1a1a1a;
+    out property <color> txt-dim:       dark ? #e9e9e9 : #3a3a3a;
+    out property <color> txt-border:    dark ? #e69822 : #b8761a;
+    out property <color> txt-faint:     dark ? #9ca3af : #6b7280;
+    out property <color> txt-secondary: dark ? #e9e9e9 : #3a3a3a;
+    out property <color> txt-mid:       dark ? #cccccc : #555555;
+
+    // status (identical in both themes)
+    out property <color> status-ok:            #22c55e;
+    out property <color> status-ok-dark:       #16a34a;
+    out property <color> status-ok-light:      #4ade80;
+    out property <color> status-bad:           #ef4444;
+    out property <color> status-bad-dark:      #b91c1c;
+    out property <color> status-bad-light:     #f87171;
+    out property <color> status-warning:       #f59e0b;
+    out property <color> status-warning-dark:  #d97706;
+    out property <color> status-warning-light: #fbbf24;
+    out property <color> status-info:          #8b5cf6;
+    out property <color> status-info-dark:     #7c3aed;
+    out property <color> status-info-light:    #a78bfa;
+    out property <color> status-neutral:       #6b7280;
+    out property <color> status-neutral-dark:  #4b5563;
+    out property <color> status-neutral-light: #9ca3af;
+
+    // neutrals (identical in both themes)
+    out property <color> neutral-dark:   #4b5563;
+    out property <color> neutral-medium: #6b7280;
+
+    // modal scrim (not in reference; identical both themes)
+    out property <color> overlay: #00000099;
+}
