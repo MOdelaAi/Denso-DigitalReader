@@ -124,6 +124,9 @@ export component SettingsModal inherits Rectangle {
                             min-height: 360px;
                             VerticalLayout {
                                 width: content-scroll.visible-width;
+                                // Top-align so a short tab's spare height pools
+                                // at the bottom instead of stretching rows apart.
+                                alignment: start;
                                 if root.active-tab == 0 : Appearance {
                                     theme-changed(d) => { root.theme-changed(d); }
                                 }
