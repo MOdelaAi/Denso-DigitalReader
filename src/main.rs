@@ -2,10 +2,21 @@ slint::include_modules!();
 
 mod settings;
 mod hardware;
+mod network;
 
 use settings::Settings;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+fn to_net_status(s: &network::InterfaceStatus) -> NetStatus {
+    NetStatus {
+        connected: s.connected,
+        ip: s.ip.clone().into(),
+        gateway: s.gateway.clone().into(),
+        ssid: s.ssid.clone().into(),
+        signal: s.signal.clone().into(),
+    }
+}
 
 fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
@@ -84,6 +95,21 @@ fn main() -> Result<(), slint::PlatformError> {
             app.global::<Theme>().set_dark(d.dark);
         }
         *st.borrow_mut() = d;
+    });
+
+    let weak = app.as_weak();
+    app.on_refresh_network(move || {
+        let Some(app) = weak.upgrade() else { return; };
+        app.set_net_loading(true);
+        let weak2 = app.as_weak();
+        std::thread::spawn(move || {
+            let snap = network::backend().snapshot();
+            let _ = weak2.upgrade_in_event_loop(move |app| {
+                app.set_eth(to_net_status(&snap.ethernet));
+                app.set_wifi(to_net_status(&snap.wifi));
+                app.set_net_loading(false);
+            });
+        });
     });
 
     app.run()
