@@ -18,9 +18,12 @@ fn run(cmd: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// Value after the last ':' on a line, trimmed; strips a trailing "(Preferred)".
+/// Value after the FIRST ':' on a "key : value" line, trimmed; strips a
+/// trailing "(Preferred)". Splitting on the first colon (not the last) keeps
+/// values that themselves contain ':' intact — e.g. an SSID like "Corp:Net"
+/// or an IPv6 gateway "fe80::1".
 fn value_after_colon(line: &str) -> String {
-    match line.rsplit_once(':') {
+    match line.split_once(':') {
         Some((_, v)) => v.trim().replace("(Preferred)", "").trim().to_string(),
         None => String::new(),
     }
@@ -131,6 +134,13 @@ There is 1 interface on the system:
         assert!(connected);
         assert_eq!(ssid, "MyNetwork");
         assert_eq!(signal, "72%");
+    }
+
+    #[test]
+    fn value_with_colon_is_kept_intact() {
+        // SSID containing a colon, and an IPv6-style gateway, must survive.
+        assert_eq!(value_after_colon("    SSID                   : Corp:Net"), "Corp:Net");
+        assert_eq!(value_after_colon("   Default Gateway . . . : fe80::1"), "fe80::1");
     }
 
     #[test]
