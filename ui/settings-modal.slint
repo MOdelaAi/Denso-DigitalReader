@@ -1,0 +1,109 @@
+import { Button, ComboBox, Switch } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { GoldButton } from "widgets/gold-button.slint";
+
+// Eyebrow label that groups a section of settings.
+component Eyebrow inherits Text {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    color: Theme.txt-faint;
+}
+
+// Full-window modal: scrim + centered instrument-panel dialog.
+export component SettingsModal inherits Rectangle {
+    in-out property <int> resolution-index;
+    callback apply-resolution(int);
+    callback theme-changed(bool);
+    callback close();
+
+    width: 100%;
+    height: 100%;
+    background: Theme.overlay;
+
+    // Dialog card
+    Rectangle {
+        width: 380px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.panel-2;
+        border-width: 1px;
+        border-color: Theme.panel-3;
+        border-radius: 10px;
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 0px;
+
+            // ── Header ──────────────────────────────
+            Text {
+                text: "Settings";
+                font-size: 20px;
+                font-weight: 600;
+                color: Theme.txt;
+            }
+            Rectangle { height: 8px; }
+            // gold underline — the one bold accent
+            Rectangle {
+                height: 3px;
+                width: 48px;
+                border-radius: 2px;
+                background: Theme.gold;
+                horizontal-stretch: 0;
+            }
+            Rectangle { height: 24px; }
+
+            // ── Appearance ──────────────────────────
+            Eyebrow { text: "APPEARANCE"; }
+            Rectangle { height: 10px; }
+            HorizontalLayout {
+                Text {
+                    text: "Dark mode";
+                    color: Theme.txt;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Switch {
+                    text: "";
+                    checked <=> Theme.dark;
+                    toggled => { root.theme-changed(Theme.dark); }
+                }
+            }
+            Rectangle { height: 22px; }
+
+            // ── Display ─────────────────────────────
+            Eyebrow { text: "DISPLAY"; }
+            Rectangle { height: 10px; }
+            Text {
+                text: "Resolution";
+                color: Theme.txt-dim;
+            }
+            Rectangle { height: 6px; }
+            ComboBox {
+                model: ["800 × 600", "1280 × 720", "1600 × 900", "1920 × 1080"];
+                current-index <=> root.resolution-index;
+            }
+            Rectangle { height: 24px; }
+
+            // ── Footer ──────────────────────────────
+            Rectangle { height: 1px; background: Theme.panel-3; }
+            Rectangle { height: 16px; }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+
+                Button {
+                    text: "Close";
+                    clicked => { root.close(); }
+                }
+                GoldButton {
+                    text: "Apply";
+                    clicked => {
+                        root.apply-resolution(root.resolution-index);
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}

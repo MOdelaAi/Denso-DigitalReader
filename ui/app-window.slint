@@ -1,31 +1,9 @@
-import { Button, ComboBox, HorizontalBox, Switch, VerticalBox } from "std-widgets.slint";
+import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { SettingsModal } from "settings-modal.slint";
+
+// Re-export so Rust can reach the Theme global via app.global::<Theme>().
 export { Theme }
-
-component GoldButton inherits Rectangle {
-    in property <string> text;
-    callback clicked;
-    height: 30px;
-    border-radius: 6px;
-    background: touch.pressed ? Theme.gold-500
-              : touch.has-hover ? Theme.gold-300
-              : Theme.gold;
-
-    HorizontalBox {
-        padding-left: 14px;
-        padding-right: 14px;
-        Text {
-            text: root.text;
-            color: #202020;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-        }
-    }
-
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
 
 export component AppWindow inherits Window {
     title: "Denso Digital Reader";
@@ -63,64 +41,11 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Modal overlay
-    if root.settings-open : Rectangle {
-        width: 100%;
-        height: 100%;
-        background: Theme.overlay;
-
-        Rectangle {
-            x: (root.width - self.width) / 2;
-            y: (root.height - self.height) / 2;
-            background: Theme.panel-2;
-            border-width: 1px;
-            border-color: Theme.panel-3;
-            border-radius: 8px;
-
-            VerticalBox {
-                padding: 20px;
-                spacing: 12px;
-
-                Text {
-                    text: "Settings";
-                    font-size: 18px;
-                    color: Theme.txt;
-                }
-
-                Switch {
-                    text: "Dark mode";
-                    checked <=> Theme.dark;
-                    toggled => { root.theme-changed(Theme.dark); }
-                }
-
-                Text {
-                    text: "Resolution";
-                    color: Theme.txt-dim;
-                }
-
-                ComboBox {
-                    model: ["800 × 600", "1280 × 720", "1600 × 900", "1920 × 1080"];
-                    current-index <=> root.resolution-index;
-                }
-
-                HorizontalBox {
-                    alignment: end;
-                    spacing: 8px;
-
-                    Button {
-                        text: "Close";
-                        clicked => { root.settings-open = false; }
-                    }
-
-                    GoldButton {
-                        text: "Apply";
-                        clicked => {
-                            root.apply-resolution(root.resolution-index);
-                            root.settings-open = false;
-                        }
-                    }
-                }
-            }
-        }
+    // Settings modal overlay
+    if root.settings-open : SettingsModal {
+        resolution-index <=> root.resolution-index;
+        apply-resolution(i) => { root.apply-resolution(i); }
+        theme-changed(d) => { root.theme-changed(d); }
+        close => { root.settings-open = false; }
     }
 }
