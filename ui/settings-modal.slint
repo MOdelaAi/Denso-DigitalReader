@@ -125,10 +125,11 @@ export component SettingsModal inherits Rectangle {
                         // than the capped dialog (e.g. both interfaces Static).
                         content-scroll := ScrollView {
                             horizontal-stretch: 1;
-                            // Floor so short tabs don't collapse; the dialog's
-                            // max-height caps the top, and content scrolls
-                            // between the two.
-                            min-height: 240px;
+                            // Grow the content area with the window so the
+                            // dialog spans most of it vertically; floor at
+                            // 240px on small windows. Header/footer add ~210px,
+                            // kept under the dialog's max-height.
+                            min-height: max(240px, root.height - 300px);
                             VerticalLayout {
                                 width: content-scroll.visible-width;
                                 // Top-align so a short tab's spare height pools
