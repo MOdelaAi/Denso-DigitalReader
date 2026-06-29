@@ -1,7 +1,7 @@
-import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { Button, HorizontalBox, VerticalBox, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { SettingsModal } from "settings-modal.slint";
-import { NetStatus } from "settings/network.slint";
+import { NetStatus, NetConfigUi, WifiRow } from "settings/network.slint";
 
 // Re-export so Rust can reach the Theme global via app.global::<Theme>().
 export { Theme }
@@ -11,6 +11,12 @@ export component AppWindow inherits Window {
     icon: @image-url("../assets/icon.png");
     preferred-width: 1600px;
     preferred-height: 900px;
+
+    // Keep the stock std-widgets (LineEdit, ComboBox, …) in step with our
+    // custom Theme.dark instead of their default light palette.
+    property <ColorScheme> ui-scheme: Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    init => { Palette.color-scheme = root.ui-scheme; }
+    changed ui-scheme => { Palette.color-scheme = root.ui-scheme; }
 
     property <bool> settings-open: false;
     in-out property <int> resolution-index: 2;
@@ -23,7 +29,17 @@ export component AppWindow inherits Window {
     in property <NetStatus> eth;
     in property <NetStatus> wifi;
     in property <bool> net-loading;
+    in property <NetConfigUi> eth-config;
+    in property <NetConfigUi> wifi-config;
+    in property <string> eth-config-status;
+    in property <string> wifi-config-status;
+    in property <[WifiRow]> wifi-networks;
+    in property <bool> wifi-scanning;
+    in property <string> wifi-connect-status;
     callback refresh-network();
+    callback apply-net-config(string, NetConfigUi);
+    callback scan-wifi();
+    callback connect-wifi(string, string);
     callback apply-resolution(int);
     callback theme-changed(bool);
     callback toggle-fullscreen(bool);
@@ -67,7 +83,17 @@ export component AppWindow inherits Window {
         eth: root.eth;
         wifi: root.wifi;
         net-loading: root.net-loading;
+        eth-config: root.eth-config;
+        wifi-config: root.wifi-config;
+        eth-config-status: root.eth-config-status;
+        wifi-config-status: root.wifi-config-status;
+        wifi-networks: root.wifi-networks;
+        wifi-scanning: root.wifi-scanning;
+        wifi-connect-status: root.wifi-connect-status;
         refresh-network => { root.refresh-network(); }
+        apply-net-config(i, c) => { root.apply-net-config(i, c); }
+        scan-wifi => { root.scan-wifi(); }
+        connect-wifi(s, p) => { root.connect-wifi(s, p); }
         apply-resolution(i) => { root.apply-resolution(i); }
         theme-changed(d) => { root.theme-changed(d); }
         toggle-fullscreen(f) => { root.toggle-fullscreen(f); }
