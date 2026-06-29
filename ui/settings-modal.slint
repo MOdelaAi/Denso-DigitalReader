@@ -135,6 +135,8 @@ export component SettingsModal inherits Rectangle {
                                 // Top-align so a short tab's spare height pools
                                 // at the bottom instead of stretching rows apart.
                                 alignment: start;
+                                // Keep content off the scrollbar on the right.
+                                padding-right: 12px;
                                 if root.active-tab == 0 : Appearance {
                                     theme-changed(d) => { root.theme-changed(d); }
                                 }
