@@ -1,88 +1,82 @@
 slint::include_modules!();
 
+mod settings;
+
+use settings::Settings;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const PRESETS: [(u32, u32); 4] = [
-    (800, 600),
-    (1280, 720),
-    (1600, 900),
-    (1920, 1080),
-];
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Settings {
-    width: u32,
-    height: u32,
-    #[serde(default = "default_dark")]
-    dark: bool,
-}
-
-fn default_dark() -> bool {
-    true
-}
-
-fn settings_path() -> Option<std::path::PathBuf> {
-    std::env::current_exe()
-        .ok()?
-        .parent()
-        .map(|p| p.join("settings.json"))
-}
-
-fn load_settings() -> Settings {
-    settings_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Settings { width: 1600, height: 900, dark: true })
-}
-
-fn save_settings(settings: &Settings) {
-    if let Some(path) = settings_path() {
-        if let Ok(json) = serde_json::to_string_pretty(settings) {
-            let _ = std::fs::write(path, json);
-        }
-    }
-}
-
 fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
+    let state = Rc::new(RefCell::new(settings::load()));
 
-    let settings = Rc::new(RefCell::new(load_settings()));
+    app.set_app_version(env!("CARGO_PKG_VERSION").into());
 
+    // Apply persisted state at startup.
     {
-        let s = settings.borrow();
-        app.window().set_size(slint::LogicalSize::new(
-            s.width as f32,
-            s.height as f32,
-        ));
-        let index = PRESETS
-            .iter()
-            .position(|&(w, h)| w == s.width && h == s.height)
-            .unwrap_or(2) as i32;
-        app.set_resolution_index(index);
+        let s = state.borrow();
+        app.window()
+            .set_size(slint::LogicalSize::new(s.width as f32, s.height as f32));
+        app.window().set_fullscreen(s.fullscreen);
+        app.set_resolution_index(settings::preset_index(s.width, s.height));
+        app.set_fullscreen(s.fullscreen);
         app.global::<Theme>().set_dark(s.dark);
     }
 
-    let app_weak = app.as_weak();
-    let settings_res = settings.clone();
+    // Resolution Apply — resize + persist (preserves other fields).
+    let weak = app.as_weak();
+    let st = state.clone();
     app.on_apply_resolution(move |index| {
-        let (w, h) = PRESETS[index as usize];
+        let (w, h) = settings::PRESETS[index as usize];
         {
-            let mut s = settings_res.borrow_mut();
+            let mut s = st.borrow_mut();
             s.width = w;
             s.height = h;
-            save_settings(&s);
+            settings::save(&s);
         }
-        if let Some(app) = app_weak.upgrade() {
-            app.window().set_size(slint::LogicalSize::new(w as f32, h as f32));
+        if let Some(app) = weak.upgrade() {
+            app.window()
+                .set_size(slint::LogicalSize::new(w as f32, h as f32));
         }
     });
 
-    let settings_theme = settings.clone();
+    // Theme toggle — instant persist.
+    let st = state.clone();
     app.on_theme_changed(move |dark| {
-        let mut s = settings_theme.borrow_mut();
+        let mut s = st.borrow_mut();
         s.dark = dark;
-        save_settings(&s);
+        settings::save(&s);
+    });
+
+    // Fullscreen toggle — apply + persist.
+    let weak = app.as_weak();
+    let st = state.clone();
+    app.on_toggle_fullscreen(move |fullscreen| {
+        {
+            let mut s = st.borrow_mut();
+            s.fullscreen = fullscreen;
+            settings::save(&s);
+        }
+        if let Some(app) = weak.upgrade() {
+            app.window().set_fullscreen(fullscreen);
+        }
+    });
+
+    // Reset to defaults — persist defaults and reflect them in the UI.
+    let weak = app.as_weak();
+    let st = state.clone();
+    app.on_reset_defaults(move || {
+        let d = Settings::default();
+        settings::save(&d);
+        if let Some(app) = weak.upgrade() {
+            app.window().set_fullscreen(d.fullscreen);
+            app.window()
+                .set_size(slint::LogicalSize::new(d.width as f32, d.height as f32));
+            app.set_resolution_index(settings::preset_index(d.width, d.height));
+            app.set_fullscreen(d.fullscreen);
+            app.global::<Theme>().set_dark(d.dark);
+        }
+        *st.borrow_mut() = d;
     });
 
     app.run()

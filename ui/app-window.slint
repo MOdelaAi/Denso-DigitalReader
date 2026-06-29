@@ -12,8 +12,12 @@ export component AppWindow inherits Window {
 
     property <bool> settings-open: false;
     in-out property <int> resolution-index: 2;
+    in-out property <bool> fullscreen: false;
+    in property <string> app-version;
     callback apply-resolution(int);
     callback theme-changed(bool);
+    callback toggle-fullscreen(bool);
+    callback reset-defaults();
 
     VerticalBox {
         padding: 0px;
@@ -44,8 +48,12 @@ export component AppWindow inherits Window {
     // Settings modal overlay
     if root.settings-open : SettingsModal {
         resolution-index <=> root.resolution-index;
+        fullscreen <=> root.fullscreen;
+        app-version: root.app-version;
         apply-resolution(i) => { root.apply-resolution(i); }
         theme-changed(d) => { root.theme-changed(d); }
+        toggle-fullscreen(f) => { root.toggle-fullscreen(f); }
+        reset-defaults => { root.reset-defaults(); }
         close => { root.settings-open = false; }
     }
 }
