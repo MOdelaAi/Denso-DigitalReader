@@ -1,6 +1,7 @@
 slint::include_modules!();
 
 mod settings;
+mod hardware;
 
 use settings::Settings;
 use std::cell::RefCell;
@@ -11,6 +12,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let state = Rc::new(RefCell::new(settings::load()));
 
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
+
+    let hw = hardware::collect();
+    app.set_hw_os(hw.os.into());
+    app.set_hw_device(hw.device.into());
+    app.set_hw_ram(hw.ram.into());
+    app.set_hw_storage(hw.storage.into());
 
     // Apply persisted state at startup.
     {
