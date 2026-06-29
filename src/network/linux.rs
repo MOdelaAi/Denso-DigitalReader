@@ -1,3 +1,7 @@
+//! Linux network backend. Drives the OS through `nmcli` (NetworkManager):
+//! status via device/Wi-Fi queries, config apply, and Wi-Fi scan/join. Mirrors
+//! the [`super::windows`] backend behind the shared [`NetworkBackend`] trait.
+
 use super::{InterfaceStatus, NetConfig, NetworkBackend, NetworkSnapshot, WifiNetwork};
 
 pub struct LinuxBackend;
