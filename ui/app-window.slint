@@ -2,6 +2,31 @@ import { Button, ComboBox, HorizontalBox, Switch, VerticalBox } from "std-widget
 import { Theme } from "theme.slint";
 export { Theme }
 
+component GoldButton inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    height: 30px;
+    border-radius: 6px;
+    background: touch.pressed ? Theme.gold-500
+              : touch.has-hover ? Theme.gold-300
+              : Theme.gold;
+
+    HorizontalBox {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.text;
+            color: #202020;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Denso Digital Reader";
     preferred-width: 1600px;
@@ -47,7 +72,9 @@ export component AppWindow inherits Window {
         Rectangle {
             x: (root.width - self.width) / 2;
             y: (root.height - self.height) / 2;
-            background: Theme.panel-3;
+            background: Theme.panel-2;
+            border-width: 1px;
+            border-color: Theme.panel-3;
             border-radius: 8px;
 
             VerticalBox {
@@ -68,7 +95,7 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: "Resolution";
-                    color: Theme.txt-mid;
+                    color: Theme.txt-dim;
                 }
 
                 ComboBox {
@@ -85,7 +112,7 @@ export component AppWindow inherits Window {
                         clicked => { root.settings-open = false; }
                     }
 
-                    Button {
+                    GoldButton {
                         text: "Apply";
                         clicked => {
                             root.apply-resolution(root.resolution-index);

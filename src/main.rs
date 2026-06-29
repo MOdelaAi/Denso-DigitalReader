@@ -1,5 +1,8 @@
 slint::include_modules!();
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 const PRESETS: [(u32, u32); 4] = [
     (800, 600),
     (1280, 720),
@@ -42,37 +45,42 @@ fn save_settings(settings: &Settings) {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
-    let settings = load_settings();
-
     let app = AppWindow::new()?;
 
-    app.window().set_size(slint::LogicalSize::new(
-        settings.width as f32,
-        settings.height as f32,
-    ));
+    let settings = Rc::new(RefCell::new(load_settings()));
 
-    let index = PRESETS
-        .iter()
-        .position(|&(w, h)| w == settings.width && h == settings.height)
-        .unwrap_or(2) as i32;
-    app.set_resolution_index(index);
-
-    app.global::<Theme>().set_dark(settings.dark);
+    {
+        let s = settings.borrow();
+        app.window().set_size(slint::LogicalSize::new(
+            s.width as f32,
+            s.height as f32,
+        ));
+        let index = PRESETS
+            .iter()
+            .position(|&(w, h)| w == s.width && h == s.height)
+            .unwrap_or(2) as i32;
+        app.set_resolution_index(index);
+        app.global::<Theme>().set_dark(s.dark);
+    }
 
     let app_weak = app.as_weak();
+    let settings_res = settings.clone();
     app.on_apply_resolution(move |index| {
         let (w, h) = PRESETS[index as usize];
-        let mut s = load_settings();
-        s.width = w;
-        s.height = h;
-        save_settings(&s);
+        {
+            let mut s = settings_res.borrow_mut();
+            s.width = w;
+            s.height = h;
+            save_settings(&s);
+        }
         if let Some(app) = app_weak.upgrade() {
             app.window().set_size(slint::LogicalSize::new(w as f32, h as f32));
         }
     });
 
+    let settings_theme = settings.clone();
     app.on_theme_changed(move |dark| {
-        let mut s = load_settings();
+        let mut s = settings_theme.borrow_mut();
         s.dark = dark;
         save_settings(&s);
     });
