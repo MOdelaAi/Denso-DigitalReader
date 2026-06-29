@@ -1,6 +1,7 @@
 import { Button, HorizontalBox, VerticalBox, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { SettingsModal } from "settings-modal.slint";
+import { CameraModal } from "camera-modal.slint";
 import { NetStatus, NetConfigUi, WifiRow } from "settings/network.slint";
 
 // Re-export so Rust can reach the Theme global via app.global::<Theme>().
@@ -19,6 +20,7 @@ export component AppWindow inherits Window {
     changed ui-scheme => { Palette.color-scheme = root.ui-scheme; }
 
     property <bool> settings-open: false;
+    property <bool> camera-open: false;
     in-out property <int> resolution-index: 2;
     in-out property <bool> fullscreen: false;
     in property <string> app-version;
@@ -58,6 +60,10 @@ export component AppWindow inherits Window {
                 padding: 4px;
                 alignment: end;
 
+                Button {
+                    text: "Camera";
+                    clicked => { root.camera-open = true; }
+                }
                 Button {
                     text: "Settings";
                     clicked => { root.settings-open = true; }
@@ -99,5 +105,10 @@ export component AppWindow inherits Window {
         toggle-fullscreen(f) => { root.toggle-fullscreen(f); }
         reset-defaults => { root.reset-defaults(); }
         close => { root.settings-open = false; }
+    }
+
+    // Camera modal overlay (placeholder)
+    if root.camera-open : CameraModal {
+        close => { root.camera-open = false; }
     }
 }

@@ -1,0 +1,106 @@
+import { Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { CloseGlyph } from "widgets/close-glyph.slint";
+
+// Placeholder camera modal: same chrome as the settings modal (scrim, centered
+// elevated dialog, fade-in, close), with a preview area to be filled in later.
+export component CameraModal inherits Rectangle {
+    callback close();
+
+    // Drives the fade-in (false -> true on creation).
+    property <bool> shown: false;
+    init => { shown = true; }
+
+    width: 100%;
+    height: 100%;
+    background: Theme.overlay;
+    opacity: shown ? 1.0 : 0.0;
+    animate opacity { duration: 160ms; easing: ease-out; }
+
+    VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+
+            dialog := Rectangle {
+                width: min(960px, root.width - 96px);
+                max-height: root.height - 48px;
+                background: Theme.panel-2;
+                border-width: 1px;
+                border-color: Theme.panel-3;
+                border-radius: 12px;
+
+                drop-shadow-blur: 28px;
+                drop-shadow-color: #00000088;
+                drop-shadow-offset-y: 10px;
+
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 22px;
+
+                    // ── Header ──
+                    VerticalLayout {
+                        spacing: 10px;
+                        HorizontalLayout {
+                            Text {
+                                text: "Camera";
+                                font-size: 20px;
+                                font-weight: 600;
+                                color: Theme.txt;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            CloseGlyph {
+                                clicked => { root.close(); }
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            Rectangle {
+                                width: 48px;
+                                min-height: 3px;
+                                max-height: 3px;
+                                border-radius: 2px;
+                                background: Theme.gold;
+                            }
+                        }
+                    }
+
+                    // ── Preview placeholder ──
+                    Rectangle {
+                        min-height: max(240px, root.height - 320px);
+                        background: Theme.panel;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: Theme.panel-3;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text {
+                                text: "Camera preview";
+                                color: Theme.txt-dim;
+                                font-size: 16px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Coming soon";
+                                color: Theme.txt-faint;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // ── Footer ──
+                    HorizontalLayout {
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "Close";
+                            clicked => { root.close(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
