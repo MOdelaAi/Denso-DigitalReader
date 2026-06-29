@@ -30,7 +30,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let state = Rc::new(RefCell::new(settings::load(&db_conn)));
 
-    wiring::apply_startup(&app, &state);
+    wiring::apply_startup(&app, &db_conn, &state);
     wiring::install_handlers(&app, &db_conn, &state);
 
     app.run()

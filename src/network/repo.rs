@@ -5,10 +5,7 @@
 use super::NetConfig;
 use rusqlite::Connection;
 
-// `save`/`load` await the network-config editor UI; `all` is already used by
-// boot reassert. Tested now, wired when the editor lands.
 /// Upsert one interface's configuration, keyed by `iface`.
-#[allow(dead_code)]
 pub fn save(conn: &Connection, c: &NetConfig) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO net_config (iface, mode, ip, prefix, gateway, dns1, dns2, ssid, security) \
@@ -41,7 +38,6 @@ fn from_row(row: &rusqlite::Row) -> rusqlite::Result<NetConfig> {
 const COLUMNS: &str = "iface, mode, ip, prefix, gateway, dns1, dns2, ssid, security";
 
 /// Load one interface's saved configuration, or `None` if unset.
-#[allow(dead_code)]
 pub fn load(conn: &Connection, iface: &str) -> rusqlite::Result<Option<NetConfig>> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM net_config WHERE iface = ?1"),

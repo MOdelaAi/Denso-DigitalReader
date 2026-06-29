@@ -5,7 +5,7 @@
 
 use crate::settings::Settings;
 use crate::{hardware, network, settings};
-use crate::{AppWindow, NetStatus, Theme};
+use crate::{AppWindow, NetConfigUi, NetStatus, Theme};
 use rusqlite::Connection;
 use slint::ComponentHandle;
 use std::cell::RefCell;
@@ -23,9 +23,60 @@ fn to_net_status(s: &network::InterfaceStatus) -> NetStatus {
     }
 }
 
+/// Domain config → editable view model (empty string for unset fields).
+fn to_ui_config(c: &network::NetConfig) -> NetConfigUi {
+    NetConfigUi {
+        mode: c.mode.clone().into(),
+        ip: c.ip.clone().unwrap_or_default().into(),
+        prefix: c.prefix.map(|p| p.to_string()).unwrap_or_default().into(),
+        gateway: c.gateway.clone().unwrap_or_default().into(),
+        dns1: c.dns1.clone().unwrap_or_default().into(),
+        dns2: c.dns2.clone().unwrap_or_default().into(),
+    }
+}
+
+/// Editable view model → domain config. Blank fields become `None`; an
+/// unparseable prefix becomes `None` (apply will reject a static config that
+/// then lacks a prefix). Wi-Fi join fields are out of scope here.
+fn from_ui_config(iface: &str, u: &NetConfigUi) -> network::NetConfig {
+    let opt = |s: &slint::SharedString| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+    network::NetConfig {
+        iface: iface.to_string(),
+        mode: u.mode.to_string(),
+        ip: opt(&u.ip),
+        prefix: u.prefix.trim().parse::<u32>().ok(),
+        gateway: opt(&u.gateway),
+        dns1: opt(&u.dns1),
+        dns2: opt(&u.dns2),
+        ssid: None,
+        security: None,
+    }
+}
+
+/// Saved config for `iface`, or a DHCP default when none is stored yet.
+fn load_config_or_default(conn: &Connection, iface: &str) -> network::NetConfig {
+    network::repo::load(conn, iface)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| network::NetConfig {
+            iface: iface.to_string(),
+            mode: "dhcp".to_string(),
+            ip: None,
+            prefix: None,
+            gateway: None,
+            dns1: None,
+            dns2: None,
+            ssid: None,
+            security: None,
+        })
+}
+
 /// Populate read-only fields (version, hardware) and apply persisted settings
 /// to the window before it is shown.
-pub fn apply_startup(app: &AppWindow, state: &State) {
+pub fn apply_startup(app: &AppWindow, db_conn: &Rc<Connection>, state: &State) {
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
 
     let hw = hardware::collect();
@@ -33,6 +84,10 @@ pub fn apply_startup(app: &AppWindow, state: &State) {
     app.set_hw_device(hw.device.into());
     app.set_hw_ram(hw.ram.into());
     app.set_hw_storage(hw.storage.into());
+
+    // Seed the network-config editors from saved config (DHCP if unset).
+    app.set_eth_config(to_ui_config(&load_config_or_default(db_conn, "ethernet")));
+    app.set_wifi_config(to_ui_config(&load_config_or_default(db_conn, "wifi")));
 
     let s = state.borrow();
     app.window()
@@ -104,6 +159,30 @@ pub fn install_handlers(app: &AppWindow, db_conn: &Rc<Connection>, state: &State
             app.global::<Theme>().set_dark(d.dark);
         }
         *st.borrow_mut() = d;
+    });
+
+    // Apply network config — persist (app owns the truth) then push to the OS,
+    // surfacing the outcome as the per-interface status line.
+    let weak = app.as_weak();
+    let dbc = db_conn.clone();
+    app.on_apply_net_config(move |iface, ui| {
+        let cfg = from_ui_config(iface.as_str(), &ui);
+        let _ = network::repo::save(&dbc, &cfg);
+        let result = network::backend().apply_config(&cfg);
+        if let Some(app) = weak.upgrade() {
+            let status: slint::SharedString = match &result {
+                Ok(()) => "Applied".into(),
+                Err(e) => format!("Error: {e}").into(),
+            };
+            let ui_cfg = to_ui_config(&cfg);
+            if iface.as_str() == "wifi" {
+                app.set_wifi_config(ui_cfg);
+                app.set_wifi_config_status(status);
+            } else {
+                app.set_eth_config(ui_cfg);
+                app.set_eth_config_status(status);
+            }
+        }
     });
 
     // Network status refresh — runs off-thread, posts results back to the UI.

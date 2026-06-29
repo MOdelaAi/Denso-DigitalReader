@@ -8,7 +8,7 @@ import { Appearance } from "settings/appearance.slint";
 import { Display } from "settings/display.slint";
 import { System } from "settings/system.slint";
 import { About } from "settings/about.slint";
-import { Network, NetStatus } from "settings/network.slint";
+import { Network, NetStatus, NetConfigUi } from "settings/network.slint";
 
 // Full-window modal: scrim + centered, elevated instrument-panel dialog
 // that hugs its content. Fades in on open.
@@ -23,7 +23,12 @@ export component SettingsModal inherits Rectangle {
     in property <NetStatus> eth;
     in property <NetStatus> wifi;
     in property <bool> net-loading;
+    in property <NetConfigUi> eth-config;
+    in property <NetConfigUi> wifi-config;
+    in property <string> eth-config-status;
+    in property <string> wifi-config-status;
     callback refresh-network();
+    callback apply-net-config(string, NetConfigUi);
     property <int> active-tab: 0;
     callback apply-resolution(int);
     callback theme-changed(bool);
@@ -126,7 +131,12 @@ export component SettingsModal inherits Rectangle {
                                 eth: root.eth;
                                 wifi: root.wifi;
                                 loading: root.net-loading;
+                                eth-config: root.eth-config;
+                                wifi-config: root.wifi-config;
+                                eth-config-status: root.eth-config-status;
+                                wifi-config-status: root.wifi-config-status;
                                 refresh => { root.refresh-network(); }
+                                apply-config(i, c) => { root.apply-net-config(i, c); }
                             }
                             if root.active-tab == 4 : About { app-version: root.app-version; }
                         }
