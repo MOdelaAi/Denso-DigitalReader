@@ -2,8 +2,8 @@ import { Button, ComboBox, HorizontalBox, VerticalBox } from "std-widgets.slint"
 
 export component AppWindow inherits Window {
     title: "Denso Digital Reader";
-    width: 1600px;
-    height: 900px;
+    preferred-width: 1600px;
+    preferred-height: 900px;
 
     property <bool> settings-open: false;
     in-out property <int> resolution-index: 2;
