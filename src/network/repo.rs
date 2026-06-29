@@ -1,7 +1,6 @@
 //! Persistence for [`NetConfig`] in the SQLite `net_config` table. User-
-//! editable (full CRUD), one row per interface. Mirrors the `settings`
-//! repo: typed struct in Rust, rows in the DB, errors surfaced as `Result`
-//! so callers can report a failed write.
+//! editable (full CRUD), one row per interface. Typed struct in Rust, rows in
+//! the DB; errors surfaced as `Result` so callers can report a failed write.
 
 use super::NetConfig;
 use rusqlite::Connection;

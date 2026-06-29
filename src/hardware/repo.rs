@@ -1,11 +1,8 @@
-use sysinfo::{Disks, System};
+//! Collects the host's hardware spec via `sysinfo`. Live, read-only: there is
+//! no persistence here by design.
 
-pub struct HardwareSpec {
-    pub os: String,
-    pub device: String,
-    pub ram: String,
-    pub storage: String,
-}
+use super::HardwareSpec;
+use sysinfo::{Disks, System};
 
 pub fn collect() -> HardwareSpec {
     let mut sys = System::new();

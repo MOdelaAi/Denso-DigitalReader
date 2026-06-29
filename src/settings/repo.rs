@@ -1,48 +1,17 @@
-//! Persisted application settings (window size, theme, fullscreen).
-//!
-//! Stored in the `settings` key/value table of the SQLite base (see
-//! [`crate::db`]). User-editable: this module exposes read (`load`) and
-//! write (`save`) over the whole struct. All paths fail silently to a
-//! sensible default — a DB hiccup must never crash or block the UI.
+//! Settings persistence over the `settings` key/value table. User-editable
+//! (read + write the whole struct). All paths fail silently to a sensible
+//! default — a DB hiccup must never crash or block the UI. Also owns the
+//! resolution presets and the one-time `settings.json` import.
 
+use super::Settings;
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Selectable window resolutions, in display order. Index 2 (1600×900) is
 /// the default.
 pub const PRESETS: [(u32, u32); 4] = [(800, 600), (1280, 720), (1600, 900), (1920, 1080)];
 
-const DEFAULT_WIDTH: u32 = 1600;
-const DEFAULT_HEIGHT: u32 = 900;
 const DEFAULT_INDEX: i32 = 2;
-
-/// In-memory, typed view of the persisted settings. `Serialize`/`Deserialize`
-/// are retained only to parse a legacy `settings.json` during one-time import.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Settings {
-    pub width: u32,
-    pub height: u32,
-    #[serde(default = "default_dark")]
-    pub dark: bool,
-    #[serde(default)]
-    pub fullscreen: bool,
-}
-
-fn default_dark() -> bool {
-    true
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Settings {
-            width: DEFAULT_WIDTH,
-            height: DEFAULT_HEIGHT,
-            dark: true,
-            fullscreen: false,
-        }
-    }
-}
 
 /// Read a single setting's raw value, or `None` if absent or unreadable.
 fn get(conn: &Connection, key: &str) -> Option<String> {
@@ -114,14 +83,6 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&c).unwrap();
         c
-    }
-
-    #[test]
-    fn default_is_dark_1600x900_windowed() {
-        let s = Settings::default();
-        assert_eq!((s.width, s.height), (1600, 900));
-        assert!(s.dark);
-        assert!(!s.fullscreen);
     }
 
     #[test]

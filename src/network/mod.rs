@@ -1,42 +1,19 @@
+//! Network feature: live status (`snapshot`) plus user-editable config that
+//! the app owns and reasserts to the OS (`reassert`). Domain types live in
+//! [`model`], persistence in [`repo`], OS-specific work in the platform
+//! adapters.
+
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
-pub mod config;
+mod model;
+pub mod repo;
+
+pub use model::{InterfaceStatus, NetConfig, NetworkSnapshot};
 
 use rusqlite::Connection;
-
-/// User-editable, persisted network configuration for one interface. The app
-/// owns this (source of truth) and reasserts it to the OS on boot. The WiFi
-/// PSK is intentionally absent — it belongs in the OS secret store, never here.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NetConfig {
-    pub iface: String,            // "ethernet" | "wifi"
-    pub mode: String,             // "dhcp" | "static"
-    pub ip: Option<String>,
-    pub prefix: Option<u32>,      // CIDR length, e.g. 24
-    pub gateway: Option<String>,
-    pub dns1: Option<String>,
-    pub dns2: Option<String>,
-    pub ssid: Option<String>,     // wifi only
-    pub security: Option<String>, // wifi only (e.g. "wpa2"); the PSK is not stored
-}
-
-#[derive(Default, Clone, PartialEq, Debug)]
-pub struct InterfaceStatus {
-    pub connected: bool,
-    pub ip: String,
-    pub gateway: String,
-    pub ssid: String,
-    pub signal: String,
-}
-
-#[derive(Default, Clone, Debug)]
-pub struct NetworkSnapshot {
-    pub ethernet: InterfaceStatus,
-    pub wifi: InterfaceStatus,
-}
 
 pub trait NetworkBackend {
     fn snapshot(&self) -> NetworkSnapshot;
@@ -57,24 +34,6 @@ impl NetworkBackend for NullBackend {
     }
 }
 
-/// Reassert every saved interface configuration to the OS — the app is the
-/// source of truth, so this runs at boot. Best-effort and **non-fatal**: a
-/// failed apply (no privilege, adapter error) is collected and returned as
-/// `(iface, message)` rather than aborting startup.
-pub fn reassert(conn: &Connection, backend: &dyn NetworkBackend) -> Vec<(String, String)> {
-    let configs = match config::all(conn) {
-        Ok(c) => c,
-        Err(e) => return vec![("<db>".to_string(), e.to_string())],
-    };
-    let mut errors = Vec::new();
-    for c in configs {
-        if let Err(e) = backend.apply_config(&c) {
-            errors.push((c.iface, e));
-        }
-    }
-    errors
-}
-
 pub fn backend() -> Box<dyn NetworkBackend> {
     #[cfg(windows)]
     {
@@ -88,6 +47,24 @@ pub fn backend() -> Box<dyn NetworkBackend> {
     {
         Box::new(NullBackend)
     }
+}
+
+/// Reassert every saved interface configuration to the OS — the app is the
+/// source of truth, so this runs at boot. Best-effort and **non-fatal**: a
+/// failed apply (no privilege, adapter error) is collected and returned as
+/// `(iface, message)` rather than aborting startup.
+pub fn reassert(conn: &Connection, backend: &dyn NetworkBackend) -> Vec<(String, String)> {
+    let configs = match repo::all(conn) {
+        Ok(c) => c,
+        Err(e) => return vec![("<db>".to_string(), e.to_string())],
+    };
+    let mut errors = Vec::new();
+    for c in configs {
+        if let Err(e) = backend.apply_config(&c) {
+            errors.push((c.iface, e));
+        }
+    }
+    errors
 }
 
 #[cfg(test)]
@@ -154,8 +131,8 @@ mod tests {
     #[test]
     fn reassert_applies_each_saved_config() {
         let c = db();
-        config::save(&c, &cfg("ethernet")).unwrap();
-        config::save(&c, &cfg("wifi")).unwrap();
+        repo::save(&c, &cfg("ethernet")).unwrap();
+        repo::save(&c, &cfg("wifi")).unwrap();
 
         let backend = FakeBackend::new();
         let errors = reassert(&c, &backend);
@@ -176,8 +153,8 @@ mod tests {
     #[test]
     fn reassert_collects_errors_and_keeps_going() {
         let c = db();
-        config::save(&c, &cfg("ethernet")).unwrap();
-        config::save(&c, &cfg("wifi")).unwrap();
+        repo::save(&c, &cfg("ethernet")).unwrap();
+        repo::save(&c, &cfg("wifi")).unwrap();
 
         let backend = FakeBackend::failing("ethernet");
         let errors = reassert(&c, &backend);
