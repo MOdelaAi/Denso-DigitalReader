@@ -22,16 +22,60 @@ export struct NetConfigUi {
     dns2: string,
 }
 
-// Connection card for one interface.
+// A labelled text input row. `text` is two-way so the card can read it back.
+component FieldRow inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <string> text;
+    spacing: 8px;
+    Text {
+        text: root.label;
+        color: Theme.txt-dim;
+        width: 72px;
+        vertical-alignment: center;
+    }
+    LineEdit {
+        text <=> root.text;
+        horizontal-stretch: 1;
+    }
+}
+
+// One interface: live status on top, editable IP/DNS config below. The static
+// fields are an `if` (so DHCP truly collapses them) but their values live in
+// persistent card properties, so Apply can read them whether shown or not.
 component NetCard inherits Rectangle {
     in property <string> title;
-    in property <NetStatus> status;
+    in property <string> iface;
     in property <bool> is-wifi;
+    in property <NetStatus> status;
+    in property <NetConfigUi> config;
+    in property <string> config-status;
+    callback apply(string, NetConfigUi);
+
+    // Persistent edit state (survives the static fields being hidden).
+    in-out property <string> ip;
+    in-out property <string> prefix;
+    in-out property <string> gateway;
+    in-out property <string> dns1;
+    in-out property <string> dns2;
+    property <bool> is-static: mode-combo.current-index == 1;
+
     background: Theme.panel-3;
     border-radius: 8px;
+
+    init => {
+        mode-combo.current-index = root.config.mode == "static" ? 1 : 0;
+        root.ip = root.config.ip;
+        root.prefix = root.config.prefix;
+        root.gateway = root.config.gateway;
+        root.dns1 = root.config.dns1;
+        root.dns2 = root.config.dns2;
+    }
+
     VerticalLayout {
         padding: 12px;
         spacing: 6px;
+
+        // ── Status ──
         HorizontalLayout {
             Text {
                 text: root.title;
@@ -51,58 +95,15 @@ component NetCard inherits Rectangle {
         if root.is-wifi : SpecRow { label: "Signal"; value: root.status.signal == "" ? "—" : root.status.signal; }
         SpecRow { label: "IP"; value: root.status.ip == "" ? "—" : root.status.ip; }
         SpecRow { label: "Gateway"; value: root.status.gateway == "" ? "—" : root.status.gateway; }
-    }
-}
 
-// A labelled text input row. `text` is two-way so the editor can read it back.
-component FieldRow inherits HorizontalLayout {
-    in property <string> label;
-    in-out property <string> text;
-    spacing: 8px;
-    Text {
-        text: root.label;
-        color: Theme.txt-dim;
-        width: 72px;
-        vertical-alignment: center;
-    }
-    LineEdit {
-        text <=> root.text;
-        horizontal-stretch: 1;
-    }
-}
-
-// IP/DNS editor for one interface. Seeds from `config` on creation; emits the
-// gathered values via `apply` on the button press.
-component NetConfigEditor inherits Rectangle {
-    in property <string> title;
-    in property <string> iface;
-    in property <NetConfigUi> config;
-    in property <string> status;
-    callback apply(string, NetConfigUi);
-
-    property <bool> is-static: mode-combo.current-index == 1;
-    background: Theme.panel-3;
-    border-radius: 8px;
-
-    init => {
-        mode-combo.current-index = root.config.mode == "static" ? 1 : 0;
-        ip-row.text = root.config.ip;
-        prefix-row.text = root.config.prefix;
-        gw-row.text = root.config.gateway;
-        dns1-row.text = root.config.dns1;
-        dns2-row.text = root.config.dns2;
-    }
-
-    VerticalLayout {
-        padding: 12px;
-        spacing: 8px;
-
-        Text {
-            text: root.title;
-            color: Theme.txt;
-            font-weight: 600;
+        // ── Divider ──
+        Rectangle {
+            min-height: 1px;
+            max-height: 1px;
+            background: Theme.panel-2;
         }
 
+        // ── Config ──
         HorizontalLayout {
             spacing: 8px;
             Text {
@@ -117,37 +118,35 @@ component NetConfigEditor inherits Rectangle {
             }
         }
 
-        // Always instantiated so ids stay valid; collapsed when on DHCP.
-        static-fields := VerticalLayout {
-            visible: root.is-static;
-            spacing: 8px;
-            ip-row := FieldRow { label: "IP"; }
-            prefix-row := FieldRow { label: "Prefix"; }
-            gw-row := FieldRow { label: "Gateway"; }
-            dns1-row := FieldRow { label: "DNS 1"; }
-            dns2-row := FieldRow { label: "DNS 2"; }
+        if root.is-static : VerticalLayout {
+            spacing: 6px;
+            FieldRow { label: "IP"; text <=> root.ip; }
+            FieldRow { label: "Prefix"; text <=> root.prefix; }
+            FieldRow { label: "Gateway"; text <=> root.gateway; }
+            FieldRow { label: "DNS 1"; text <=> root.dns1; }
+            FieldRow { label: "DNS 2"; text <=> root.dns2; }
         }
 
         HorizontalLayout {
             spacing: 12px;
+            Text {
+                text: root.config-status;
+                color: root.config-status == "Applied" ? Theme.status-ok : Theme.status-bad;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
             TextButton {
                 text: "Apply";
                 clicked => {
                     root.apply(root.iface, {
                         mode: root.is-static ? "static" : "dhcp",
-                        ip: ip-row.text,
-                        prefix: prefix-row.text,
-                        gateway: gw-row.text,
-                        dns1: dns1-row.text,
-                        dns2: dns2-row.text,
+                        ip: root.ip,
+                        prefix: root.prefix,
+                        gateway: root.gateway,
+                        dns1: root.dns1,
+                        dns2: root.dns2,
                     });
                 }
-            }
-            Text {
-                text: root.status;
-                color: root.status == "Applied" ? Theme.status-ok : Theme.status-bad;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
             }
         }
     }
@@ -169,21 +168,25 @@ export component Network inherits VerticalLayout {
         Eyebrow { text: "NETWORK"; vertical-alignment: center; horizontal-stretch: 1; }
         TextButton { text: root.loading ? "Loading…" : "Refresh"; clicked => { root.refresh(); } }
     }
-    NetCard { title: "Ethernet"; status: root.eth; is-wifi: false; opacity: root.loading ? 0.5 : 1.0; }
-    NetCard { title: "Wi-Fi"; status: root.wifi; is-wifi: true; opacity: root.loading ? 0.5 : 1.0; }
 
-    NetConfigEditor {
-        title: "Ethernet configuration";
+    NetCard {
+        title: "Ethernet";
         iface: "ethernet";
+        is-wifi: false;
+        status: root.eth;
         config: root.eth-config;
-        status: root.eth-config-status;
+        config-status: root.eth-config-status;
+        opacity: root.loading ? 0.5 : 1.0;
         apply(i, c) => { root.apply-config(i, c); }
     }
-    NetConfigEditor {
-        title: "Wi-Fi configuration";
+    NetCard {
+        title: "Wi-Fi";
         iface: "wifi";
+        is-wifi: true;
+        status: root.wifi;
         config: root.wifi-config;
-        status: root.wifi-config-status;
+        config-status: root.wifi-config-status;
+        opacity: root.loading ? 0.5 : 1.0;
         apply(i, c) => { root.apply-config(i, c); }
     }
 }
