@@ -1,4 +1,4 @@
-import { Button } from "std-widgets.slint";
+import { Button, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { GoldButton } from "widgets/gold-button.slint";
 import { CloseGlyph } from "widgets/close-glyph.slint";
@@ -55,6 +55,8 @@ export component SettingsModal inherits Rectangle {
 
             dialog := Rectangle {
                 width: 640px;
+                // Never exceed the window; the content pane scrolls instead.
+                max-height: root.height - 48px;
                 background: Theme.panel-2;
                 border-width: 1px;
                 border-color: Theme.panel-3;
@@ -112,33 +114,41 @@ export component SettingsModal inherits Rectangle {
                             NavItem { text: "About";      selected: root.active-tab == 4; clicked => { root.active-tab = 4; } }
                         }
 
-                        // Right content pane
-                        VerticalLayout {
+                        // Right content pane — scrolls when a tab is taller
+                        // than the capped dialog (e.g. both interfaces Static).
+                        content-scroll := ScrollView {
                             horizontal-stretch: 1;
-                            if root.active-tab == 0 : Appearance {
-                                theme-changed(d) => { root.theme-changed(d); }
+                            // Floor so short tabs don't collapse; the dialog's
+                            // max-height caps the top, and content scrolls
+                            // between the two.
+                            min-height: 360px;
+                            VerticalLayout {
+                                width: content-scroll.visible-width;
+                                if root.active-tab == 0 : Appearance {
+                                    theme-changed(d) => { root.theme-changed(d); }
+                                }
+                                if root.active-tab == 1 : Display {
+                                    resolution-index <=> root.resolution-index;
+                                    fullscreen <=> root.fullscreen;
+                                    apply-resolution(i) => { root.apply-resolution(i); }
+                                    toggle-fullscreen(f) => { root.toggle-fullscreen(f); }
+                                }
+                                if root.active-tab == 2 : System {
+                                    os: root.hw-os; device: root.hw-device; ram: root.hw-ram; storage: root.hw-storage;
+                                }
+                                if root.active-tab == 3 : Network {
+                                    eth: root.eth;
+                                    wifi: root.wifi;
+                                    loading: root.net-loading;
+                                    eth-config: root.eth-config;
+                                    wifi-config: root.wifi-config;
+                                    eth-config-status: root.eth-config-status;
+                                    wifi-config-status: root.wifi-config-status;
+                                    refresh => { root.refresh-network(); }
+                                    apply-config(i, c) => { root.apply-net-config(i, c); }
+                                }
+                                if root.active-tab == 4 : About { app-version: root.app-version; }
                             }
-                            if root.active-tab == 1 : Display {
-                                resolution-index <=> root.resolution-index;
-                                fullscreen <=> root.fullscreen;
-                                apply-resolution(i) => { root.apply-resolution(i); }
-                                toggle-fullscreen(f) => { root.toggle-fullscreen(f); }
-                            }
-                            if root.active-tab == 2 : System {
-                                os: root.hw-os; device: root.hw-device; ram: root.hw-ram; storage: root.hw-storage;
-                            }
-                            if root.active-tab == 3 : Network {
-                                eth: root.eth;
-                                wifi: root.wifi;
-                                loading: root.net-loading;
-                                eth-config: root.eth-config;
-                                wifi-config: root.wifi-config;
-                                eth-config-status: root.eth-config-status;
-                                wifi-config-status: root.wifi-config-status;
-                                refresh => { root.refresh-network(); }
-                                apply-config(i, c) => { root.apply-net-config(i, c); }
-                            }
-                            if root.active-tab == 4 : About { app-version: root.app-version; }
                         }
                     }
 
