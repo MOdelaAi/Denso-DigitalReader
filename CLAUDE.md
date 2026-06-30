@@ -48,19 +48,26 @@ Each target dir is its own include root, so includes read `network/model.h`,
 | `network/windows/{netsh,wifi,parse}.*`, `network/linux/nmcli.*` | Pure, unit-tested OS-command helpers (compiled on every OS for off-device testing). |
 | `network/windows/windows_backend.cpp`, `network/linux/linux_backend.cpp` | OS backends (`QProcess`); one compiled per platform. |
 | `ui/convert.{h,cpp}`, `ui/viewmodel.h` | The **only** domain↔view boundary (Qt-free, testable). |
-| `camera/model.h` | Camera domain struct (placeholder, not wired). |
+| `camera/` | Camera inventory: domain struct (`model.h`) + persistence (`repo`, full CRUD). |
 | `util/strutil.h` | Small shared string helpers. |
 
 ### `src/app/` (GUI)
+
+UI grouped by feature: the **app shell** at `ui/` root, plus `ui/settings/` and
+`ui/camera/`.
 
 | Path | Responsibility |
 |---|---|
 | `main.cpp` | Thin orchestrator: open DB → migrate → import legacy → reassert network → load settings → apply startup → run. |
 | `ui/theme.{h,cpp}` | Palette + theme-driven app stylesheet. |
-| `ui/mainwindow.{h,cpp}` | Root window (top bar + content) + settings-persistence handlers. |
-| `ui/settings_dialog.{h,cpp}` | Settings modal: nav + 5 panels; owns DB-backed network apply + threaded scan/connect/refresh. |
-| `ui/netcard.{h,cpp}` | Per-interface status + editable config + Wi-Fi scan/connect. |
-| `ui/camera_dialog.{h,cpp}` | Placeholder camera modal. |
+| `ui/mainwindow.{h,cpp}` | Root window (top bar + content); hosts settings-persistence handlers; opens the settings + camera modals. |
+| `ui/settings/settings_dialog.{h,cpp}` | Settings modal: nav + 5 panels; owns DB-backed network apply + threaded scan/connect/refresh. |
+| `ui/settings/netcard.{h,cpp}` | Per-interface status + editable config + Wi-Fi scan/connect. |
+| `ui/camera/camera_view.{h,cpp}` | Main content: empty state / camera-count (live grid later). |
+| `ui/camera/camera_dialog.{h,cpp}` | Camera management modal: list/delete + add (USB scan / IP manufacturer+stream+credentials). |
+| `ui/camera/camera_devices.{h,cpp}` | USB enumeration (Qt Multimedia). |
+| `ui/camera/ip_scan.{h,cpp}` | Subnet RTSP-port scan (Qt Network, threaded). |
+| `ui/camera/rtsp_templates.{h,cpp}` | Manufacturer → RTSP URL templates (Dahua). |
 
 ## Hard rules
 

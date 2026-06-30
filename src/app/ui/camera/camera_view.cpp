@@ -1,4 +1,4 @@
-#include "ui/camera_view.h"
+#include "ui/camera/camera_view.h"
 
 #include "camera/repo.h"
 

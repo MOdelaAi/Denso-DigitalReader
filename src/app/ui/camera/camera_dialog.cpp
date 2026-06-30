@@ -1,10 +1,10 @@
-#include "ui/camera_dialog.h"
+#include "ui/camera/camera_dialog.h"
 
 #include "camera/model.h"
 #include "camera/repo.h"
-#include "ui/camera_devices.h"
-#include "ui/ip_scan.h"
-#include "ui/rtsp_templates.h"
+#include "ui/camera/camera_devices.h"
+#include "ui/camera/ip_scan.h"
+#include "ui/camera/rtsp_templates.h"
 
 #include <QComboBox>
 #include <QFont>

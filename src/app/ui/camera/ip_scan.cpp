@@ -1,4 +1,4 @@
-#include "ui/ip_scan.h"
+#include "ui/camera/ip_scan.h"
 
 #include <QEventLoop>
 #include <QHostAddress>

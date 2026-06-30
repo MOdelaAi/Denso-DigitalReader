@@ -1,4 +1,4 @@
-#include "ui/netcard.h"
+#include "ui/settings/netcard.h"
 
 #include <QComboBox>
 #include <QEvent>

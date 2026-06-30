@@ -1,10 +1,10 @@
-#include "ui/settings_dialog.h"
+#include "ui/settings/settings_dialog.h"
 
 #include "network/backend.h"
 #include "network/model.h"
 #include "network/repo.h"
 #include "ui/convert.h"
-#include "ui/netcard.h"
+#include "ui/settings/netcard.h"
 
 #include <QCheckBox>
 #include <QComboBox>

@@ -1,4 +1,4 @@
-#include "ui/camera_devices.h"
+#include "ui/camera/camera_devices.h"
 
 #include <QCameraDevice>
 #include <QList>

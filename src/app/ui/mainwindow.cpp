@@ -2,9 +2,9 @@
 
 #include "hardware/collect.h"
 #include "settings/repo.h"
-#include "ui/camera_dialog.h"
-#include "ui/camera_view.h"
-#include "ui/settings_dialog.h"
+#include "ui/camera/camera_dialog.h"
+#include "ui/camera/camera_view.h"
+#include "ui/settings/settings_dialog.h"
 #include "ui/theme.h"
 
 #include <QApplication>

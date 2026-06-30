@@ -18,8 +18,9 @@ Two targets, split by concern, wired by a thin top-level `CMakeLists.txt` via
 domain↔view boundary (`core/ui/convert` + `viewmodel`). It never links
 `Qt6::Widgets`, so the GUI cannot leak into the testable core. Each target's
 directory is its own include root: core headers read `network/model.h` /
-`ui/convert.h`, the app's widget headers read `ui/theme.h`, and the app reaches
-core headers through `denso_core`'s public include dir.
+`ui/convert.h`, the app's widget headers read `ui/theme.h` /
+`ui/camera/camera_dialog.h`, and the app reaches core headers through
+`denso_core`'s public include dir.
 
 ## Boot sequence (`src/app/main.cpp`)
 
@@ -55,19 +56,35 @@ A config change travels: UI edit → `SettingsDialog::apply_net_config` →
 
 ## GUI (`src/app/ui/`)
 
-A faithful port of the former Slint screens to Qt Widgets:
+Grouped by feature so the folder scales: the **app shell** at `ui/` root, with
+`ui/settings/` and `ui/camera/` subfolders.
 
+**Shell (`ui/`)**
 - `theme.{h,cpp}` — the dark/light palette + a stylesheet builder applied to
   the whole app (the Slint `Theme` global / `Palette.color-scheme` analog).
 - `mainwindow.{h,cpp}` — root window: top button bar (Camera / Settings) over
   the content area. Hosts the settings-persistence handlers (resolution / theme
-  / fullscreen / reset), since those resize the window and restyle the app.
+  / fullscreen / reset), since those resize the window and restyle the app, and
+  opens the settings + camera modals.
+
+**Settings (`ui/settings/`)**
 - `settings_dialog.{h,cpp}` — modal: a left nav over five panels (Appearance,
   Display, System, Network, About). Owns the DB-backed network apply and the
   threaded scan/connect/refresh.
 - `netcard.{h,cpp}` — one interface's live status + editable IP/DNS config +
   (Wi-Fi) scan list with per-row connect.
-- `camera_dialog.{h,cpp}` — placeholder camera modal (preview "coming soon").
+
+**Camera (`ui/camera/`)**
+- `camera_view.{h,cpp}` — the main content area: the empty "no cameras" state /
+  configured-count placeholder (the live 1–4 grid lands later).
+- `camera_dialog.{h,cpp}` — the camera management hub: list + delete, and an Add
+  form (USB auto-scan, or IP via manufacturer + main/sub stream + credentials
+  with a live RTSP-URL preview). Persists through `camera::repo`.
+- `camera_devices.{h,cpp}` — USB enumeration via Qt Multimedia (`QMediaDevices`).
+- `ip_scan.{h,cpp}` — crude IP discovery: a threaded subnet probe for hosts with
+  the RTSP port open (Qt Network).
+- `rtsp_templates.{h,cpp}` — manufacturer → RTSP URL template map (Dahua for
+  now); builds the credential-free URL and injects credentials at capture time.
 
 ### Threading
 
