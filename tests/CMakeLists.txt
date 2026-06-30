@@ -23,6 +23,7 @@ add_executable(denso_tests
     test_nmcli.cpp
     test_reassert.cpp
     test_convert.cpp
+    test_camera_repo.cpp
 )
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
 

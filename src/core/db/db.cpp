@@ -15,7 +15,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 3;
+constexpr int SCHEMA_VERSION = 4;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -178,6 +178,46 @@ bool run_migrations(const QSqlDatabase& db) {
             return false;
         }
         if (!run("DROP TABLE IF EXISTS readings")) {
+            return false;
+        }
+    }
+
+    if (version < 4) {
+        // Camera inventory: one row per camera, plus its ROI areas. Optional /
+        // type-specific columns are nullable (cam_index for USB; ip/rtsp/
+        // username for IP). `index` is a SQL keyword, hence `cam_index`. The IP
+        // password is intentionally absent — destined for the OS secret store.
+        if (!run("CREATE TABLE IF NOT EXISTS camera ("
+                 "    id          INTEGER PRIMARY KEY,"
+                 "    name        TEXT    NOT NULL,"
+                 "    camera_type TEXT    NOT NULL,"  // "usb" | "ip"
+                 "    active      INTEGER NOT NULL,"
+                 "    cam_index   INTEGER,"
+                 "    ip          TEXT,"
+                 "    rtsp        TEXT,"
+                 "    username    TEXT,"
+                 "    width       INTEGER NOT NULL,"
+                 "    height      INTEGER NOT NULL,"
+                 "    fps         INTEGER NOT NULL,"
+                 "    pitch       REAL    NOT NULL,"
+                 "    roll        REAL    NOT NULL,"
+                 "    rotation    INTEGER NOT NULL"
+                 ")")) {
+            return false;
+        }
+        if (!run("CREATE TABLE IF NOT EXISTS camera_area ("
+                 "    id        INTEGER PRIMARY KEY,"
+                 "    camera_id INTEGER NOT NULL REFERENCES camera(id),"
+                 "    name      TEXT    NOT NULL,"
+                 "    x1        REAL    NOT NULL,"
+                 "    y1        REAL    NOT NULL,"
+                 "    x2        REAL    NOT NULL,"
+                 "    y2        REAL    NOT NULL"
+                 ")")) {
+            return false;
+        }
+        if (!run("CREATE INDEX IF NOT EXISTS idx_camera_area_camera "
+                 "ON camera_area(camera_id)")) {
             return false;
         }
     }
