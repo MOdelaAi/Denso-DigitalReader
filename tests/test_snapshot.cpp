@@ -39,3 +39,19 @@ TEST_CASE("apply_rotation by 0 is identity in size") {
     REQUIRE(out.width() == 4);
     REQUIRE(out.height() == 2);
 }
+
+TEST_CASE("apply_rotation by 180 preserves dimensions") {
+    QImage src(4, 2, QImage::Format_RGB888);
+    src.fill(Qt::black);
+    const QImage out = apply_rotation(src, 180);
+    REQUIRE(out.width() == 4);
+    REQUIRE(out.height() == 2);
+}
+
+TEST_CASE("apply_rotation by 270 swaps width and height") {
+    QImage src(4, 2, QImage::Format_RGB888);
+    src.fill(Qt::black);
+    const QImage out = apply_rotation(src, 270);
+    REQUIRE(out.width() == 2);
+    REQUIRE(out.height() == 4);
+}

@@ -43,7 +43,7 @@ private:
     void scan_usb();               // (re)enumerate USB cameras into the results list
     void scan_ip();                // probe the subnet for open RTSP hosts (threaded)
     void update_rtsp_preview();    // rebuild the constructed RTSP URL preview
-    void save_new_camera();        // validate + insert + back to the list
+    void begin_configure_new();    // validate source + build draft + go to Configure page
     void update_source_fields();   // show USB vs IP inputs
 
     void build_configure_page();                         // construct the 3rd stack page
@@ -81,6 +81,7 @@ private:
 
     // Configure page
     QWidget* config_page_ = nullptr;
+    QLabel* config_error_ = nullptr;
     QLabel* preview_label_ = nullptr;
     QPushButton* capture_btn_ = nullptr;
     QComboBox* res_combo_ = nullptr;       // itemData = QSize

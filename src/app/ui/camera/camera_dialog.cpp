@@ -243,7 +243,7 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     add_footer->addStretch(1);
     auto* save = new QPushButton(QStringLiteral("Configure…"));
     save->setProperty("gold", true);
-    connect(save, &QPushButton::clicked, this, &CameraDialog::save_new_camera);
+    connect(save, &QPushButton::clicked, this, &CameraDialog::begin_configure_new);
     add_footer->addWidget(save, 0);
     add_v->addLayout(add_footer);
 
@@ -373,8 +373,8 @@ void CameraDialog::rebuild_list() {
         connect(cfg, &QPushButton::clicked, this, [this, row_cam] {
             editing_id_ = row_cam.id;
             draft_ = row_cam;
-            populate_configure(draft_);
             last_frame_ = QImage();
+            populate_configure(draft_);
             preview_label_->setText(QStringLiteral("Capturing…"));
             add_error_->setVisible(false);
             stack_->setCurrentIndex(2);
@@ -396,7 +396,7 @@ void CameraDialog::rebuild_list() {
     }
 }
 
-void CameraDialog::save_new_camera() {
+void CameraDialog::begin_configure_new() {
     const auto fail = [this](const QString& msg) {
         add_error_->setText(msg);
         add_error_->setVisible(true);
@@ -440,8 +440,8 @@ void CameraDialog::save_new_camera() {
 
     editing_id_.reset();
     draft_ = c;
-    populate_configure(draft_);     // defaults (draft_ has 0 dims/fps/angle)
     last_frame_ = QImage();
+    populate_configure(draft_);     // defaults (draft_ has 0 dims/fps/angle)
     preview_label_->setText(QStringLiteral("Click Capture to preview"));
     stack_->setCurrentIndex(2);
     capture_snapshot();
@@ -509,9 +509,17 @@ void CameraDialog::build_configure_page() {
     roll_spin_->setSuffix(QStringLiteral("°"));
     field(QStringLiteral("Roll"), roll_spin_);
 
+    config_error_ = new QLabel;
+    config_error_->setStyleSheet(QStringLiteral("color: %1;").arg(QString::fromLatin1(kStatusBad)));
+    config_error_->setVisible(false);
+    v->addWidget(config_error_);
+
     auto* footer = new QHBoxLayout;
     auto* back = new QPushButton(QStringLiteral("Back"));
-    connect(back, &QPushButton::clicked, this, &CameraDialog::show_list);
+    connect(back, &QPushButton::clicked, this, [this] {
+        if (editing_id_.has_value()) show_list();
+        else stack_->setCurrentIndex(1);
+    });
     footer->addWidget(back, 0);
     footer->addStretch(1);
     auto* save = new QPushButton(QStringLiteral("Save"));
@@ -570,6 +578,7 @@ void CameraDialog::render_preview() {
     preview_label_->setPixmap(QPixmap::fromImage(shown).scaled(
         preview_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
+
 void CameraDialog::populate_configure(const camera::Camera& cam) {
     // Drop any custom resolution entry left over from a previous open, so it
     // can't accumulate across repeated Configure opens (presets sit at the tail).
@@ -628,14 +637,14 @@ void CameraDialog::save_configured_camera() {
     if (editing_id_.has_value()) {
         draft_.id = *editing_id_;
         if (!camera::update(db_, draft_)) {
-            add_error_->setText(QStringLiteral("Failed to save the camera."));
-            add_error_->setVisible(true);
+            config_error_->setText(QStringLiteral("Failed to save the camera."));
+            config_error_->setVisible(true);
             return;
         }
     } else {
         if (!camera::insert(db_, draft_)) {
-            add_error_->setText(QStringLiteral("Failed to save the camera."));
-            add_error_->setVisible(true);
+            config_error_->setText(QStringLiteral("Failed to save the camera."));
+            config_error_->setVisible(true);
             return;
         }
     }
