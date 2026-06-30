@@ -11,7 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Sql Widgets Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Sql Widgets Multimedia Network)
 
 enable_testing()
 

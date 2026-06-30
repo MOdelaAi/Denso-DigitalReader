@@ -3,6 +3,7 @@
 #include "camera/model.h"
 #include "camera/repo.h"
 #include "ui/camera_devices.h"
+#include "ui/ip_scan.h"
 
 #include <QFont>
 #include <QFrame>
@@ -14,6 +15,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QStackedWidget>
+#include <QThread>
 #include <QVBoxLayout>
 
 #include <cstdint>
@@ -136,11 +138,29 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     usb_v->addWidget(usb_list_);
     add_v->addWidget(usb_box_);
 
-    // IP inputs
+    // IP inputs — a subnet Scan (open RTSP port) + results list, then the URL.
     ip_box_ = new QWidget;
     auto* ip_l = new QVBoxLayout(ip_box_);
     ip_l->setContentsMargins(0, 0, 0, 0);
     ip_l->setSpacing(8);
+
+    auto* ip_scan_row = new QHBoxLayout;
+    ip_scan_row->addWidget(dim_label(QStringLiteral("Discovered hosts")), 1);
+    ip_scan_btn_ = new QPushButton(QStringLiteral("Scan"));
+    ip_scan_btn_->setProperty("flatText", true);
+    connect(ip_scan_btn_, &QPushButton::clicked, this, &CameraDialog::scan_ip);
+    ip_scan_row->addWidget(ip_scan_btn_, 0);
+    ip_l->addLayout(ip_scan_row);
+
+    ip_list_ = new QListWidget;
+    ip_list_->setMaximumHeight(120);
+    connect(ip_list_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
+        if (!(item->flags() & Qt::ItemIsSelectable)) return;
+        rtsp_edit_->setText(
+            QStringLiteral("rtsp://%1:554/").arg(item->data(Qt::UserRole).toString()));
+    });
+    ip_l->addWidget(ip_list_);
+
     auto* rtsp_row = new QHBoxLayout;
     rtsp_row->addWidget(dim_label(QStringLiteral("RTSP URL")), 0);
     rtsp_edit_ = new QLineEdit;
@@ -190,6 +210,7 @@ void CameraDialog::show_add() {
     name_edit_->clear();
     rtsp_edit_->clear();
     user_edit_->clear();
+    ip_list_->clear();  // IP scan is on-demand (slow); not run on open
     add_error_->setVisible(false);
 
     scan_usb();
@@ -211,6 +232,38 @@ void CameraDialog::scan_usb() {
     } else {
         usb_list_->setCurrentRow(0);  // preselect the first
     }
+}
+
+void CameraDialog::scan_ip() {
+    ip_scan_btn_->setText(QStringLiteral("Scanning…"));
+    ip_scan_btn_->setEnabled(false);
+    ip_list_->clear();
+
+    // The subnet probe blocks for a few seconds, so run it off the GUI thread
+    // (like the Wi-Fi scan) and post the results back via a queued call.
+    auto* thread = QThread::create([this] {
+        const std::vector<QString> hosts = scan_rtsp_subnet();
+        QMetaObject::invokeMethod(
+            this,
+            [this, hosts] {
+                ip_list_->clear();
+                for (const QString& ip : hosts) {
+                    auto* item = new QListWidgetItem(
+                        QStringLiteral("%1 : 554 open").arg(ip), ip_list_);
+                    item->setData(Qt::UserRole, ip);
+                }
+                if (hosts.empty()) {
+                    auto* none = new QListWidgetItem(
+                        QStringLiteral("No RTSP hosts found"), ip_list_);
+                    none->setFlags(Qt::NoItemFlags);
+                }
+                ip_scan_btn_->setText(QStringLiteral("Scan"));
+                ip_scan_btn_->setEnabled(true);
+            },
+            Qt::QueuedConnection);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
 }
 
 void CameraDialog::update_source_fields() {
