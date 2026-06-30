@@ -506,8 +506,53 @@ void CameraDialog::build_configure_page() {
     stack_->addWidget(config_page_);  // index 2
 }
 
-void CameraDialog::capture_snapshot() {}
-void CameraDialog::render_preview() {}
+void CameraDialog::capture_snapshot() {
+    capture_btn_->setText(QStringLiteral("Capturing…"));
+    capture_btn_->setEnabled(false);
+    preview_label_->setText(QStringLiteral("Capturing…"));
+
+    std::optional<int> index;
+    QString url;
+    if (draft_.camera_type == "usb") {
+        index = draft_.index ? std::optional<int>(static_cast<int>(*draft_.index))
+                             : std::optional<int>(0);
+    } else {
+        const QString rtsp = draft_.rtsp ? QString::fromStdString(*draft_.rtsp) : QString();
+        const QString user = draft_.username ? QString::fromStdString(*draft_.username) : QString();
+        const QString pass = draft_.password ? QString::fromStdString(*draft_.password) : QString();
+        url = with_credentials(rtsp, user, pass);
+    }
+    const QSize res = res_combo_->currentData().toSize();
+
+    auto* thread = QThread::create([this, index, url, res] {
+        const Snapshot snap = grab_snapshot(index, url, res.width(), res.height());
+        QMetaObject::invokeMethod(
+            this,
+            [this, snap] {
+                capture_btn_->setText(QStringLiteral("Capture"));
+                capture_btn_->setEnabled(true);
+                if (snap.image.isNull()) {
+                    preview_label_->setText(snap.error);
+                    return;
+                }
+                last_frame_ = snap.image;
+                render_preview();
+            },
+            Qt::QueuedConnection);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
+void CameraDialog::render_preview() {
+    if (last_frame_.isNull()) {
+        return;
+    }
+    const int deg = rotation_combo_->currentData().toInt();
+    const QImage shown = apply_rotation(last_frame_, deg);
+    preview_label_->setPixmap(QPixmap::fromImage(shown).scaled(
+        preview_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
 void CameraDialog::save_configured_camera() {}
 void CameraDialog::populate_configure(const camera::Camera&) {}
 void CameraDialog::read_configure_into_draft() {}
