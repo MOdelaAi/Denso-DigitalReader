@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "network/netsh.h"
+#include "network/windows/netsh.h"
 
 using denso::network::NetConfig;
 using denso::network::netsh::build_netsh_commands;

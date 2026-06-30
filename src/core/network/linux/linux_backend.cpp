@@ -4,7 +4,7 @@
 // surfaces them non-fatally — exactly as the Rust stub does. Ported 1:1 from
 // Rust `network::linux` (the runner half).
 #include "network/backend.h"
-#include "network/nmcli.h"
+#include "network/linux/nmcli.h"
 
 #include <QProcess>
 #include <QString>

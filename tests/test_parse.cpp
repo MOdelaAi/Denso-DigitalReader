@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "network/parse.h"
+#include "network/windows/parse.h"
 
 using denso::network::parse::build_snapshot;
 using denso::network::parse::parse_ipconfig;

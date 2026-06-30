@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "network/wifi.h"
+#include "network/windows/wifi.h"
 
 using denso::network::WifiNetwork;
 using denso::network::wifi::build_profile_xml;

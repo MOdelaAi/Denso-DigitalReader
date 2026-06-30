@@ -99,8 +99,9 @@ Two distinct datasets share the Network tab:
 
 OS work sits behind the `NetworkBackend` base class. `backend()` returns the
 platform impl (`WindowsBackend`, `LinuxBackend`, or a `NullBackend` fallback);
-exactly one platform `.cpp` under `network/backends/` is compiled per OS (the
-other `make_*_backend()` declaration is never odr-used). The pure helpers are
+each platform's code is grouped under `network/windows/` and `network/linux/`,
+and exactly one `*_backend.cpp` is compiled per OS (the other
+`make_*_backend()` declaration is never odr-used). The pure helpers are
 unit-tested off-device: Windows `netsh`/`parse`/`wifi`, Linux `nmcli`. Errors
 mirror the Rust `Result::Err(String)` as a thrown `std::runtime_error`;
 `reassert` catches them into non-fatal `(iface, message)` pairs.

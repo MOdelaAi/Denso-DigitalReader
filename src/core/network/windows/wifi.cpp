@@ -1,6 +1,6 @@
-#include "network/wifi.h"
+#include "network/windows/wifi.h"
 
-#include "network/parse.h"
+#include "network/windows/parse.h"
 #include "strutil.h"
 
 namespace denso::network::wifi {

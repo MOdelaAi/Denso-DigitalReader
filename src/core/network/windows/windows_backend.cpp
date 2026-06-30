@@ -3,9 +3,9 @@
 // parse_wifi_networks, build_profile_xml) live in the cross-platform logic
 // core. Ported 1:1 from Rust `network::windows` (the runner half).
 #include "network/backend.h"
-#include "network/netsh.h"
-#include "network/parse.h"
-#include "network/wifi.h"
+#include "network/windows/netsh.h"
+#include "network/windows/parse.h"
+#include "network/windows/wifi.h"
 
 #include <QByteArray>
 #include <QDir>

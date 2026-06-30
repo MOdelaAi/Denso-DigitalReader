@@ -43,8 +43,8 @@ Each target dir is its own include root, so includes read `network/model.h`,
 | `settings/` | Persisted app settings (window size, theme, fullscreen) + resolution presets. `settings`=type/presets, `repo`=persistence + legacy import. |
 | `hardware/` | Read-only host spec via `QSysInfo`/`QStorageInfo` (collected fresh, never stored). `format`=byte formatting, `collect`=the spec. |
 | `network/` | `NetworkBackend` base + `reassert` + `NetConfig`/status types + config persistence (`repo`). |
-| `network/{netsh,wifi,parse,nmcli}.*` | Pure, unit-tested OS-command helpers (Windows netsh/wifi/parse, Linux nmcli). |
-| `network/backends/{windows,linux}_backend.cpp` | OS backends (`QProcess`); one compiled per platform. |
+| `network/windows/{netsh,wifi,parse}.*`, `network/linux/nmcli.*` | Pure, unit-tested OS-command helpers (compiled on every OS for off-device testing). |
+| `network/windows/windows_backend.cpp`, `network/linux/linux_backend.cpp` | OS backends (`QProcess`); one compiled per platform. |
 | `ui/convert.{h,cpp}`, `ui/viewmodel.h` | The **only** domain↔view boundary (Qt-free, testable). |
 | `camera/model.h`, `strutil.h` | Camera domain struct (placeholder, not wired); small string helpers. |
 

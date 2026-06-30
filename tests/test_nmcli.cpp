@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "network/nmcli.h"
+#include "network/linux/nmcli.h"
 
 #include <optional>
 #include <string>
