@@ -83,7 +83,7 @@ QString style_sheet(const Palette& p) {
 
         QPushButton {
             background: %(panel3); color: %(txt);
-            border: none; border-radius: 6px; padding: 6px 14px;
+            border: none; border-radius: 8px; padding: 6px 14px;
         }
         QPushButton:hover { background: %(panel2); }
         QPushButton[gold="true"] {
@@ -98,12 +98,12 @@ QString style_sheet(const Palette& p) {
 
         QLineEdit {
             background: %(panel); color: %(txt);
-            border: 1px solid %(panel3); border-radius: 4px; padding: 4px 6px;
+            border: 1px solid %(panel3); border-radius: 6px; padding: 4px 6px;
             selection-background-color: %(gold);
         }
         QComboBox {
             background: %(panel); color: %(txt);
-            border: 1px solid %(panel3); border-radius: 4px; padding: 4px 6px;
+            border: 1px solid %(panel3); border-radius: 6px; padding: 4px 6px;
         }
         QComboBox QAbstractItemView {
             background: %(panel2); color: %(txt);
@@ -118,7 +118,7 @@ QString style_sheet(const Palette& p) {
         #navList::item:selected { background: %(panel3); color: %(gold); }
         #navList::item:hover { background: %(panel3); }
 
-        #card { background: %(panel3); border-radius: 8px; }
+        #card { background: %(panel3); border-radius: 10px; }
         #dialogPanel {
             background: %(panel2);
             border: 1px solid %(panel3); border-radius: 12px;
