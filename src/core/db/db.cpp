@@ -1,6 +1,7 @@
 #include "db/db.h"
 
 #include <QCoreApplication>
+#include <QDebug>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QVariant>
@@ -98,17 +99,37 @@ std::optional<Db> Db::open_in_memory() {
 }
 
 bool run_migrations(const QSqlDatabase& db) {
-    QSqlQuery q(db);
-    if (!q.exec(QStringLiteral("PRAGMA user_version")) || !q.next()) {
+    if (!db.isValid() || !db.isOpen()) {
+        qWarning().noquote() << "run_migrations: db not open/valid:" << db.lastError().text();
         return false;
     }
-    const int version = q.value(0).toInt();
+
+    // Read the schema version in its own scope: QSQLITE keeps the prepared
+    // statement (and its read lock) alive until the QSqlQuery is finished or
+    // destroyed, and a live read cursor makes the schema-changing migrations
+    // below fail with SQLITE_LOCKED ("database table is locked"). Destroying
+    // the query here releases that lock before any DDL runs.
+    int version = 0;
+    {
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral("PRAGMA user_version")) || !q.next()) {
+            qWarning().noquote() << "run_migrations: read user_version failed:"
+                                 << q.lastError().text();
+            return false;
+        }
+        version = q.value(0).toInt();
+    }
 
     // QSQLITE executes a single statement per exec(), so the Rust
     // `execute_batch` blocks are split into one call per statement here.
     const auto run = [&db](const char* sql) -> bool {
         QSqlQuery s(db);
-        return s.exec(QString::fromLatin1(sql));
+        if (!s.exec(QString::fromLatin1(sql))) {
+            qWarning().noquote() << "run_migrations: statement failed:" << s.lastError().text()
+                                 << "\n  SQL:" << sql;
+            return false;
+        }
+        return true;
     };
 
     if (version < 1) {
@@ -163,7 +184,12 @@ bool run_migrations(const QSqlDatabase& db) {
 
     // PRAGMA can't be parameterized; SCHEMA_VERSION is a trusted constant.
     QSqlQuery set_ver(db);
-    return set_ver.exec(QStringLiteral("PRAGMA user_version = %1").arg(SCHEMA_VERSION));
+    if (!set_ver.exec(QStringLiteral("PRAGMA user_version = %1").arg(SCHEMA_VERSION))) {
+        qWarning().noquote() << "run_migrations: set user_version failed:"
+                             << set_ver.lastError().text();
+        return false;
+    }
+    return true;
 }
 
 } // namespace denso::db

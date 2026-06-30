@@ -11,6 +11,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 add_executable(denso_tests
+    test_main.cpp
     test_netsh.cpp
     test_parse.cpp
     test_wifi.cpp
@@ -23,7 +24,7 @@ add_executable(denso_tests
     test_reassert.cpp
     test_convert.cpp
 )
-target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2WithMain)
+target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
 
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)

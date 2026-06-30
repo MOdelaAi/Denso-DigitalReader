@@ -143,7 +143,9 @@ void MainWindow::on_reset_defaults() {
 }
 
 void MainWindow::apply_theme(bool dark) {
-    qApp->setStyleSheet(style_sheet(palette(dark)));
+    // Qualify: unqualified `palette` would resolve to the inherited
+    // QWidget::palette() member, hiding the free theme function.
+    qApp->setStyleSheet(style_sheet(denso::ui::palette(dark)));
 }
 
 } // namespace denso::ui
