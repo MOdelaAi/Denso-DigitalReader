@@ -20,7 +20,10 @@ add_executable(denso WIN32
     ui/camera/camera_devices.cpp
     ui/camera/ip_scan.cpp
     ui/camera/rtsp_templates.cpp
+    ui/camera/snapshot.cpp
 )
 target_include_directories(denso PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(denso PRIVATE denso_core Qt6::Widgets Qt6::Multimedia Qt6::Network)
+target_include_directories(denso PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(denso PRIVATE ${OpenCV_LIBS})
 target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")
