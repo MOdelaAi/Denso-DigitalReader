@@ -27,6 +27,7 @@
 #include <QVBoxLayout>
 
 #include <cstdint>
+#include <iterator>
 #include <vector>
 
 namespace denso::ui {
@@ -366,6 +367,21 @@ void CameraDialog::rebuild_list() {
                                                          : QStringLiteral("USB"));
         rl->addWidget(badge, 0);
 
+        auto* cfg = new QPushButton(QStringLiteral("Configure"));
+        cfg->setProperty("flatText", true);
+        const camera::Camera row_cam = cam;  // capture by value for the lambda
+        connect(cfg, &QPushButton::clicked, this, [this, row_cam] {
+            editing_id_ = row_cam.id;
+            draft_ = row_cam;
+            populate_configure(draft_);
+            last_frame_ = QImage();
+            preview_label_->setText(QStringLiteral("Capturing…"));
+            add_error_->setVisible(false);
+            stack_->setCurrentIndex(2);
+            capture_snapshot();
+        });
+        rl->addWidget(cfg, 0);
+
         auto* del = new QPushButton(QStringLiteral("Delete"));
         del->setProperty("flatText", true);
         const int64_t id = cam.id;
@@ -555,6 +571,13 @@ void CameraDialog::render_preview() {
         preview_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 void CameraDialog::populate_configure(const camera::Camera& cam) {
+    // Drop any custom resolution entry left over from a previous open, so it
+    // can't accumulate across repeated Configure opens (presets sit at the tail).
+    const int preset_count = static_cast<int>(std::size(kResPresets));
+    while (res_combo_->count() > preset_count) {
+        res_combo_->removeItem(0);
+    }
+
     // Resolution: match a preset, else prepend a "custom" entry and select it.
     int res_idx = -1;
     for (int i = 0; i < res_combo_->count(); ++i) {
