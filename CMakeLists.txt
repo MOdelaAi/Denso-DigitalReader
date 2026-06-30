@@ -6,19 +6,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Logic core — pure std C++, no Qt. Carries the parsing/formatting/builder
-# logic ported 1:1 from the Rust crate. The SQLite persistence layer, the OS
-# network backends, and the Qt Widgets UI are layered on top of this in later
-# commits of the port.
+# Core library — the parsing/formatting/builder logic ported 1:1 from the Rust
+# crate, plus the SQLite persistence layer (db + repos) built on Qt6::Sql. The
+# OS network backends and the Qt Widgets UI are layered on top in later commits
+# of the port. The pure-std logic and the Qt-backed persistence share one lib
+# at this app's scale.
 # ─────────────────────────────────────────────────────────────────────────────
+find_package(Qt6 REQUIRED COMPONENTS Core Sql)
+
 add_library(denso_core STATIC
     src/network/netsh.cpp
     src/network/parse.cpp
     src/network/wifi.cpp
     src/hardware/format.cpp
     src/settings/settings.cpp
+    src/db/db.cpp
+    src/settings/repo.cpp
+    src/network/repo.cpp
 )
 target_include_directories(denso_core PUBLIC src)
+target_link_libraries(denso_core PUBLIC Qt6::Core Qt6::Sql)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests — Catch2 v3 (fetched). Mirror the Rust `#[cfg(test)]` unit tests.
@@ -38,6 +45,9 @@ add_executable(denso_tests
     tests/test_wifi.cpp
     tests/test_format.cpp
     tests/test_settings.cpp
+    tests/test_db.cpp
+    tests/test_settings_repo.cpp
+    tests/test_network_repo.cpp
 )
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2WithMain)
 
