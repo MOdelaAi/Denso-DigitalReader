@@ -8,6 +8,7 @@
 add_executable(denso WIN32
     main.cpp
     ui/theme.cpp
+    ui/camera_view.cpp
     ui/netcard.cpp
     ui/settings_dialog.cpp
     ui/camera_dialog.cpp

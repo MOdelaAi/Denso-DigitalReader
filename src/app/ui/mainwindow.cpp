@@ -3,6 +3,7 @@
 #include "hardware/collect.h"
 #include "settings/repo.h"
 #include "ui/camera_dialog.h"
+#include "ui/camera_view.h"
 #include "ui/settings_dialog.h"
 #include "ui/theme.h"
 
@@ -43,9 +44,8 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     bar->addWidget(settings_btn, 0);
     col->addWidget(top);
 
-    // Main content area (placeholder, mirrors the empty content Rectangle).
-    auto* content = new QWidget;
-    content->setObjectName(QStringLiteral("mainContent"));
+    // Main content area: the camera view (empty "no cameras" state for now).
+    auto* content = new CameraView;
     col->addWidget(content, 1);
 
     setCentralWidget(central);
