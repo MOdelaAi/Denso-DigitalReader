@@ -240,7 +240,7 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     connect(cancel, &QPushButton::clicked, this, &CameraDialog::show_list);
     add_footer->addWidget(cancel, 0);
     add_footer->addStretch(1);
-    auto* save = new QPushButton(QStringLiteral("Save"));
+    auto* save = new QPushButton(QStringLiteral("Configure…"));
     save->setProperty("gold", true);
     connect(save, &QPushButton::clicked, this, &CameraDialog::save_new_camera);
     add_footer->addWidget(save, 0);
@@ -422,12 +422,13 @@ void CameraDialog::save_new_camera() {
         if (c.name.empty()) c.name = ip.toStdString();
     }
 
-    if (!camera::insert(db_, c)) {
-        fail(QStringLiteral("Failed to save the camera."));
-        return;
-    }
-    emit cameras_changed();
-    show_list();
+    editing_id_.reset();
+    draft_ = c;
+    populate_configure(draft_);     // defaults (draft_ has 0 dims/fps/angle)
+    last_frame_ = QImage();
+    preview_label_->setText(QStringLiteral("Click Capture to preview"));
+    stack_->setCurrentIndex(2);
+    capture_snapshot();
 }
 
 void CameraDialog::build_configure_page() {
@@ -553,8 +554,70 @@ void CameraDialog::render_preview() {
     preview_label_->setPixmap(QPixmap::fromImage(shown).scaled(
         preview_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
-void CameraDialog::save_configured_camera() {}
-void CameraDialog::populate_configure(const camera::Camera&) {}
-void CameraDialog::read_configure_into_draft() {}
+void CameraDialog::populate_configure(const camera::Camera& cam) {
+    // Resolution: match a preset, else prepend a "custom" entry and select it.
+    int res_idx = -1;
+    for (int i = 0; i < res_combo_->count(); ++i) {
+        const QSize s = res_combo_->itemData(i).toSize();
+        if (s.width() == static_cast<int>(cam.width) &&
+            s.height() == static_cast<int>(cam.height)) {
+            res_idx = i;
+            break;
+        }
+    }
+    if (res_idx < 0) {
+        if (cam.width > 0 && cam.height > 0) {
+            res_combo_->insertItem(
+                0, QStringLiteral("%1 × %2 (custom)").arg(cam.width).arg(cam.height),
+                QSize(static_cast<int>(cam.width), static_cast<int>(cam.height)));
+            res_idx = 0;
+        } else {
+            // No stored size (fresh add) → use the default preset.
+            res_idx = res_combo_->findData(QSize(kResPresets[kDefaultResIndex].w,
+                                                 kResPresets[kDefaultResIndex].h));
+            if (res_idx < 0) res_idx = 0;
+        }
+    }
+    res_combo_->setCurrentIndex(res_idx);
+
+    fps_spin_->setValue(cam.fps > 0 ? static_cast<int>(cam.fps) : 30);
+
+    int rot_idx = rotation_combo_->findData(static_cast<int>(cam.rotation));
+    rotation_combo_->setCurrentIndex(rot_idx < 0 ? 0 : rot_idx);
+
+    pitch_spin_->setValue(cam.pitch);
+    roll_spin_->setValue(cam.roll);
+}
+
+void CameraDialog::read_configure_into_draft() {
+    const QSize res = res_combo_->currentData().toSize();
+    draft_.width = static_cast<uint32_t>(res.width());
+    draft_.height = static_cast<uint32_t>(res.height());
+    draft_.fps = static_cast<uint32_t>(fps_spin_->value());
+    draft_.rotation = static_cast<uint32_t>(rotation_combo_->currentData().toInt());
+    draft_.pitch = static_cast<float>(pitch_spin_->value());
+    draft_.roll = static_cast<float>(roll_spin_->value());
+}
+
+void CameraDialog::save_configured_camera() {
+    read_configure_into_draft();
+
+    if (editing_id_.has_value()) {
+        draft_.id = *editing_id_;
+        if (!camera::update(db_, draft_)) {
+            add_error_->setText(QStringLiteral("Failed to save the camera."));
+            add_error_->setVisible(true);
+            return;
+        }
+    } else {
+        if (!camera::insert(db_, draft_)) {
+            add_error_->setText(QStringLiteral("Failed to save the camera."));
+            add_error_->setVisible(true);
+            return;
+        }
+    }
+    emit cameras_changed();
+    show_list();
+}
 
 } // namespace denso::ui
