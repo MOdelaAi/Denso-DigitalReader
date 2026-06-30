@@ -44,13 +44,13 @@ public:
     /// Last status SSID — used to float the connected row to the top on scan.
     std::string current_ssid() const { return ssid_; }
 
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override;
-
     // Behaviour hooks the dialog installs (the card's Slint callbacks).
     std::function<void(const std::string&, const NetConfigUi&)> on_apply;
     std::function<void()> on_scan;
     std::function<void(const std::string&, const std::string&)> on_connect;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void rebuild_static_visibility();

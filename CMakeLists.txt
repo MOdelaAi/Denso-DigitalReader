@@ -8,6 +8,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # The Qt Widgets UI uses Q_OBJECT (signals/slots) — let CMake run moc.
 set(CMAKE_AUTOMOC ON)
 
+# The UI sources carry UTF-8 literals (✕, …, —, 🔒, ×) that must reach the
+# binary byte-for-byte. They are saved UTF-8 (no BOM), so tell MSVC to read —
+# and emit — UTF-8 rather than the system code page.
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core library — the parsing/formatting/builder logic ported 1:1 from the Rust
 # crate, plus the SQLite persistence layer (db + repos) built on Qt6::Sql. The

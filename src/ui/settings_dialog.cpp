@@ -135,7 +135,14 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     connect(nav_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0) return;
         stack_->setCurrentIndex(row);
-        if (row == 3) refresh_network();  // Network tab → refresh, like the Slint nav
+        if (row == 3) {
+            // Entering the Network tab re-creates the Slint NetCards, whose
+            // init re-seeds the editors from the saved config — reproduce that
+            // by re-seeding here, then refresh status (the Slint nav callback).
+            eth_card_->set_config(eth_config_);
+            wifi_card_->set_config(wifi_config_);
+            refresh_network();
+        }
     });
 
     // ── Footer ──
@@ -233,15 +240,15 @@ QWidget* SettingsDialog::build_network() {
     head->addWidget(refresh_btn_, 0);
     v->addLayout(head);
 
-    eth_card_ = new NetCard(QStringLiteral("Ethernet"), "ethernet", false,
-                            load_config_or_default(db_, "ethernet"));
+    eth_config_ = load_config_or_default(db_, "ethernet");
+    eth_card_ = new NetCard(QStringLiteral("Ethernet"), "ethernet", false, eth_config_);
     eth_card_->on_apply = [this](const std::string& iface, const NetConfigUi& ui) {
         apply_net_config(iface, ui);
     };
     v->addWidget(eth_card_);
 
-    wifi_card_ = new NetCard(QStringLiteral("Wi-Fi"), "wifi", true,
-                             load_config_or_default(db_, "wifi"));
+    wifi_config_ = load_config_or_default(db_, "wifi");
+    wifi_card_ = new NetCard(QStringLiteral("Wi-Fi"), "wifi", true, wifi_config_);
     wifi_card_->on_apply = [this](const std::string& iface, const NetConfigUi& ui) {
         apply_net_config(iface, ui);
     };
@@ -343,8 +350,10 @@ void SettingsDialog::apply_net_config(const std::string& iface, const NetConfigU
     } catch (const std::exception& e) {
         status = QStringLiteral("Error: %1").arg(QString::fromUtf8(e.what()));
     }
+    const NetConfigUi canonical = to_ui_config(cfg);
+    (iface == "wifi" ? wifi_config_ : eth_config_) = canonical;
     NetCard* card = iface == "wifi" ? wifi_card_ : eth_card_;
-    card->set_config(to_ui_config(cfg));
+    card->set_config(canonical);
     card->set_config_status(status);
 }
 

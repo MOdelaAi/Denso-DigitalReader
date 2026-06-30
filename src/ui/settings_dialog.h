@@ -89,10 +89,14 @@ private:
     QLabel* hw_storage_ = nullptr;
     QLabel* about_version_ = nullptr;
 
-    // Network
+    // Network. The configs mirror the Slint window's eth-config/wifi-config
+    // properties: the editors re-seed from them on each Network-tab entry (so
+    // un-applied edits are discarded), and Apply refreshes them.
     QPushButton* refresh_btn_ = nullptr;
     NetCard* eth_card_ = nullptr;
     NetCard* wifi_card_ = nullptr;
+    NetConfigUi eth_config_;
+    NetConfigUi wifi_config_;
 };
 
 } // namespace denso::ui
