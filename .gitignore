@@ -1,2 +1,13 @@
-/target
+# CMake out-of-source build dirs
+/build
+/build-*
+/out
+/cmake-build-*
+
+# Runtime SQLite store (created next to the executable)
+denso.db
+denso.db-shm
+denso.db-wal
+
+# Screenshots / generated images (assets/icon.png is force-tracked)
 *.png

@@ -1,63 +1,85 @@
 # Denso-DigitalReader
 
-Desktop app (Rust + Slint) for reading a 4-digit 7-segment display, with a
-settings UI for display resolution, theme, hardware spec, and network
+Desktop app (C++ / Qt Widgets / CMake) for reading a 4-digit 7-segment display,
+with a settings UI for display resolution, theme, hardware spec, and network
 configuration. Single SQLite store (`denso.db`) next to the executable.
+
+Ported 1:1 from a Rust + Slint original; the port history lives on branch
+`port/cpp-qt`.
 
 ## Commands
 
+Out-of-source build with CMake (needs Qt6: Core, Gui, Sql, Widgets).
+
 | Action | Command |
 |---|---|
-| Build | `cargo build` |
-| Run | `cargo run` |
-| Test | `cargo test` |
-| Format | `cargo fmt` |
-| Lint | `cargo clippy` |
+| Configure | `cmake -S . -B build` |
+| Build | `cmake --build build` |
+| Test | `ctest --test-dir build` |
+| Run | `./build/src/app/denso` (path varies by generator) |
 
-Baseline: 47 tests pass on Windows (platform-gated tests differ on Linux). The
-count will grow once the in-progress `camera`/`processor` work is wired into
-`main.rs` and covered.
+Tests are Catch2 v3, fetched via `FetchContent` at configure time (needs net on
+first configure). Platform backend tests are compiled per-OS, so the passing
+count differs between Windows and Linux.
 
-## Source map (`src/`)
+## Layout
 
-| Path | Responsibility |
-|---|---|
-| `main.rs` | Thin orchestrator: build window → open DB → migrate → reassert network → wire → run. |
-| `wiring/mod.rs` | Installs all UI callbacks (settings persistence, network status/scan/connect). |
-| `wiring/convert.rs` | The **only** Slint↔domain type boundary. |
-| `db/mod.rs` | SQLite base: open `denso.db` in WAL mode. |
-| `db/migrations.rs` | `user_version`-gated schema migrations (the one ordered chain). |
-| `settings/` | Persisted app settings (window size, theme, fullscreen). `mod`=API, `model`=type, `repo`=persistence. |
-| `hardware/` | Read-only host spec via `sysinfo` (collected fresh, not stored). |
-| `camera/` | **(in progress)** Camera inventory (USB/IP) + per-camera ROI areas. `model.rs` defines the domain types; `mod`/`repo`, migration, and UI wiring are not written yet, and the module is **not yet declared in `main.rs`** (does not compile in). |
-| `processor/` | **(in progress)** New module reserved for the capture→processing stage. Currently an empty placeholder, not declared in `main.rs`. |
-| `network/mod.rs` | `NetworkBackend` trait + `reassert` (app owns config, pushes to OS at boot). |
-| `network/model.rs`, `network/repo.rs` | Network domain types + config persistence. |
-| `network/windows/` | Windows backend: `netsh` (config), `wifi` (scan/join), `parse` (status). |
-| `network/linux.rs` | Linux backend (`nmcli`). |
+Two targets wired by a thin top-level `CMakeLists.txt` (`add_subdirectory`):
 
-## UI map (`ui/`, Slint)
+| Path | Target | Role |
+|---|---|---|
+| `src/core/` | `denso_core` (lib) | Ported logic + SQLite persistence + the Qt-free domain↔view boundary. `Qt6::Core`/`Sql` only. |
+| `src/app/` | `denso` (GUI exe) | Qt Widgets UI + entry-point orchestrator. `Qt6::Widgets`. |
+| `tests/` | `denso_tests` | Catch2 unit tests over `denso_core`. |
+
+Each target dir is its own include root, so includes read `network/model.h`,
+`ui/convert.h`, `ui/theme.h`, etc.
+
+### `src/core/` (library)
 
 | Path | Responsibility |
 |---|---|
-| `app-window.slint` | Root window (build entry point referenced by `build.rs`). |
-| `theme.slint` | Global `Theme` + color palette. |
-| `settings-modal.slint`, `camera-modal.slint` | Modal shells. |
-| `settings/*.slint` | Tab panels: about, appearance, display, network, system. |
-| `widgets/*.slint` | Reusable components (buttons, nav-item, spec-row, glyphs). |
+| `db/db.{h,cpp}` | SQLite base (`denso.db`, WAL) + the `user_version`-gated migration chain in `run_migrations`. |
+| `settings/` | Persisted app settings (window size, theme, fullscreen) + resolution presets. `settings`=type/presets, `repo`=persistence + legacy import. |
+| `hardware/` | Read-only host spec via `QSysInfo`/`QStorageInfo` (collected fresh, never stored). `format`=byte formatting, `collect`=the spec. |
+| `network/` | `NetworkBackend` base + `reassert` + `NetConfig`/status types + config persistence (`repo`). |
+| `network/{netsh,wifi,parse,nmcli}.*` | Pure, unit-tested OS-command helpers (Windows netsh/wifi/parse, Linux nmcli). |
+| `network/backends/{windows,linux}_backend.cpp` | OS backends (`QProcess`); one compiled per platform. |
+| `ui/convert.{h,cpp}`, `ui/viewmodel.h` | The **only** domain↔view boundary (Qt-free, testable). |
+| `camera/model.h`, `strutil.h` | Camera domain struct (placeholder, not wired); small string helpers. |
+
+### `src/app/` (GUI)
+
+| Path | Responsibility |
+|---|---|
+| `main.cpp` | Thin orchestrator: open DB → migrate → import legacy → reassert network → load settings → apply startup → run. |
+| `ui/theme.{h,cpp}` | Palette + theme-driven app stylesheet. |
+| `ui/mainwindow.{h,cpp}` | Root window (top bar + content) + settings-persistence handlers. |
+| `ui/settings_dialog.{h,cpp}` | Settings modal: nav + 5 panels; owns DB-backed network apply + threaded scan/connect/refresh. |
+| `ui/netcard.{h,cpp}` | Per-interface status + editable config + Wi-Fi scan/connect. |
+| `ui/camera_dialog.{h,cpp}` | Placeholder camera modal. |
 
 ## Hard rules
 
-- Domain types **never** see Slint types. The only boundary is `wiring/convert.rs`.
-- `main.rs` stays a thin orchestrator — no business logic.
-- Each feature module is `mod.rs` (API) / `model.rs` (domain type) / `repo.rs` (persistence only). Access policy is the repo's API surface, not SQL grants.
-- Persistence is one SQLite file with version-gated migrations in `db/migrations.rs`.
-- OS-specific work sits behind the `NetworkBackend` trait (`network/windows/`, `network/linux.rs`). Keep both platforms in sync.
-- `target/` and `*.png` are git-ignored (see `.gitignore`). `assets/icon.png` predates the `*.png` rule and stays tracked — it is a committed source asset that `build.rs` converts to `icon.ico` under `target/` at build time.
+- Domain/feature types **never** see UI view types. The only boundary is
+  `src/core/ui/convert.{h,cpp}`.
+- `main.cpp` stays a thin orchestrator — no business logic.
+- Each feature is split header/source by responsibility (type / persistence /
+  OS access). Access policy is the `repo`'s API surface, not SQL grants.
+- Persistence is one SQLite file with version-gated migrations in
+  `db::run_migrations` — add a migration, never edit a shipped one.
+- OS-specific work sits behind `NetworkBackend` (`network/backends/`). Keep both
+  platforms in sync.
+- `denso_core` must not link `Qt6::Widgets` — the GUI cannot leak into the
+  testable core.
+- `build/` and `*.png` are git-ignored (see `.gitignore`); `assets/icon.png`
+  predates the `*.png` rule and stays tracked as a committed source asset.
 
 ## Workflow
 
 Superpowers SDD: specs in `docs/superpowers/specs/`, plans in
 `docs/superpowers/plans/`, progress ledger in `.superpowers/sdd/progress.md`.
 
-See `docs/ARCHITECTURE.md` for data flow, persistence model, and gotchas.
+See `docs/ARCHITECTURE.md` for the boot sequence, data flow, threading model,
+persistence model, and gotchas (including: no Qt6/CMake on the porting dev
+host — real build/ctest/GUI smoke happen on the build machine).

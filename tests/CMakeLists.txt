@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests — Catch2 v3 (fetched). Mirror the Rust `#[cfg(test)]` unit tests. Links
+# denso_core, so every test reaches the ported logic + the view converter.
+# ─────────────────────────────────────────────────────────────────────────────
+include(FetchContent)
+FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG        v3.5.2
+)
+FetchContent_MakeAvailable(Catch2)
+
+add_executable(denso_tests
+    test_netsh.cpp
+    test_parse.cpp
+    test_wifi.cpp
+    test_format.cpp
+    test_settings.cpp
+    test_db.cpp
+    test_settings_repo.cpp
+    test_network_repo.cpp
+    test_nmcli.cpp
+    test_reassert.cpp
+    test_convert.cpp
+)
+target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2WithMain)
+
+list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+include(Catch)
+catch_discover_tests(denso_tests)
