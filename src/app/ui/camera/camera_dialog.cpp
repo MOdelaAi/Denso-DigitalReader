@@ -5,17 +5,22 @@
 #include "ui/camera/camera_devices.h"
 #include "ui/camera/ip_scan.h"
 #include "ui/camera/rtsp_templates.h"
+#include "ui/camera/snapshot.h"
 
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSize>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QThread>
@@ -28,6 +33,15 @@ namespace denso::ui {
 namespace {
 
 constexpr const char* kStatusBad = "#ef4444";
+
+struct ResPreset { const char* label; int w; int h; };
+constexpr ResPreset kResPresets[] = {
+    {"640 × 480", 640, 480},
+    {"1280 × 720", 1280, 720},
+    {"1920 × 1080", 1920, 1080},
+    {"2560 × 1440", 2560, 1440},
+};
+constexpr int kDefaultResIndex = 1;  // 1280 × 720
 
 /// Header chrome: "Camera" title + close glyph + gold rule.
 QVBoxLayout* header(QDialog* dlg) {
@@ -234,6 +248,8 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
 
     stack_->addWidget(add_page);
 
+    build_configure_page();
+
     outer->addWidget(stack_, 1);
 
     rebuild_list();
@@ -413,5 +429,87 @@ void CameraDialog::save_new_camera() {
     emit cameras_changed();
     show_list();
 }
+
+void CameraDialog::build_configure_page() {
+    config_page_ = new QWidget;
+    auto* v = new QVBoxLayout(config_page_);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(12);
+
+    preview_label_ = new QLabel(QStringLiteral("Click Capture to preview"));
+    preview_label_->setProperty("dim", true);
+    preview_label_->setAlignment(Qt::AlignCenter);
+    preview_label_->setMinimumHeight(240);
+    preview_label_->setObjectName(QStringLiteral("card"));
+    v->addWidget(preview_label_, 1);
+
+    auto* cap_row = new QHBoxLayout;
+    cap_row->addStretch(1);
+    capture_btn_ = new QPushButton(QStringLiteral("Capture"));
+    capture_btn_->setProperty("flatText", true);
+    connect(capture_btn_, &QPushButton::clicked, this, &CameraDialog::capture_snapshot);
+    cap_row->addWidget(capture_btn_, 0);
+    v->addLayout(cap_row);
+
+    const auto field = [&](const QString& label, QWidget* w) {
+        auto* row = new QHBoxLayout;
+        auto* l = dim_label(label);
+        l->setFixedWidth(96);
+        row->addWidget(l, 0);
+        row->addWidget(w, 1);
+        v->addLayout(row);
+    };
+
+    res_combo_ = new QComboBox;
+    for (const ResPreset& p : kResPresets) {
+        res_combo_->addItem(QString::fromLatin1(p.label), QSize(p.w, p.h));
+    }
+    res_combo_->setCurrentIndex(kDefaultResIndex);
+    field(QStringLiteral("Resolution"), res_combo_);
+
+    fps_spin_ = new QSpinBox;
+    fps_spin_->setRange(1, 60);
+    fps_spin_->setValue(30);
+    field(QStringLiteral("FPS"), fps_spin_);
+
+    rotation_combo_ = new QComboBox;
+    for (int deg : {0, 90, 180, 270}) {
+        rotation_combo_->addItem(QStringLiteral("%1°").arg(deg), deg);
+    }
+    connect(rotation_combo_, &QComboBox::currentIndexChanged, this,
+            &CameraDialog::render_preview);
+    field(QStringLiteral("Rotation"), rotation_combo_);
+
+    pitch_spin_ = new QDoubleSpinBox;
+    pitch_spin_->setRange(-45.0, 45.0);
+    pitch_spin_->setSingleStep(0.5);
+    pitch_spin_->setSuffix(QStringLiteral("°"));
+    field(QStringLiteral("Pitch"), pitch_spin_);
+
+    roll_spin_ = new QDoubleSpinBox;
+    roll_spin_->setRange(-45.0, 45.0);
+    roll_spin_->setSingleStep(0.5);
+    roll_spin_->setSuffix(QStringLiteral("°"));
+    field(QStringLiteral("Roll"), roll_spin_);
+
+    auto* footer = new QHBoxLayout;
+    auto* back = new QPushButton(QStringLiteral("Back"));
+    connect(back, &QPushButton::clicked, this, &CameraDialog::show_list);
+    footer->addWidget(back, 0);
+    footer->addStretch(1);
+    auto* save = new QPushButton(QStringLiteral("Save"));
+    save->setProperty("gold", true);
+    connect(save, &QPushButton::clicked, this, &CameraDialog::save_configured_camera);
+    footer->addWidget(save, 0);
+    v->addLayout(footer);
+
+    stack_->addWidget(config_page_);  // index 2
+}
+
+void CameraDialog::capture_snapshot() {}
+void CameraDialog::render_preview() {}
+void CameraDialog::save_configured_camera() {}
+void CameraDialog::populate_configure(const camera::Camera&) {}
+void CameraDialog::read_configure_into_draft() {}
 
 } // namespace denso::ui

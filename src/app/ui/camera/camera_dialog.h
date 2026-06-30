@@ -5,10 +5,16 @@
 // configure/draw wizard steps and live preview come in later slices.
 #pragma once
 
+#include "camera/model.h"
+
 #include <QDialog>
+#include <QImage>
 #include <QSqlDatabase>
+#include <cstdint>
+#include <optional>
 
 class QComboBox;
+class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -39,6 +45,13 @@ private:
     void save_new_camera();        // validate + insert + back to the list
     void update_source_fields();   // show USB vs IP inputs
 
+    void build_configure_page();                         // construct the 3rd stack page
+    void populate_configure(const camera::Camera& cam);  // fill controls from a camera
+    void read_configure_into_draft();                    // controls → draft_
+    void capture_snapshot();                             // threaded grab + preview (Task 4)
+    void render_preview();                               // re-apply rotation to last_frame_ (Task 4)
+    void save_configured_camera();                       // insert/update from draft_ (Task 5)
+
     QSqlDatabase db_;
     QStackedWidget* stack_ = nullptr;
 
@@ -64,6 +77,21 @@ private:
     QLineEdit* pass_edit_ = nullptr;
     QLabel* rtsp_preview_ = nullptr;
     QLabel* add_error_ = nullptr;
+
+    // Configure page
+    QWidget* config_page_ = nullptr;
+    QLabel* preview_label_ = nullptr;
+    QPushButton* capture_btn_ = nullptr;
+    QComboBox* res_combo_ = nullptr;       // itemData = QSize
+    QSpinBox* fps_spin_ = nullptr;
+    QComboBox* rotation_combo_ = nullptr;  // itemData = degrees (0/90/180/270)
+    QDoubleSpinBox* pitch_spin_ = nullptr;
+    QDoubleSpinBox* roll_spin_ = nullptr;
+
+    // Add/edit mode state
+    std::optional<int64_t> editing_id_;    // set in edit mode; empty when adding
+    camera::Camera draft_;                 // camera being added/edited
+    QImage last_frame_;                    // most recent un-rotated snapshot frame
 };
 
 } // namespace denso::ui
