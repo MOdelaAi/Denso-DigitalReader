@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# The Qt Widgets UI uses Q_OBJECT (signals/slots) — let CMake run moc.
+set(CMAKE_AUTOMOC ON)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core library — the parsing/formatting/builder logic ported 1:1 from the Rust
 # crate, plus the SQLite persistence layer (db + repos) built on Qt6::Sql. The
@@ -12,7 +15,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # of the port. The pure-std logic and the Qt-backed persistence share one lib
 # at this app's scale.
 # ─────────────────────────────────────────────────────────────────────────────
-find_package(Qt6 REQUIRED COMPONENTS Core Sql)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Sql Widgets)
 
 add_library(denso_core STATIC
     src/network/netsh.cpp
@@ -26,6 +29,7 @@ add_library(denso_core STATIC
     src/db/db.cpp
     src/settings/repo.cpp
     src/network/repo.cpp
+    src/ui/convert.cpp
 )
 target_include_directories(denso_core PUBLIC src)
 target_link_libraries(denso_core PUBLIC Qt6::Core Qt6::Sql)
@@ -37,6 +41,23 @@ if(WIN32)
 elseif(UNIX AND NOT APPLE)
     target_sources(denso_core PRIVATE src/network/linux_backend.cpp)
 endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GUI application — the Qt Widgets port of the Slint screens (theme, root
+# window, settings/camera modals) + the entry-point orchestrator. WIN32 makes
+# it a windowed app (no console) on Windows. APP_VERSION mirrors Rust's
+# env!("CARGO_PKG_VERSION").
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(denso WIN32
+    src/main.cpp
+    src/ui/theme.cpp
+    src/ui/netcard.cpp
+    src/ui/settings_dialog.cpp
+    src/ui/camera_dialog.cpp
+    src/ui/mainwindow.cpp
+)
+target_link_libraries(denso PRIVATE denso_core Qt6::Widgets)
+target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests — Catch2 v3 (fetched). Mirror the Rust `#[cfg(test)]` unit tests.
@@ -61,6 +82,7 @@ add_executable(denso_tests
     tests/test_network_repo.cpp
     tests/test_nmcli.cpp
     tests/test_reassert.cpp
+    tests/test_convert.cpp
 )
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2WithMain)
 
