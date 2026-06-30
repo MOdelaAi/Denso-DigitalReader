@@ -46,7 +46,8 @@ Each target dir is its own include root, so includes read `network/model.h`,
 | `network/windows/{netsh,wifi,parse}.*`, `network/linux/nmcli.*` | Pure, unit-tested OS-command helpers (compiled on every OS for off-device testing). |
 | `network/windows/windows_backend.cpp`, `network/linux/linux_backend.cpp` | OS backends (`QProcess`); one compiled per platform. |
 | `ui/convert.{h,cpp}`, `ui/viewmodel.h` | The **only** domain↔view boundary (Qt-free, testable). |
-| `camera/model.h`, `strutil.h` | Camera domain struct (placeholder, not wired); small string helpers. |
+| `camera/model.h` | Camera domain struct (placeholder, not wired). |
+| `util/strutil.h` | Small shared string helpers. |
 
 ### `src/app/` (GUI)
 

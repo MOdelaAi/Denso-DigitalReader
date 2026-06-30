@@ -1,6 +1,6 @@
 #include "network/linux/nmcli.h"
 
-#include "strutil.h"
+#include "util/strutil.h"
 
 #include <cstddef>
 #include <string>
