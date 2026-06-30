@@ -18,7 +18,10 @@ add_library(denso_core STATIC
     src/network/netsh.cpp
     src/network/parse.cpp
     src/network/wifi.cpp
+    src/network/nmcli.cpp
+    src/network/backend.cpp
     src/hardware/format.cpp
+    src/hardware/collect.cpp
     src/settings/settings.cpp
     src/db/db.cpp
     src/settings/repo.cpp
@@ -26,6 +29,14 @@ add_library(denso_core STATIC
 )
 target_include_directories(denso_core PUBLIC src)
 target_link_libraries(denso_core PUBLIC Qt6::Core Qt6::Sql)
+
+# OS network backend — exactly one platform implementation is compiled; the
+# other make_*_backend() declaration stays undefined (never odr-used).
+if(WIN32)
+    target_sources(denso_core PRIVATE src/network/windows_backend.cpp)
+elseif(UNIX AND NOT APPLE)
+    target_sources(denso_core PRIVATE src/network/linux_backend.cpp)
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests — Catch2 v3 (fetched). Mirror the Rust `#[cfg(test)]` unit tests.
@@ -48,6 +59,8 @@ add_executable(denso_tests
     tests/test_db.cpp
     tests/test_settings_repo.cpp
     tests/test_network_repo.cpp
+    tests/test_nmcli.cpp
+    tests/test_reassert.cpp
 )
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2WithMain)
 
