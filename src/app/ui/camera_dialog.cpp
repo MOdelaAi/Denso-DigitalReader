@@ -4,12 +4,13 @@
 #include "camera/repo.h"
 #include "ui/camera_devices.h"
 
-#include <QComboBox>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QListWidgetItem>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QStackedWidget>
@@ -118,13 +119,21 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     name_row->addWidget(name_edit_, 1);
     add_v->addLayout(name_row);
 
-    // USB inputs
+    // USB inputs — a Scan button + a selectable results list (like Wi-Fi scan).
     usb_box_ = new QWidget;
-    auto* usb_l = new QHBoxLayout(usb_box_);
-    usb_l->setContentsMargins(0, 0, 0, 0);
-    usb_l->addWidget(dim_label(QStringLiteral("Device")), 0);
-    usb_combo_ = new QComboBox;
-    usb_l->addWidget(usb_combo_, 1);
+    auto* usb_v = new QVBoxLayout(usb_box_);
+    usb_v->setContentsMargins(0, 0, 0, 0);
+    usb_v->setSpacing(6);
+    auto* scan_row = new QHBoxLayout;
+    scan_row->addWidget(dim_label(QStringLiteral("Detected cameras")), 1);
+    scan_btn_ = new QPushButton(QStringLiteral("Scan"));
+    scan_btn_->setProperty("flatText", true);
+    connect(scan_btn_, &QPushButton::clicked, this, &CameraDialog::scan_usb);
+    scan_row->addWidget(scan_btn_, 0);
+    usb_v->addLayout(scan_row);
+    usb_list_ = new QListWidget;
+    usb_list_->setMaximumHeight(160);
+    usb_v->addWidget(usb_list_);
     add_v->addWidget(usb_box_);
 
     // IP inputs
@@ -183,16 +192,25 @@ void CameraDialog::show_add() {
     user_edit_->clear();
     add_error_->setVisible(false);
 
-    usb_combo_->clear();
-    for (const UsbCamera& cam : list_usb_cameras()) {
-        usb_combo_->addItem(cam.name, cam.index);
-    }
-    if (usb_combo_->count() == 0) {
-        usb_combo_->addItem(QStringLiteral("No USB cameras found"), -1);
-    }
+    scan_usb();
 
     update_source_fields();
     stack_->setCurrentIndex(1);
+}
+
+void CameraDialog::scan_usb() {
+    usb_list_->clear();
+    const std::vector<UsbCamera> cams = list_usb_cameras();
+    for (const UsbCamera& cam : cams) {
+        auto* item = new QListWidgetItem(cam.name, usb_list_);
+        item->setData(Qt::UserRole, cam.index);
+    }
+    if (cams.empty()) {
+        auto* none = new QListWidgetItem(QStringLiteral("No USB cameras found"), usb_list_);
+        none->setFlags(Qt::NoItemFlags);  // not selectable
+    } else {
+        usb_list_->setCurrentRow(0);  // preselect the first
+    }
 }
 
 void CameraDialog::update_source_fields() {
@@ -248,14 +266,14 @@ void CameraDialog::save_new_camera() {
     c.name = name_edit_->text().trimmed().toStdString();
 
     if (usb_radio_->isChecked()) {
-        const int index = usb_combo_->currentData().toInt();
-        if (index < 0) {
-            fail(QStringLiteral("No USB camera selected."));
+        QListWidgetItem* item = usb_list_->currentItem();
+        if (!item || !(item->flags() & Qt::ItemIsSelectable)) {
+            fail(QStringLiteral("Select a camera, or click Scan."));
             return;
         }
         c.camera_type = "usb";
-        c.index = static_cast<uint32_t>(index);
-        if (c.name.empty()) c.name = usb_combo_->currentText().toStdString();
+        c.index = static_cast<uint32_t>(item->data(Qt::UserRole).toInt());
+        if (c.name.empty()) c.name = item->text().toStdString();
     } else {
         const QString rtsp = rtsp_edit_->text().trimmed();
         if (rtsp.isEmpty()) {

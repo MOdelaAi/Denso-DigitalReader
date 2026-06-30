@@ -8,9 +8,10 @@
 #include <QDialog>
 #include <QSqlDatabase>
 
-class QComboBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
+class QPushButton;
 class QRadioButton;
 class QStackedWidget;
 class QVBoxLayout;
@@ -30,6 +31,7 @@ private:
     void show_list();              // refresh rows + switch to the list page
     void show_add();               // reset the form + switch to the add page
     void rebuild_list();           // populate camera rows from the DB
+    void scan_usb();               // (re)enumerate USB cameras into the results list
     void save_new_camera();        // validate + insert + back to the list
     void update_source_fields();   // show USB vs IP inputs
 
@@ -45,7 +47,8 @@ private:
     QRadioButton* ip_radio_ = nullptr;
     QLineEdit* name_edit_ = nullptr;
     QWidget* usb_box_ = nullptr;
-    QComboBox* usb_combo_ = nullptr;   // itemData = device index
+    QPushButton* scan_btn_ = nullptr;
+    QListWidget* usb_list_ = nullptr;  // each item's UserRole = device index
     QWidget* ip_box_ = nullptr;
     QLineEdit* rtsp_edit_ = nullptr;
     QLineEdit* user_edit_ = nullptr;
