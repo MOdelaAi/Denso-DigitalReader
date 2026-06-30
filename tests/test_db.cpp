@@ -7,6 +7,8 @@
 #include <QSqlQuery>
 #include <QVariant>
 
+#include <utility>
+
 using denso::db::Db;
 using denso::db::run_migrations;
 

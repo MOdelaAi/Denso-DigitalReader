@@ -4,9 +4,12 @@
 #include "settings/repo.h"
 #include "settings/settings.h"
 
+#include <QByteArray>
 #include <QDir>
 #include <QFile>
 #include <QSqlQuery>
+
+#include <utility>
 
 using denso::db::Db;
 using denso::db::run_migrations;

@@ -6,6 +6,7 @@
 #include <QVariant>
 
 #include <atomic>
+#include <utility>
 
 namespace denso::db {
 
@@ -70,7 +71,8 @@ std::optional<Db> Db::open(const QString& path) {
         ok = db.open();
         if (ok) {
             // WAL mode so the UI can read while a background thread writes.
-            QSqlQuery(db).exec(QStringLiteral("PRAGMA journal_mode = WAL"));
+            // Rust propagates a pragma failure out of open(); mirror that.
+            ok = QSqlQuery(db).exec(QStringLiteral("PRAGMA journal_mode = WAL"));
         }
     }
     if (!ok) {

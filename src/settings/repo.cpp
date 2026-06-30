@@ -1,5 +1,6 @@
 #include "settings/repo.h"
 
+#include <QByteArray>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -93,14 +94,25 @@ void import_legacy(const QSqlDatabase& db, const QString& json_path) {
 
     // serde requires width/height (no default) and rejects wrong-typed fields;
     // dark defaults to true, fullscreen to false. Mirror that contract exactly.
+    // serde's u32 also rejects negative, fractional, or out-of-range numbers —
+    // a plain isDouble() would wrongly accept "-5"/"3.5"/"5e12", so require an
+    // exact, in-range integer here too (all valid u32 are exact as double).
     const QJsonValue wv = obj.value(QStringLiteral("width"));
     const QJsonValue hv = obj.value(QStringLiteral("height"));
-    if (!wv.isDouble() || !hv.isDouble()) {
+    const auto is_u32 = [](const QJsonValue& v) {
+        if (!v.isDouble()) {
+            return false;
+        }
+        const double d = v.toDouble();
+        return d >= 0.0 && d <= 4294967295.0
+            && d == static_cast<double>(static_cast<uint32_t>(d));
+    };
+    if (!is_u32(wv) || !is_u32(hv)) {
         return;
     }
     Settings s;  // defaults supply dark=true, fullscreen=false
-    s.width = static_cast<uint32_t>(wv.toInteger());
-    s.height = static_cast<uint32_t>(hv.toInteger());
+    s.width = static_cast<uint32_t>(wv.toDouble());
+    s.height = static_cast<uint32_t>(hv.toDouble());
     if (obj.contains(QStringLiteral("dark"))) {
         const QJsonValue dv = obj.value(QStringLiteral("dark"));
         if (!dv.isBool()) {

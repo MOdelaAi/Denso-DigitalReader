@@ -1,5 +1,6 @@
 #include "network/repo.h"
 
+#include <QMetaType>
 #include <QSqlQuery>
 #include <QString>
 #include <QVariant>
