@@ -34,9 +34,9 @@ A config change travels: UI edit → callback in `wiring/mod.rs` →
 One file, `denso.db`, WAL mode so the UI reads while a background thread writes.
 Schema lives entirely in `db/migrations.rs` as a single ordered, `user_version`
 -gated chain — add a migration, never edit a shipped one. Each feature's `repo`
-exposes only the operations its data policy allows (e.g. `reader` is
-append-only; `hardware` is not stored at all). The `settings` table is a typed
-key/value store; other tables are typed columns.
+exposes only the operations its data policy allows (e.g. `hardware` is not
+stored at all). The `settings` table is a typed key/value store; other tables
+are typed columns.
 
 ## Network feature (`network/`)
 
@@ -51,6 +51,22 @@ platform impl (`WindowsBackend`, `LinuxBackend`, or a `NullBackend` fallback).
 The Windows backend is split into `netsh` (build + run config commands),
 `wifi` (parse scans, build WLAN profile XML), and `parse` (status parsing);
 the pure helpers are unit-tested off-device.
+
+## In progress: camera + processor
+
+The working tree is mid-refactor, adding camera management and a processing
+stage. This is the intended direction, not shipped structure:
+
+- `camera/` is new: `model.rs` defines `Camera` / `CameraArea` /
+  `CameraWithAreas` (USB + IP cameras with per-camera ROI areas; the IP camera
+  password lives in the OS secret store, never the DB). Its `mod`/`repo`,
+  migration, and UI wiring are not written yet.
+- `processor/` is a new, currently empty placeholder for the
+  capture→processing stage.
+
+Neither module is declared in `main.rs`, so neither compiles into the build
+yet. Domain `model.rs` files now split their types into `DB (persisted)` and
+`Runtime (transient)` sections (see `camera/model.rs`, `network/model.rs`).
 
 ## Gotchas
 

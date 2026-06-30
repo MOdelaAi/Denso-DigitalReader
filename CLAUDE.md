@@ -1,8 +1,8 @@
 # Denso-DigitalReader
 
-Desktop app (Rust + Slint) that reads a 4-digit 7-segment display and logs the
-readings, with a settings UI for display resolution, theme, hardware spec, and
-network configuration. Single SQLite store (`denso.db`) next to the executable.
+Desktop app (Rust + Slint) for reading a 4-digit 7-segment display, with a
+settings UI for display resolution, theme, hardware spec, and network
+configuration. Single SQLite store (`denso.db`) next to the executable.
 
 ## Commands
 
@@ -14,7 +14,9 @@ network configuration. Single SQLite store (`denso.db`) next to the executable.
 | Format | `cargo fmt` |
 | Lint | `cargo clippy` |
 
-Baseline: 50 tests pass on Windows (platform-gated tests differ on Linux).
+Baseline: 47 tests pass on Windows (platform-gated tests differ on Linux). The
+count will grow once the in-progress `camera`/`processor` work is wired into
+`main.rs` and covered.
 
 ## Source map (`src/`)
 
@@ -27,7 +29,8 @@ Baseline: 50 tests pass on Windows (platform-gated tests differ on Linux).
 | `db/migrations.rs` | `user_version`-gated schema migrations (the one ordered chain). |
 | `settings/` | Persisted app settings (window size, theme, fullscreen). `mod`=API, `model`=type, `repo`=persistence. |
 | `hardware/` | Read-only host spec via `sysinfo` (collected fresh, not stored). |
-| `reader/` | Append-only digit-reader log. |
+| `camera/` | **(in progress)** Camera inventory (USB/IP) + per-camera ROI areas. `model.rs` defines the domain types; `mod`/`repo`, migration, and UI wiring are not written yet, and the module is **not yet declared in `main.rs`** (does not compile in). |
+| `processor/` | **(in progress)** New module reserved for the capture→processing stage. Currently an empty placeholder, not declared in `main.rs`. |
 | `network/mod.rs` | `NetworkBackend` trait + `reassert` (app owns config, pushes to OS at boot). |
 | `network/model.rs`, `network/repo.rs` | Network domain types + config persistence. |
 | `network/windows/` | Windows backend: `netsh` (config), `wifi` (scan/join), `parse` (status). |

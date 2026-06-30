@@ -3,7 +3,6 @@ slint::include_modules!();
 mod db;
 mod hardware;
 mod network;
-mod reader;
 mod settings;
 mod wiring;
 

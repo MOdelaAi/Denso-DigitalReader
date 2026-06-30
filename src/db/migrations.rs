@@ -6,7 +6,7 @@ use rusqlite::Connection;
 
 /// Current schema version. Bump and add a `version < N` block when changing
 /// the schema.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Apply any pending schema migrations, gated by `PRAGMA user_version` so
 /// repeated runs are no-ops. Safe to call on every startup.
@@ -49,6 +49,14 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    if version < 3 {
+        // The digit-reader log feature was removed; drop its now-unused table.
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_readings_ts;
+             DROP TABLE IF EXISTS readings;",
+        )?;
+    }
+
     // PRAGMA can't be parameterized; SCHEMA_VERSION is a trusted constant.
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     Ok(())
@@ -63,18 +71,35 @@ mod tests {
     }
 
     #[test]
-    fn migrations_create_settings_and_readings_tables() {
+    fn migrations_create_settings_table() {
         let c = mem();
         run_migrations(&c).unwrap();
         let count: i64 = c
             .query_row(
                 "SELECT count(*) FROM sqlite_master \
-                 WHERE type='table' AND name IN ('settings','readings')",
+                 WHERE type='table' AND name='settings'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn migrations_drop_readings_table() {
+        // `readings` is created at v1 and dropped at v3 — a fully migrated DB
+        // must not have it (the digit-reader log feature was removed).
+        let c = mem();
+        run_migrations(&c).unwrap();
+        let count: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type='table' AND name='readings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
