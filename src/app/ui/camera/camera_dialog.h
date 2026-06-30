@@ -1,8 +1,9 @@
-// The Camera modal: the management hub for cameras. Two views in a stack — a
-// list of configured cameras (with delete) and an "add camera" form (USB
-// auto-scan via QMediaDevices, or manual IP/RTSP entry). Persists through the
+// The Camera modal: the management hub for cameras. Three views in a stack — a
+// list of configured cameras (with delete), an "add camera" form (USB
+// auto-scan via QMediaDevices, or manual IP/RTSP entry), and a Configure page
+// (snapshot preview + resolution/fps/rotation/pitch/roll). Persists through the
 // camera repo and emits cameras_changed() so the main view can refresh. The
-// configure/draw wizard steps and live preview come in later slices.
+// draw-ROI wizard step and live preview come in later slices.
 #pragma once
 
 #include "camera/model.h"

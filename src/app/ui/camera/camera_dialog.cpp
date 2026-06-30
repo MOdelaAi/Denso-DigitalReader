@@ -462,7 +462,7 @@ void CameraDialog::build_configure_page() {
 
     res_combo_ = new QComboBox;
     for (const ResPreset& p : kResPresets) {
-        res_combo_->addItem(QString::fromLatin1(p.label), QSize(p.w, p.h));
+        res_combo_->addItem(QString::fromUtf8(p.label), QSize(p.w, p.h));
     }
     res_combo_->setCurrentIndex(kDefaultResIndex);
     field(QStringLiteral("Resolution"), res_combo_);
