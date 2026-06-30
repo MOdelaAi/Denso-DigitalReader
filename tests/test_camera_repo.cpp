@@ -48,6 +48,7 @@ Camera ip_cam() {
     c.ip = "192.168.1.20";
     c.rtsp = "rtsp://192.168.1.20:554/stream";
     c.username = "admin";
+    c.password = "secret";
     return c;
 }
 
@@ -89,6 +90,16 @@ TEST_CASE("IP camera round-trips with null usb index") {
     REQUIRE(got->ip == "192.168.1.20");
     REQUIRE(got->rtsp == "rtsp://192.168.1.20:554/stream");
     REQUIRE(got->username == "admin");
+    REQUIRE(got->password == "secret");
+}
+
+TEST_CASE("USB camera has no password") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+    const auto got = get(d.handle(), *id);
+    REQUIRE(got.has_value());
+    REQUIRE_FALSE(got->password.has_value());
 }
 
 TEST_CASE("get returns nullopt for a missing id") {

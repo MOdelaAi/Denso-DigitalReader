@@ -8,6 +8,7 @@
 #include <QDialog>
 #include <QSqlDatabase>
 
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -33,6 +34,7 @@ private:
     void rebuild_list();           // populate camera rows from the DB
     void scan_usb();               // (re)enumerate USB cameras into the results list
     void scan_ip();                // probe the subnet for open RTSP hosts (threaded)
+    void update_rtsp_preview();    // rebuild the constructed RTSP URL preview
     void save_new_camera();        // validate + insert + back to the list
     void update_source_fields();   // show USB vs IP inputs
 
@@ -53,8 +55,12 @@ private:
     QWidget* ip_box_ = nullptr;
     QPushButton* ip_scan_btn_ = nullptr;
     QListWidget* ip_list_ = nullptr;   // each item's UserRole = host IP string
-    QLineEdit* rtsp_edit_ = nullptr;
+    QComboBox* mfr_combo_ = nullptr;   // manufacturer (itemData = index into rtsp_manufacturers)
+    QComboBox* stream_combo_ = nullptr;  // 0 = main, 1 = sub
+    QLineEdit* ip_edit_ = nullptr;
     QLineEdit* user_edit_ = nullptr;
+    QLineEdit* pass_edit_ = nullptr;
+    QLabel* rtsp_preview_ = nullptr;
     QLabel* add_error_ = nullptr;
 };
 

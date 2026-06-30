@@ -11,7 +11,7 @@ namespace {
 
 const QString COLUMNS = QStringLiteral(
     "id, name, camera_type, active, cam_index, ip, rtsp, username, "
-    "width, height, fps, pitch, roll, rotation");
+    "width, height, fps, pitch, roll, rotation, password");
 
 QVariant bind_str(const std::optional<std::string>& v) {
     return v ? QVariant(QString::fromStdString(*v)) : QVariant(QMetaType(QMetaType::QString));
@@ -45,6 +45,7 @@ void bind_fields(QSqlQuery& q, const Camera& c) {
     q.addBindValue(static_cast<double>(c.pitch));
     q.addBindValue(static_cast<double>(c.roll));
     q.addBindValue(static_cast<uint>(c.rotation));
+    q.addBindValue(bind_str(c.password));
 }
 
 Camera from_row(const QSqlQuery& q) {
@@ -63,6 +64,7 @@ Camera from_row(const QSqlQuery& q) {
     c.pitch = q.value(11).toFloat();
     c.roll = q.value(12).toFloat();
     c.rotation = q.value(13).toUInt();
+    c.password = col_str(q.value(14));
     return c;
 }
 
@@ -72,8 +74,8 @@ std::optional<int64_t> insert(const QSqlDatabase& db, const Camera& c) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "INSERT INTO camera (name, camera_type, active, cam_index, ip, rtsp, username, "
-        "width, height, fps, pitch, roll, rotation) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "width, height, fps, pitch, roll, rotation, password) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     bind_fields(q, c);
     if (!q.exec()) {
         return std::nullopt;
@@ -85,7 +87,8 @@ bool update(const QSqlDatabase& db, const Camera& c) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "UPDATE camera SET name=?, camera_type=?, active=?, cam_index=?, ip=?, rtsp=?, "
-        "username=?, width=?, height=?, fps=?, pitch=?, roll=?, rotation=? WHERE id=?"));
+        "username=?, width=?, height=?, fps=?, pitch=?, roll=?, rotation=?, password=? "
+        "WHERE id=?"));
     bind_fields(q, c);
     q.addBindValue(static_cast<qlonglong>(c.id));
     return q.exec();

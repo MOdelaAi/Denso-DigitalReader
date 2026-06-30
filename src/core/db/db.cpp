@@ -15,7 +15,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 4;
+constexpr int SCHEMA_VERSION = 5;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -218,6 +218,15 @@ bool run_migrations(const QSqlDatabase& db) {
         }
         if (!run("CREATE INDEX IF NOT EXISTS idx_camera_area_camera "
                  "ON camera_area(camera_id)")) {
+            return false;
+        }
+    }
+
+    if (version < 5) {
+        // IP cameras carry a password (injected into the RTSP URL at capture
+        // time). Plaintext in the local DB for now; OS secret store is later
+        // hardening. Nullable — USB cameras have none.
+        if (!run("ALTER TABLE camera ADD COLUMN password TEXT")) {
             return false;
         }
     }

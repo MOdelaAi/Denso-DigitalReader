@@ -12,7 +12,6 @@ namespace denso::camera {
 // ─── DB (persisted) ───────────────────────────────────────────────────────────
 
 /// One camera entry. `camera_type` drives which optional fields are used.
-/// The IP camera password is intentionally absent — stored in OS secret store.
 struct Camera {
     int64_t id = 0;
     std::string name;
@@ -22,10 +21,14 @@ struct Camera {
     // USB only
     std::optional<uint32_t> index;
 
-    // IP only
+    // IP only. `rtsp` is the credential-free stream URL built from the
+    // manufacturer template; `username`/`password` are injected at capture
+    // time. (Plaintext in the local DB for now; OS secret store is later
+    // hardening.)
     std::optional<std::string> ip;
     std::optional<std::string> rtsp;
     std::optional<std::string> username;
+    std::optional<std::string> password;
 
     // Capture
     uint32_t width = 0;

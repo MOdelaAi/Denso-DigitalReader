@@ -11,6 +11,7 @@ add_executable(denso WIN32
     ui/camera_view.cpp
     ui/camera_devices.cpp
     ui/ip_scan.cpp
+    ui/rtsp_templates.cpp
     ui/netcard.cpp
     ui/settings_dialog.cpp
     ui/camera_dialog.cpp

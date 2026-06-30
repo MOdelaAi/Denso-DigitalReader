@@ -4,7 +4,9 @@
 #include "camera/repo.h"
 #include "ui/camera_devices.h"
 #include "ui/ip_scan.h"
+#include "ui/rtsp_templates.h"
 
+#include <QComboBox>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -153,26 +155,57 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     ip_l->addLayout(ip_scan_row);
 
     ip_list_ = new QListWidget;
-    ip_list_->setMaximumHeight(120);
+    ip_list_->setMaximumHeight(110);
     connect(ip_list_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
         if (!(item->flags() & Qt::ItemIsSelectable)) return;
-        rtsp_edit_->setText(
-            QStringLiteral("rtsp://%1:554/").arg(item->data(Qt::UserRole).toString()));
+        ip_edit_->setText(item->data(Qt::UserRole).toString());
     });
     ip_l->addWidget(ip_list_);
 
-    auto* rtsp_row = new QHBoxLayout;
-    rtsp_row->addWidget(dim_label(QStringLiteral("RTSP URL")), 0);
-    rtsp_edit_ = new QLineEdit;
-    rtsp_edit_->setPlaceholderText(QStringLiteral("rtsp://192.168.1.20:554/stream"));
-    rtsp_row->addWidget(rtsp_edit_, 1);
-    ip_l->addLayout(rtsp_row);
-    auto* user_row = new QHBoxLayout;
-    user_row->addWidget(dim_label(QStringLiteral("Username")), 0);
+    // A labelled field row, reused for the IP camera inputs.
+    const auto field = [&](const QString& label, QWidget* w) {
+        auto* row = new QHBoxLayout;
+        auto* l = dim_label(label);
+        l->setFixedWidth(96);
+        row->addWidget(l, 0);
+        row->addWidget(w, 1);
+        ip_l->addLayout(row);
+    };
+
+    mfr_combo_ = new QComboBox;
+    for (size_t i = 0; i < rtsp_manufacturers().size(); ++i) {
+        mfr_combo_->addItem(rtsp_manufacturers()[i].name, static_cast<int>(i));
+    }
+    field(QStringLiteral("Manufacturer"), mfr_combo_);
+
+    stream_combo_ = new QComboBox;
+    stream_combo_->addItems({QStringLiteral("Main stream"), QStringLiteral("Sub stream")});
+    field(QStringLiteral("Stream"), stream_combo_);
+
+    ip_edit_ = new QLineEdit;
+    ip_edit_->setPlaceholderText(QStringLiteral("192.168.1.20"));
+    field(QStringLiteral("IP address"), ip_edit_);
+
     user_edit_ = new QLineEdit;
-    user_edit_->setPlaceholderText(QStringLiteral("optional"));
-    user_row->addWidget(user_edit_, 1);
-    ip_l->addLayout(user_row);
+    user_edit_->setPlaceholderText(QStringLiteral("admin"));
+    field(QStringLiteral("Username"), user_edit_);
+
+    pass_edit_ = new QLineEdit;
+    pass_edit_->setEchoMode(QLineEdit::Password);
+    field(QStringLiteral("Password"), pass_edit_);
+
+    rtsp_preview_ = new QLabel;
+    rtsp_preview_->setProperty("faint", true);
+    rtsp_preview_->setWordWrap(true);
+    rtsp_preview_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    field(QStringLiteral("RTSP URL"), rtsp_preview_);
+
+    connect(mfr_combo_, &QComboBox::currentIndexChanged, this,
+            &CameraDialog::update_rtsp_preview);
+    connect(stream_combo_, &QComboBox::currentIndexChanged, this,
+            &CameraDialog::update_rtsp_preview);
+    connect(ip_edit_, &QLineEdit::textChanged, this, &CameraDialog::update_rtsp_preview);
+
     add_v->addWidget(ip_box_);
 
     add_error_ = new QLabel;
@@ -208,9 +241,13 @@ void CameraDialog::show_add() {
     // Reset the form and refresh the detected-device list.
     usb_radio_->setChecked(true);
     name_edit_->clear();
-    rtsp_edit_->clear();
+    ip_edit_->clear();
     user_edit_->clear();
+    pass_edit_->clear();
+    mfr_combo_->setCurrentIndex(0);
+    stream_combo_->setCurrentIndex(0);
     ip_list_->clear();  // IP scan is on-demand (slow); not run on open
+    update_rtsp_preview();
     add_error_->setVisible(false);
 
     scan_usb();
@@ -264,6 +301,15 @@ void CameraDialog::scan_ip() {
     });
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     thread->start();
+}
+
+void CameraDialog::update_rtsp_preview() {
+    if (rtsp_manufacturers().empty()) return;
+    const RtspManufacturer& m =
+        rtsp_manufacturers()[static_cast<size_t>(mfr_combo_->currentData().toInt())];
+    const QString ip = ip_edit_->text().trimmed();
+    rtsp_preview_->setText(
+        ip.isEmpty() ? QStringLiteral("—") : build_rtsp(m, ip, stream_combo_->currentIndex() == 1));
 }
 
 void CameraDialog::update_source_fields() {
@@ -328,16 +374,21 @@ void CameraDialog::save_new_camera() {
         c.index = static_cast<uint32_t>(item->data(Qt::UserRole).toInt());
         if (c.name.empty()) c.name = item->text().toStdString();
     } else {
-        const QString rtsp = rtsp_edit_->text().trimmed();
-        if (rtsp.isEmpty()) {
-            fail(QStringLiteral("An RTSP URL is required."));
+        const QString ip = ip_edit_->text().trimmed();
+        if (ip.isEmpty()) {
+            fail(QStringLiteral("An IP address is required."));
             return;
         }
+        const RtspManufacturer& m =
+            rtsp_manufacturers()[static_cast<size_t>(mfr_combo_->currentData().toInt())];
         c.camera_type = "ip";
-        c.rtsp = rtsp.toStdString();
-        const QString user = user_edit_->text().trimmed();
+        c.ip = ip.toStdString();
+        c.rtsp = build_rtsp(m, ip, stream_combo_->currentIndex() == 1).toStdString();
+        const QString user = user_edit_->text();
+        const QString pass = pass_edit_->text();
         if (!user.isEmpty()) c.username = user.toStdString();
-        if (c.name.empty()) c.name = rtsp.toStdString();
+        if (!pass.isEmpty()) c.password = pass.toStdString();
+        if (c.name.empty()) c.name = ip.toStdString();
     }
 
     if (!camera::insert(db_, c)) {
