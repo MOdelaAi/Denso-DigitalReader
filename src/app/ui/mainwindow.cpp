@@ -44,9 +44,10 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     bar->addWidget(settings_btn, 0);
     col->addWidget(top);
 
-    // Main content area: the camera view (empty "no cameras" state for now).
-    auto* content = new CameraView;
-    col->addWidget(content, 1);
+    // Main content area: the camera view (empty state / configured count).
+    camera_view_ = new CameraView(db_);
+    connect(camera_view_, &CameraView::add_camera_requested, this, &MainWindow::open_camera);
+    col->addWidget(camera_view_, 1);
 
     setCentralWidget(central);
 
@@ -93,8 +94,9 @@ void MainWindow::open_settings() {
 
 void MainWindow::open_camera() {
     if (!camera_) {
-        camera_ = new CameraDialog(this);
+        camera_ = new CameraDialog(db_, this);
         camera_->setModal(true);
+        connect(camera_, &CameraDialog::cameras_changed, camera_view_, &CameraView::reload);
     }
     camera_->show();
     camera_->raise();

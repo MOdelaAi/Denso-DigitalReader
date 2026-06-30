@@ -17,6 +17,7 @@ namespace denso::ui {
 
 class SettingsDialog;
 class CameraDialog;
+class CameraView;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -45,6 +46,7 @@ private:
     std::shared_ptr<settings::Settings> state_;
     SettingsDialog* settings_ = nullptr;
     CameraDialog* camera_ = nullptr;
+    CameraView* camera_view_ = nullptr;
 };
 
 } // namespace denso::ui
