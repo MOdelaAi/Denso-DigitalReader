@@ -14,6 +14,7 @@ class QLineEdit;
 class QListWidget;
 class QPushButton;
 class QRadioButton;
+class QSpinBox;
 class QStackedWidget;
 class QVBoxLayout;
 
@@ -57,6 +58,7 @@ private:
     QListWidget* ip_list_ = nullptr;   // each item's UserRole = host IP string
     QComboBox* mfr_combo_ = nullptr;   // manufacturer (itemData = index into rtsp_manufacturers)
     QComboBox* stream_combo_ = nullptr;  // 0 = main, 1 = sub
+    QSpinBox* channel_spin_ = nullptr;   // NVR/DVR channel (1-based)
     QLineEdit* ip_edit_ = nullptr;
     QLineEdit* user_edit_ = nullptr;
     QLineEdit* pass_edit_ = nullptr;

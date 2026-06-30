@@ -49,6 +49,9 @@ Camera ip_cam() {
     c.rtsp = "rtsp://192.168.1.20:554/stream";
     c.username = "admin";
     c.password = "secret";
+    c.channel = 3;
+    c.stream = 1;
+    c.manufacturer = "Dahua";
     return c;
 }
 
@@ -91,6 +94,9 @@ TEST_CASE("IP camera round-trips with null usb index") {
     REQUIRE(got->rtsp == "rtsp://192.168.1.20:554/stream");
     REQUIRE(got->username == "admin");
     REQUIRE(got->password == "secret");
+    REQUIRE(got->channel == 3u);
+    REQUIRE(got->stream == 1u);
+    REQUIRE(got->manufacturer == "Dahua");
 }
 
 TEST_CASE("USB camera has no password") {
@@ -100,6 +106,17 @@ TEST_CASE("USB camera has no password") {
     const auto got = get(d.handle(), *id);
     REQUIRE(got.has_value());
     REQUIRE_FALSE(got->password.has_value());
+}
+
+TEST_CASE("USB camera has no channel, stream, or manufacturer") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+    const auto got = get(d.handle(), *id);
+    REQUIRE(got.has_value());
+    REQUIRE_FALSE(got->channel.has_value());
+    REQUIRE_FALSE(got->stream.has_value());
+    REQUIRE_FALSE(got->manufacturer.has_value());
 }
 
 TEST_CASE("get returns nullopt for a missing id") {

@@ -15,7 +15,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 5;
+constexpr int SCHEMA_VERSION = 6;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -227,6 +227,23 @@ bool run_migrations(const QSqlDatabase& db) {
         // time). Plaintext in the local DB for now; OS secret store is later
         // hardening. Nullable — USB cameras have none.
         if (!run("ALTER TABLE camera ADD COLUMN password TEXT")) {
+            return false;
+        }
+    }
+
+    if (version < 6) {
+        // Structured RTSP inputs persisted alongside the generated `rtsp` URL,
+        // so a future edit flow can repopulate the form without parsing the
+        // URL. All nullable — USB cameras have none. `channel` addresses
+        // NVR/DVR streams; `stream` is 0=main / 1=sub; `manufacturer` is the
+        // vendor name.
+        if (!run("ALTER TABLE camera ADD COLUMN channel INTEGER")) {
+            return false;
+        }
+        if (!run("ALTER TABLE camera ADD COLUMN stream INTEGER")) {
+            return false;
+        }
+        if (!run("ALTER TABLE camera ADD COLUMN manufacturer TEXT")) {
             return false;
         }
     }

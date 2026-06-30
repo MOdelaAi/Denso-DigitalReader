@@ -5,14 +5,17 @@ namespace denso::ui {
 const std::vector<RtspManufacturer>& rtsp_manufacturers() {
     static const std::vector<RtspManufacturer> list = {
         {QStringLiteral("Dahua"),
-         QStringLiteral("rtsp://%1:554/cam/realmonitor?channel=1&subtype=0"),
-         QStringLiteral("rtsp://%1:554/cam/realmonitor?channel=1&subtype=1")},
+         QStringLiteral("rtsp://%1:554/cam/realmonitor?channel=%2&subtype=0"),
+         QStringLiteral("rtsp://%1:554/cam/realmonitor?channel=%2&subtype=1")},
     };
     return list;
 }
 
-QString build_rtsp(const RtspManufacturer& manufacturer, const QString& ip, bool substream) {
-    return (substream ? manufacturer.sub_template : manufacturer.main_template).arg(ip);
+QString build_rtsp(const RtspManufacturer& manufacturer, const QString& ip, int channel,
+                   bool substream) {
+    return (substream ? manufacturer.sub_template : manufacturer.main_template)
+        .arg(ip)
+        .arg(channel);
 }
 
 QString with_credentials(const QString& rtsp, const QString& user, const QString& password) {

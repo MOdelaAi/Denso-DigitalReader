@@ -29,6 +29,9 @@ struct Camera {
     std::optional<std::string> rtsp;
     std::optional<std::string> username;
     std::optional<std::string> password;
+    std::optional<uint32_t> channel;          // NVR/DVR channel number (1-based)
+    std::optional<uint32_t> stream;           // 0 = main stream, 1 = sub stream
+    std::optional<std::string> manufacturer;  // vendor name, e.g. "Dahua"
 
     // Capture
     uint32_t width = 0;

@@ -24,7 +24,12 @@ add_executable(denso_tests
     test_reassert.cpp
     test_convert.cpp
     test_camera_repo.cpp
+    test_rtsp_templates.cpp
+    # rtsp_templates lives in the GUI app target but depends only on QtCore
+    # (QString), so compile it straight into the tests for unit coverage.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/rtsp_templates.cpp
 )
+target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
 
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)

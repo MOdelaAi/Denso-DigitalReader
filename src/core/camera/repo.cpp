@@ -11,7 +11,8 @@ namespace {
 
 const QString COLUMNS = QStringLiteral(
     "id, name, camera_type, active, cam_index, ip, rtsp, username, "
-    "width, height, fps, pitch, roll, rotation, password");
+    "width, height, fps, pitch, roll, rotation, password, "
+    "channel, stream, manufacturer");
 
 QVariant bind_str(const std::optional<std::string>& v) {
     return v ? QVariant(QString::fromStdString(*v)) : QVariant(QMetaType(QMetaType::QString));
@@ -46,6 +47,9 @@ void bind_fields(QSqlQuery& q, const Camera& c) {
     q.addBindValue(static_cast<double>(c.roll));
     q.addBindValue(static_cast<uint>(c.rotation));
     q.addBindValue(bind_str(c.password));
+    q.addBindValue(bind_uint(c.channel));
+    q.addBindValue(bind_uint(c.stream));
+    q.addBindValue(bind_str(c.manufacturer));
 }
 
 Camera from_row(const QSqlQuery& q) {
@@ -65,6 +69,9 @@ Camera from_row(const QSqlQuery& q) {
     c.roll = q.value(12).toFloat();
     c.rotation = q.value(13).toUInt();
     c.password = col_str(q.value(14));
+    c.channel = col_uint(q.value(15));
+    c.stream = col_uint(q.value(16));
+    c.manufacturer = col_str(q.value(17));
     return c;
 }
 
@@ -74,8 +81,8 @@ std::optional<int64_t> insert(const QSqlDatabase& db, const Camera& c) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "INSERT INTO camera (name, camera_type, active, cam_index, ip, rtsp, username, "
-        "width, height, fps, pitch, roll, rotation, password) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "width, height, fps, pitch, roll, rotation, password, channel, stream, manufacturer) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     bind_fields(q, c);
     if (!q.exec()) {
         return std::nullopt;
@@ -87,7 +94,8 @@ bool update(const QSqlDatabase& db, const Camera& c) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "UPDATE camera SET name=?, camera_type=?, active=?, cam_index=?, ip=?, rtsp=?, "
-        "username=?, width=?, height=?, fps=?, pitch=?, roll=?, rotation=?, password=? "
+        "username=?, width=?, height=?, fps=?, pitch=?, roll=?, rotation=?, password=?, "
+        "channel=?, stream=?, manufacturer=? "
         "WHERE id=?"));
     bind_fields(q, c);
     q.addBindValue(static_cast<qlonglong>(c.id));

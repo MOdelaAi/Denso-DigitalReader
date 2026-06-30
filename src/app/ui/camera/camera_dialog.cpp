@@ -16,6 +16,7 @@
 #include <QListWidgetItem>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QThread>
 #include <QVBoxLayout>
@@ -182,6 +183,11 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     stream_combo_->addItems({QStringLiteral("Main stream"), QStringLiteral("Sub stream")});
     field(QStringLiteral("Stream"), stream_combo_);
 
+    channel_spin_ = new QSpinBox;
+    channel_spin_->setRange(1, 255);
+    channel_spin_->setValue(1);
+    field(QStringLiteral("Channel"), channel_spin_);
+
     ip_edit_ = new QLineEdit;
     ip_edit_->setPlaceholderText(QStringLiteral("192.168.1.20"));
     field(QStringLiteral("IP address"), ip_edit_);
@@ -204,6 +210,7 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
             &CameraDialog::update_rtsp_preview);
     connect(stream_combo_, &QComboBox::currentIndexChanged, this,
             &CameraDialog::update_rtsp_preview);
+    connect(channel_spin_, &QSpinBox::valueChanged, this, &CameraDialog::update_rtsp_preview);
     connect(ip_edit_, &QLineEdit::textChanged, this, &CameraDialog::update_rtsp_preview);
 
     add_v->addWidget(ip_box_);
@@ -246,6 +253,7 @@ void CameraDialog::show_add() {
     pass_edit_->clear();
     mfr_combo_->setCurrentIndex(0);
     stream_combo_->setCurrentIndex(0);
+    channel_spin_->setValue(1);
     ip_list_->clear();  // IP scan is on-demand (slow); not run on open
     update_rtsp_preview();
     add_error_->setVisible(false);
@@ -309,7 +317,9 @@ void CameraDialog::update_rtsp_preview() {
         rtsp_manufacturers()[static_cast<size_t>(mfr_combo_->currentData().toInt())];
     const QString ip = ip_edit_->text().trimmed();
     rtsp_preview_->setText(
-        ip.isEmpty() ? QStringLiteral("—") : build_rtsp(m, ip, stream_combo_->currentIndex() == 1));
+        ip.isEmpty() ? QStringLiteral("—")
+                     : build_rtsp(m, ip, channel_spin_->value(),
+                                  stream_combo_->currentIndex() == 1));
 }
 
 void CameraDialog::update_source_fields() {
@@ -383,7 +393,12 @@ void CameraDialog::save_new_camera() {
             rtsp_manufacturers()[static_cast<size_t>(mfr_combo_->currentData().toInt())];
         c.camera_type = "ip";
         c.ip = ip.toStdString();
-        c.rtsp = build_rtsp(m, ip, stream_combo_->currentIndex() == 1).toStdString();
+        c.manufacturer = m.name.toStdString();
+        c.stream = static_cast<uint32_t>(stream_combo_->currentIndex());
+        c.channel = static_cast<uint32_t>(channel_spin_->value());
+        c.rtsp = build_rtsp(m, ip, channel_spin_->value(),
+                            stream_combo_->currentIndex() == 1)
+                     .toStdString();
         const QString user = user_edit_->text();
         const QString pass = pass_edit_->text();
         if (!user.isEmpty()) c.username = user.toStdString();

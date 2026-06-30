@@ -109,6 +109,17 @@ QString style_sheet(const Palette& p) {
             background: %(panel2); color: %(txt);
             selection-background-color: %(panel3);
         }
+        QAbstractSpinBox {
+            background: %(panel); color: %(txt);
+            border: 1px solid %(panel3); border-radius: 6px; padding: 4px 6px;
+            selection-background-color: %(gold);
+        }
+        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
+            background: %(panel3); border: none; width: 16px;
+        }
+        QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
+            background: %(gold);
+        }
         QCheckBox { color: %(txt); background: transparent; }
 
         #navList { background: transparent; border: none; }
