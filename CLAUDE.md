@@ -9,11 +9,13 @@ Ported 1:1 from a Rust + Slint original; the port history lives on branch
 
 ## Commands
 
-Out-of-source build with CMake (needs Qt6: Core, Gui, Sql, Widgets).
+Out-of-source build with CMake (needs Qt6: Core, Gui, Sql, Widgets). Builds and
+runs on the MSYS2 UCRT64 toolchain (`pacman -S mingw-w64-ucrt-x86_64-qt6-base
+mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja`).
 
 | Action | Command |
 |---|---|
-| Configure | `cmake -S . -B build` |
+| Configure | `cmake -S . -B build -G Ninja` |
 | Build | `cmake --build build` |
 | Test | `ctest --test-dir build` |
 | Run | `./build/src/app/denso` (path varies by generator) |
@@ -82,5 +84,5 @@ Superpowers SDD: specs in `docs/superpowers/specs/`, plans in
 `docs/superpowers/plans/`, progress ledger in `.superpowers/sdd/progress.md`.
 
 See `docs/ARCHITECTURE.md` for the boot sequence, data flow, threading model,
-persistence model, and gotchas (including: no Qt6/CMake on the porting dev
-host — real build/ctest/GUI smoke happen on the build machine).
+persistence model, and gotchas (including the QSQLITE read-cursor-before-DDL
+locking rule).

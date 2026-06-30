@@ -108,9 +108,17 @@ mirror the Rust `Result::Err(String)` as a thrown `std::runtime_error`;
 
 ## Gotchas
 
-- **No Qt6/CMake on the porting dev host.** Only the Qt-free core subset is
-  g++-checkable here; the real `cmake` build, `ctest`, and a GUI smoke must run
-  on the build machine. Treat "builds" as unverified until then.
+- **QSQLITE keeps a read cursor alive until the `QSqlQuery` is finished or
+  destroyed.** A live read cursor (e.g. an un-scoped `PRAGMA user_version`
+  query) makes a later schema change on the same connection fail with
+  `SQLITE_LOCKED` ("database table is locked"). `run_migrations` reads the
+  version in its own scope so the cursor is released before any DDL — keep that
+  pattern (finish/scope reads before writes); `rusqlite` finalized this for us,
+  QSQLITE does not.
+- Builds on the **MSYS2 UCRT64** toolchain (GCC + Qt6 from `pacman`): configure
+  with `cmake -S . -B build -G Ninja` — its CMake finds Qt6 with no
+  `CMAKE_PREFIX_PATH`. On that toolchain the MSVC `/utf-8` flag is a harmless
+  no-op (GCC reads UTF-8 by default).
 - MSVC needs `/utf-8` (set in the top-level CMake) so the UI's non-ASCII
   literals (`✕ … — 🔒`) reach the binary byte-for-byte (the sources are UTF-8
   without BOM).
