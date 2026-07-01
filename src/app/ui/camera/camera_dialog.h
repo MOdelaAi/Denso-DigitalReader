@@ -27,6 +27,7 @@ class WizardStepper;
 class CameraListPage;
 class CameraAddPage;
 class CameraConfigurePage;
+class ModelsPage;
 class CameraAreasPage;
 
 class CameraDialog : public QDialog {
@@ -50,7 +51,11 @@ private:
     void begin_configure(const camera::Camera& cam, std::optional<int64_t> id,
                          const QString& preview_text);  // seed draft + open Configure
     void capture_snapshot();       // threaded grab → push frame to the pages
-    void save_configured_camera(); // insert/update from draft_, then Areas step
+    void save_configured_camera(); // insert/update from draft_, then Models step
+
+    // Models flow.
+    void enter_models();  // load the catalog + current attachments → Models page
+    void save_models();   // persist the attached models → advance to Areas step
 
     // Areas flow.
     void enter_areas(bool direct);  // load areas + frame → Areas page
@@ -67,7 +72,8 @@ private:
     CameraListPage* list_page_ = nullptr;            // stack index 0
     CameraAddPage* add_page_ = nullptr;              // stack index 1
     CameraConfigurePage* configure_page_ = nullptr;  // stack index 2
-    CameraAreasPage* areas_page_ = nullptr;          // stack index 3
+    ModelsPage* models_page_ = nullptr;              // stack index 3
+    CameraAreasPage* areas_page_ = nullptr;          // stack index 4
 
     // Add/edit mode state.
     std::optional<int64_t> editing_id_;  // set in edit mode; empty when adding

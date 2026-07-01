@@ -39,6 +39,7 @@ add_executable(denso WIN32
     ui/camera/dialog/list_page.cpp
     ui/camera/dialog/add_page.cpp
     ui/camera/dialog/configure_page.cpp
+    ui/camera/dialog/models_page.cpp
     ui/camera/dialog/areas_page.cpp
     ui/camera/dialog/wizard_stepper.cpp
     ui/camera/dialog/roi_canvas.cpp

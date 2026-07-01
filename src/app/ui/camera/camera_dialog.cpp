@@ -2,10 +2,12 @@
 
 #include "camera/camera.h"
 #include "camera/repo.h"
+#include "detection/repo.h"
 #include "ui/camera/dialog/add_page.h"
 #include "ui/camera/dialog/areas_page.h"
 #include "ui/camera/dialog/configure_page.h"
 #include "ui/camera/dialog/list_page.h"
+#include "ui/camera/dialog/models_page.h"
 #include "ui/camera/shared/rtsp_templates.h"  // with_credentials
 #include "ui/camera/shared/snapshot.h"
 #include "ui/camera/dialog/wizard_stepper.h"
@@ -72,7 +74,7 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     // hidden on the list; driven by show_page().
     stepper_ = new WizardStepper(
         {QStringLiteral("Source"), QStringLiteral("Configure"),
-         QStringLiteral("Areas")});
+         QStringLiteral("Models"), QStringLiteral("Areas")});
     stepper_->setVisible(false);
     outer->addWidget(stepper_, 0);
 
@@ -119,12 +121,21 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
             &CameraDialog::capture_snapshot);
     stack_->addWidget(configure_page_);
 
-    // ── Areas page (index 3) ──────────────────────────────────────────────
+    // ── Models page (index 3) ──────────────────────────────────────
+    models_page_ = new ModelsPage;
+    models_page_->set_db(db_);
+    connect(models_page_, &ModelsPage::back_requested, this,
+            [this] { show_page(2); });
+    connect(models_page_, &ModelsPage::finish_requested, this,
+            &CameraDialog::save_models);
+    stack_->addWidget(models_page_);
+
+    // ── Areas page (index 4) ──────────────────────────────────────────────
     areas_page_ = new CameraAreasPage;
     connect(areas_page_, &CameraAreasPage::back_requested, this, [this] {
-        // Direct entry (per-row Areas) has no Configure step to return to.
+        // Direct entry (per-row Areas) has no Models step to return to.
         if (entered_areas_directly_) show_list();
-        else show_page(2);
+        else show_page(3);
     });
     connect(areas_page_, &CameraAreasPage::skip_requested, this, &CameraDialog::show_list);
     connect(areas_page_, &CameraAreasPage::save_requested, this, &CameraDialog::save_areas);
@@ -150,7 +161,7 @@ void CameraDialog::show_page(int index) {
         stepper_->set_current(index - 1);  // page 1→step 0, 2→1, 3→2
     }
     // Near-fullscreen only while drawing areas; restore the compact size else.
-    if (index == 3) {
+    if (index == 4) {
         expand_for_areas();
     } else {
         restore_size();
@@ -262,8 +273,27 @@ void CameraDialog::save_configured_camera() {
         draft_.id = *new_id;
     }
     emit cameras_changed();
-    // Advance to the optional Draw-ROI step; the snapshot is already captured,
-    // so reuse it. Reached via Next, so Back from Areas returns to Configure.
+    // Advance to the Models step; the snapshot is already captured. Reached via
+    // Next, so Back from Models returns to Configure.
+    enter_models();
+}
+
+void CameraDialog::enter_models() {
+    // editing_id_ is set by save_configured_camera (add: just-inserted id; edit:
+    // the existing id), so the camera exists before its models are attached.
+    models_page_->load_for(editing_id_.value_or(0));
+    show_page(3);
+}
+
+void CameraDialog::save_models() {
+    if (editing_id_.has_value()) {
+        denso::detection::set_camera_models(
+            db_, *editing_id_, models_page_->selections(*editing_id_));
+        // The grid resolves detection via detection_for on reload, so refresh
+        // it now that the attachments changed.
+        emit cameras_changed();
+    }
+    // Advance to the optional Draw-ROI step; the snapshot is already captured.
     enter_areas(/*direct=*/false);
 }
 
