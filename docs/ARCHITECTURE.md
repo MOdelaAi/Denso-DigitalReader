@@ -34,11 +34,14 @@ A thin orchestrator:
    mode; `db::run_migrations` applies the `user_version`-gated chain.
 3. `settings::import_legacy` does a one-time import of any pre-SQLite
    `settings.json` sitting beside the DB.
-4. `network::reassert` re-applies every saved interface config to the OS — the
+4. `ui::sync_models` scans `models/*.onnx` beside the exe and upserts each into
+   the `model` catalog (reading its class names from the ONNX metadata), so
+   models dropped into `models/` become selectable in the camera wizard.
+5. `network::reassert` re-applies every saved interface config to the OS — the
    app is the source of truth. Best-effort and non-fatal: failures are logged
    via `qWarning`, never block startup.
-5. `settings::load` seeds an in-memory `std::shared_ptr<Settings>`.
-6. `MainWindow::apply_startup` populates read-only fields + applies settings;
+6. `settings::load` seeds an in-memory `std::shared_ptr<Settings>`.
+7. `MainWindow::apply_startup` populates read-only fields + applies settings;
    the window/dialog ctors install the callbacks. `QApplication::exec()`.
 
 `Db` (an `optional<Db>` in `main`) outlives the window, so the connection it
@@ -111,15 +114,19 @@ all three.
   so the future detection model consumes the ROI as metadata, not pixels.
 - `frame_processor.{h,cpp}` — the per-camera processing seam. `FrameProcessor`
   is the interface; `OrientationProcessor` (applies rotation/pitch/roll) is the
-  only impl today. When the detection model lands it becomes another
-  `FrameProcessor`, selected per camera by a future config flag — the capture
-  loop and tile don't change. `grid_layout.{h,cpp}` is the pure, unit-tested
+  orientation-only impl, and `DetectionProcessor` layers ONNX inference on top
+  (orient → infer → per-class confidence filter → draw labelled boxes).
+  `camera_grid` picks per camera: `DetectionProcessor` when the camera has
+  attached, loadable models (resolved via `detection::detection_for` +
+  `EngineRegistry`), else plain `OrientationProcessor` — the capture loop and
+  tile don't change. `grid_layout.{h,cpp}` is the pure, unit-tested
   `grid_dims(n)`.
 - `camera_dialog.{h,cpp}` — the camera management hub: a thin **coordinator**
-  over a 4-page stack run as a guided wizard — list + delete, then **① Source**
+  over a 5-page stack run as a guided wizard — list + delete, then **① Source**
   (USB auto-scan, or IP via manufacturer + main/sub stream + credentials with a
   live RTSP-URL preview) → **② Configure** (snapshot preview + resolution / fps /
-  rotation / pitch / roll) → **③ Areas** (draw ROI polygons). Each page is its
+  rotation / pitch / roll) → **③ Models** (attach 1..N detection models, each with
+  per-class confidence) → **④ Areas** (draw ROI polygons). Each page is its
   own widget under `dialog/` (see below), owning its controls and emitting
   request signals; the coordinator owns the camera source (snapshot capture),
   the add/edit DB writes, wizard navigation and modal sizing. A `WizardStepper`
@@ -127,18 +134,23 @@ all three.
   `show_page(index)` is the single entry point that switches the stack page,
   drives the stepper, and resizes — the modal grows to **near-fullscreen on the
   Areas step** for drawing room and restores the compact size on leaving. The
-  Areas step is **optional** (Next from Configure persists the camera; Areas
-  **Skip** returns without writing ROIs, **Finish** saves them); each list row
-  also has an **Areas** button to draw/edit later. `showEvent` reopens the
-  reused dialog on the list at compact size. Persists through `camera::repo`.
-- `dialog/` — the four page widgets the dialog coordinates, each self-contained
+  camera is inserted/updated when Configure's **Next** is pressed, so both the
+  Models and Areas steps attach to a known camera id; Models persists via
+  `detection::set_camera_models` on its Next, Areas is **optional** (Skip
+  returns without writing ROIs, Finish saves them). Each list row also has an
+  **Areas** button to draw/edit later. `showEvent` reopens the reused dialog on
+  the list at compact size. Persists through `camera::repo` + `detection::repo`.
+- `dialog/` — the five page widgets the dialog coordinates, each self-contained
   and DB-light: `page_util` (shared `dim_label` + error colour), `list_page`
   (`CameraListPage`: reads/deletes cameras, emits add/configure/areas requests),
   `add_page` (`CameraAddPage`: the Source form + USB/IP scans, emits the
   assembled draft), `configure_page` (`CameraConfigurePage`: preview +
-  orientation controls; the coordinator pushes frames in via `set_frame`), and
-  `areas_page` (`CameraAreasPage`: edits a working ROI set over the pushed
-  background frame, emits the set on save — no DB access of its own).
+  orientation controls; the coordinator pushes frames in via `set_frame`),
+  `models_page` (`ModelsPage`: lists the model catalog with an attach checkbox +
+  per-class select/conf, pre-filled from `models_for`; emits its selections for
+  `set_camera_models`), and `areas_page` (`CameraAreasPage`: edits a working ROI
+  set over the pushed background frame, emits the set on save — no DB access of
+  its own).
 - `camera_devices.{h,cpp}` — USB enumeration via Qt Multimedia (`QMediaDevices`).
 - `ip_scan.{h,cpp}` — crude IP discovery: a threaded subnet probe for hosts with
   the RTSP port open (Qt Network).
@@ -162,7 +174,7 @@ all three.
   the dialog loads/persists. `roi_geometry` is the pure, unit-tested mapping
   (aspect-fit rect + widget↔normalized conversion with clamping) it builds on.
 - `wizard_stepper.{h,cpp}` — `WizardStepper`, the non-interactive
-  "① Source — ② Configure — ③ Areas" indicator above the page stack;
+  "① Source — ② Configure — ③ Models — ④ Areas" indicator above the page stack;
   `set_current()` emphasizes the active step. Navigation stays with the dialog's
   Back/Next/Finish buttons.
 
@@ -202,6 +214,40 @@ and exactly one `*_backend.cpp` is compiled per OS (the other
 unit-tested off-device: Windows `netsh`/`parse`/`wifi`, Linux `nmcli`. Errors
 mirror the Rust `Result::Err(String)` as a thrown `std::runtime_error`;
 `reassert` catches them into non-fatal `(iface, message)` pairs.
+
+## Detection feature (`src/core/detection/` + `src/app/ui/camera/shared/detection/`)
+
+Per-camera YOLOv8 detection, split across the same domain/runtime line as the
+rest of the app. **Domain** (`src/core/detection/`, Qt/OpenCV-free, unit-tested):
+`detection.h` structs (`DetectionModel` catalog rows, `CameraModel` attachments
+with per-class `ModelClassSelection`, and the resolved `CameraDetection` bundle),
+`class_names` JSON (de)serialization for the `model.class_names` column, and
+`repo` — the model catalog (`upsert_model`/`list_models`), per-camera attachments
+(`models_for`/`set_camera_models`, replace-all in one transaction), and
+`detection_for`, the resolve query that joins a camera's attachments to their
+filenames + class names for the runtime. Schema is migration **v8**
+(`model` / `camera_model` / `camera_model_class`).
+
+**Runtime** (`src/app/ui/camera/shared/detection/`, OpenCV + ONNX Runtime, app
+target only): pure unit-tested helpers `letterbox` (aspect-preserving resize +
+gray pad to 640, plus the inverse box map), `yolo_decode` (the transposed
+`[1, 4+nc, na]` `output0` → boxes via per-anchor argmax, confidence floor, and
+class-agnostic `cv::dnn::NMSBoxes`), and `names_metadata` (parse the ONNX `names`
+dict). These feed the `InferenceEngine` interface, implemented by `OrtEngine`
+(one ORT session with a **TensorRT → CUDA → CPU** execution-provider fallback).
+`EngineRegistry` keeps one shared engine per model filename (lazy, failed loads
+cached as `nullptr` so a bad model isn't retried per frame). `model_sync` runs at
+boot to keep the catalog in step with `models/*.onnx`.
+
+`CameraGrid` chooses per camera: it resolves `detection_for`, asks the registry
+for each attached model, and constructs a `DetectionProcessor` (orient → infer →
+per-class conf filter → draw labelled boxes) when ≥1 model loads, else a plain
+`OrientationProcessor`. The registry (and thus ORT) is touched only on the UI
+thread; the engines outlive the capture streams. ORT + provider DLLs and
+`models/denso.onnx` are copied beside the exe by a `POST_BUILD` step; the GPU
+provider DLLs come from the git-ignored `third_party/gpu_ep/` (see
+`docs/GPU_SETUP.md`), and a missing GPU stack silently degrades to the CPU
+provider.
 
 ## Gotchas
 

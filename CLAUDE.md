@@ -9,9 +9,13 @@ Ported 1:1 from a Rust + Slint original; the port history lives on branch
 
 ## Commands
 
-Out-of-source build with CMake (needs Qt6: Core, Gui, Sql, Widgets). Builds and
-runs on the MSYS2 UCRT64 toolchain (`pacman -S mingw-w64-ucrt-x86_64-qt6-base
-mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja`).
+Out-of-source build with CMake (needs Qt6: Core, Gui, Sql, Widgets, Multimedia,
+Network; OpenCV; and ONNX Runtime for detection). Builds and runs on the MSYS2
+UCRT64 toolchain (`pacman -S mingw-w64-ucrt-x86_64-qt6-base
+mingw-w64-ucrt-x86_64-qt6-multimedia mingw-w64-ucrt-x86_64-opencv
+mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja`). ONNX Runtime is
+provisioned into `third_party/onnxruntime/` (git-ignored — see
+`docs/GPU_SETUP.md`).
 
 | Action | Command |
 |---|---|
@@ -49,6 +53,7 @@ Each target dir is its own include root, so includes read `network/model.h`,
 | `network/windows/windows_backend.cpp`, `network/linux/linux_backend.cpp` | OS backends (`QProcess`); one compiled per platform. |
 | `ui/convert.{h,cpp}`, `ui/viewmodel.h` | The **only** domain↔view boundary (Qt-free, testable). |
 | `camera/` | Camera inventory: domain structs (`model.h`: `Camera` + polygon `CameraArea`) + persistence (`repo`, full camera CRUD + ROI-area read/replace). `area_points` (de)serializes a polygon's normalized vertices to the `camera_area.points` TEXT column. |
+| `detection/` | Per-camera detection config domain: `detection.h` structs (`DetectionModel`, `CameraModel`, `ModelClassSelection`, resolved `CameraDetection`) + persistence (`repo`: model catalog, per-camera attachments, and the `detection_for` resolve query) + `class_names` JSON (de)serialization. Qt/OpenCV-free — the ORT inference runtime lives in the app. |
 | `util/strutil.h` | Small shared string helpers. |
 
 ### `src/app/` (GUI)
@@ -65,20 +70,39 @@ UI grouped by feature: the **app shell** at `ui/` root, plus `ui/settings/` and
 | `ui/settings/netcard.{h,cpp}` | Per-interface status + editable config + Wi-Fi scan/connect. |
 | **`ui/camera/`** | Grouped into two entry points (root) + three layers: `grid/` (live view), `dialog/` (modal), `shared/` (cross-cutting primitives). `shared/` is a leaf; `grid/` and `dialog/` depend only on it, never on each other. |
 | `ui/camera/camera_view.{h,cpp}` | **Entry point.** Main content switcher: empty state (+ Add) when 0 cameras, else the live `CameraGrid`. `release_streams()`/`reload()` free + restart capture around the modal. |
-| `ui/camera/camera_dialog.{h,cpp}` | **Entry point.** Camera management modal — a thin **coordinator** over a 4-page stack (the `dialog/` pages) run as a guided wizard: list/delete + add (USB scan / IP manufacturer+stream+credentials) → Configure (preview + resolution/fps/rotation/pitch/roll) → Areas (draw ROI polygons; optional). Owns snapshot capture, add/edit DB writes, navigation + sizing. Stepper header + Back/Next/Finish footers; `show_page()` centralizes page+stepper+sizing; the modal grows near-fullscreen on the Areas step. |
+| `ui/camera/camera_dialog.{h,cpp}` | **Entry point.** Camera management modal — a thin **coordinator** over a 5-page stack (the `dialog/` pages) run as a guided wizard: list/delete + add (USB scan / IP manufacturer+stream+credentials) → Configure (preview + resolution/fps/rotation/pitch/roll) → Models (attach 1..N detection models + per-class confidence) → Areas (draw ROI polygons; optional). Owns snapshot capture, add/edit DB writes, navigation + sizing. Stepper header + Back/Next/Finish footers; `show_page()` centralizes page+stepper+sizing; the modal grows near-fullscreen on the Areas step. |
 | `ui/camera/grid/camera_grid.{h,cpp}` | Live 1–4 grid: a tile + `CameraStream` per camera (first 4 by id), laid out via `grid_dims`; owns start/stop/reload. |
 | `ui/camera/grid/camera_stream.{h,cpp}` | Per-camera capture worker (own `std::thread` + `cv::VideoCapture`): read → `FrameProcessor` → queued `frame_ready`/`status_changed`; ~15 fps, clean stop/join. |
 | `ui/camera/grid/camera_tile.{h,cpp}` | One grid cell: paints the latest frame (aspect-fit) + name + status dot + the camera's ROI polygons as gold outlines (`set_areas`); placeholder when connecting/offline. |
-| `ui/camera/grid/frame_processor.{h,cpp}` | The per-camera frame seam: `FrameProcessor` interface + `OrientationProcessor` (today). The detection model becomes another impl, chosen by a future config flag. |
+| `ui/camera/grid/frame_processor.{h,cpp}` | The per-camera frame seam: `FrameProcessor` interface + `OrientationProcessor` (orientation only) + `DetectionProcessor` (orientation → ONNX inference → per-class conf filter → draw labelled boxes). `camera_grid` picks per camera: `DetectionProcessor` when the camera has attached, loadable models, else `OrientationProcessor`. |
 | `ui/camera/grid/grid_layout.{h,cpp}` | Pure (unit-tested) `grid_dims(n)` → rows/cols (1→1×1, 2→1×2, 3–4→2×2). |
-| `ui/camera/dialog/` (pages) | The dialog's four page widgets + shared `page_util` (`dim_label`): `list_page` (`CameraListPage`), `add_page` (Source form + scans), `configure_page` (preview + orientation controls), `areas_page` (ROI editing). Pages own their controls and emit request signals; the coordinator drives them. |
-| `ui/camera/dialog/wizard_stepper.{h,cpp}` | Non-interactive "① Source — ② Configure — ③ Areas" step indicator; `set_current()` emphasizes the active step. |
+| `ui/camera/dialog/` (pages) | The dialog's five page widgets + shared `page_util` (`dim_label`): `list_page` (`CameraListPage`), `add_page` (Source form + scans), `configure_page` (preview + orientation controls), `models_page` (`ModelsPage`: attach models + per-class conf), `areas_page` (ROI editing). Pages own their controls and emit request signals; the coordinator drives them. |
+| `ui/camera/dialog/wizard_stepper.{h,cpp}` | Non-interactive "① Source — ② Configure — ③ Models — ④ Areas" step indicator; `set_current()` emphasizes the active step. |
 | `ui/camera/dialog/roi_canvas.{h,cpp}` | Draw-only `QWidget` for one ROI polygon over the oriented snapshot: click to add vertices, click first vertex / Enter to close, Backspace/Esc to undo/clear. |
 | `ui/camera/dialog/camera_devices.{h,cpp}` | USB enumeration (Qt Multimedia). |
 | `ui/camera/dialog/ip_scan.{h,cpp}` | Subnet RTSP-port scan (Qt Network, threaded). |
 | `ui/camera/shared/snapshot.{h,cpp}`, `shared/frame_convert.h` | Grab one preview frame (OpenCV, off-thread) + orient it: `apply_orientation` composes rotation + roll + pitch (perspective warp) for the live Configure preview. |
 | `ui/camera/shared/rtsp_templates.{h,cpp}` | Manufacturer → RTSP URL templates (Dahua) + `with_credentials`. |
 | `ui/camera/shared/roi_geometry.{h,cpp}` | Pure (unit-tested) widget↔normalized point mapping + aspect-fit rect for the canvas. |
+| `ui/camera/shared/detection/` | Per-camera ONNX detection runtime (app-only: OpenCV + ONNX Runtime). Pure, unit-tested helpers `letterbox` (resize+pad to 640 + inverse box map), `yolo_decode` (`output0` → boxes: argmax + conf floor + NMS), `names_metadata` (parse the ONNX `names` dict) feed `inference_engine` (interface) → `ort_engine` (session + TensorRT→CUDA→CPU EP fallback) → `engine_registry` (one shared engine per model file). `model_sync` scans `models/*.onnx` into the `model` catalog at startup. |
+
+## Detection / ONNX Runtime
+
+Per-camera YOLO detection is an **app-only** feature — the domain config lives in
+`src/core/detection/` (Qt/OpenCV-free, unit-tested), the inference runtime in
+`src/app/ui/camera/shared/detection/` (OpenCV + ORT). Key facts:
+
+- The ORT GPU build lives in `third_party/onnxruntime/` (git-ignored; provision
+  per platform — the Jetson build drops in its own aarch64 ORT). See
+  `docs/GPU_SETUP.md`.
+- ORT + provider DLLs and `models/denso.onnx` are copied **beside the exe** by a
+  `POST_BUILD` step (the app resolves both relative to the executable dir).
+- Execution-provider fallback is **TensorRT → CUDA → CPU**; a missing GPU stack
+  degrades to CPU, never a hard failure. GPU provider DLLs are staged into
+  `third_party/gpu_ep/` (git-ignored) and glob-copied beside the exe when present.
+- `models/*.onnx` are synced into the `model` catalog at startup (`model_sync`),
+  so dropping a new `.onnx` in `models/` makes it selectable next launch.
+- `denso_core` **never** links OpenCV/ORT — only `Qt6::Core`/`Sql`.
 
 ## Hard rules
 
