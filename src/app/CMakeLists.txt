@@ -22,6 +22,10 @@ add_executable(denso WIN32
     ui/camera/shared/frame_convert.cpp
     ui/camera/shared/rtsp_templates.cpp
     ui/camera/shared/roi_geometry.cpp
+    ui/camera/shared/detection/letterbox.cpp
+    ui/camera/shared/detection/yolo_decode.cpp
+    ui/camera/shared/detection/names_metadata.cpp
+    ui/camera/shared/detection/ort_engine.cpp
     # camera — live-view grid internals
     ui/camera/grid/camera_grid.cpp
     ui/camera/grid/camera_stream.cpp
