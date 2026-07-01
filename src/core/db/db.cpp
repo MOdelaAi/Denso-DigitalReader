@@ -15,7 +15,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 7;
+constexpr int SCHEMA_VERSION = 8;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -269,6 +269,46 @@ bool run_migrations(const QSqlDatabase& db) {
         }
         if (!run("CREATE INDEX IF NOT EXISTS idx_camera_area_camera "
                  "ON camera_area(camera_id)")) {
+            return false;
+        }
+    }
+
+    if (version < 8) {
+        // Per-camera detection config. `model` is the catalog of .onnx files
+        // discovered under models/ (class_names cached from ONNX metadata as a
+        // JSON array). A camera attaches 1..N models via `camera_model`; each
+        // attachment keeps a subset of classes with a per-class confidence in
+        // `camera_model_class`. Detection runs for a camera iff it has ≥1 row
+        // in camera_model.
+        if (!run("CREATE TABLE IF NOT EXISTS model ("
+                 "    id          INTEGER PRIMARY KEY,"
+                 "    name        TEXT    NOT NULL,"
+                 "    filename    TEXT    NOT NULL UNIQUE,"
+                 "    class_names TEXT    NOT NULL"
+                 ")")) {
+            return false;
+        }
+        if (!run("CREATE TABLE IF NOT EXISTS camera_model ("
+                 "    id        INTEGER PRIMARY KEY,"
+                 "    camera_id INTEGER NOT NULL REFERENCES camera(id),"
+                 "    model_id  INTEGER NOT NULL REFERENCES model(id)"
+                 ")")) {
+            return false;
+        }
+        if (!run("CREATE INDEX IF NOT EXISTS idx_camera_model_camera "
+                 "ON camera_model(camera_id)")) {
+            return false;
+        }
+        if (!run("CREATE TABLE IF NOT EXISTS camera_model_class ("
+                 "    id              INTEGER PRIMARY KEY,"
+                 "    camera_model_id INTEGER NOT NULL REFERENCES camera_model(id),"
+                 "    class_id        INTEGER NOT NULL,"
+                 "    conf            REAL    NOT NULL"
+                 ")")) {
+            return false;
+        }
+        if (!run("CREATE INDEX IF NOT EXISTS idx_cmc_camera_model "
+                 "ON camera_model_class(camera_model_id)")) {
             return false;
         }
     }
