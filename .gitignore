@@ -14,3 +14,7 @@ denso.db-wal
 
 # ONNX Runtime binaries (provisioned per platform, not tracked)
 third_party/onnxruntime/
+
+# CUDA execution-provider runtime DLLs (TensorRT + cuDNN), provisioned locally
+# and copied beside the exe at build time — see docs/GPU_SETUP.md. Not tracked.
+third_party/gpu_ep/

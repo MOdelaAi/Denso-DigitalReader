@@ -66,3 +66,22 @@ add_custom_command(TARGET denso POST_BUILD
         ${CMAKE_SOURCE_DIR}/models/denso.onnx
         $<TARGET_FILE_DIR:denso>/models/denso.onnx
     VERBATIM)
+
+# CUDA execution-provider runtime dependencies: ORT's CUDA/TensorRT providers
+# load TensorRT (nvinfer_*_10.dll, nvonnxparser_10.dll) and cuDNN (cudnn*64_9.dll)
+# at runtime, so those DLLs must also sit beside the exe. They're provisioned
+# into third_party/gpu_ep/ (git-ignored — see docs/GPU_SETUP.md), NOT auto-found
+# on PATH. cudart/cublas come from the CUDA 12 toolkit, which must be installed
+# and on PATH. Without this dir the app still runs — it falls back to the CPU
+# execution provider — so the copy is a no-op-friendly glob rather than required.
+file(GLOB GPU_EP_DLLS "${CMAKE_SOURCE_DIR}/third_party/gpu_ep/*.dll")
+if(GPU_EP_DLLS)
+    add_custom_command(TARGET denso POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${GPU_EP_DLLS}
+            $<TARGET_FILE_DIR:denso>
+        VERBATIM)
+else()
+    message(STATUS "third_party/gpu_ep/ empty — denso will run detection on CPU "
+                   "(see docs/GPU_SETUP.md to enable TensorRT/CUDA)")
+endif()
