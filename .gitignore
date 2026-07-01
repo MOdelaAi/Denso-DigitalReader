@@ -18,3 +18,8 @@ third_party/onnxruntime/
 # CUDA execution-provider runtime DLLs (TensorRT + cuDNN), provisioned locally
 # and copied beside the exe at build time — see docs/GPU_SETUP.md. Not tracked.
 third_party/gpu_ep/
+
+# TensorRT engines + the ORT TensorRT-EP engine cache — built locally and
+# specific to the GPU architecture and TensorRT version, so never tracked.
+models/*.engine
+models/trt_cache/

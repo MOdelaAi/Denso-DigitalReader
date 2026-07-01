@@ -46,11 +46,15 @@ CameraTile::CameraTile(const QString& name, QWidget* parent)
 
 void CameraTile::set_frame(const QImage& frame) {
     frame_ = frame;
+    meter_.tick(FpsMeter::clock::now());  // one displayed frame → update the rate
     update();
 }
 
 void CameraTile::set_status(int status) {
     status_ = status;
+    if (static_cast<CameraStream::Status>(status) != CameraStream::Status::Live) {
+        meter_.reset();  // don't carry a stale rate across an offline gap
+    }
     update();
 }
 
@@ -93,6 +97,15 @@ void CameraTile::paintEvent(QPaintEvent*) {
     p.setPen(Qt::NoPen);
     p.drawEllipse(QPointF(width() - 10 - text_w - 8, 8 + p.fontMetrics().ascent() / 2.0),
                   4, 4);
+
+    // Live fps, a line below the status (only while actually streaming).
+    if (static_cast<CameraStream::Status>(status_) == CameraStream::Status::Live &&
+        meter_.fps() > 0.0) {
+        const QString fps_text = QStringLiteral("%1 fps").arg(meter_.fps(), 0, 'f', 1);
+        p.setPen(kFaint);
+        p.drawText(rect().adjusted(0, 8 + p.fontMetrics().lineSpacing(), -10, 0),
+                   Qt::AlignTop | Qt::AlignRight, fps_text);
+    }
 }
 
 void CameraTile::draw_areas(QPainter& p, const QRectF& image_rect) const {

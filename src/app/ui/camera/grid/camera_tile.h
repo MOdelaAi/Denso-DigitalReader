@@ -5,6 +5,7 @@
 #pragma once
 
 #include "camera/camera.h"
+#include "ui/camera/grid/fps_meter.h"
 
 #include <QImage>
 #include <QString>
@@ -41,6 +42,7 @@ private:
     QImage frame_;
     int status_ = 0;  // Connecting
     std::vector<camera::CameraArea> areas_;
+    FpsMeter meter_;  // real live fps from frame arrivals
 };
 
 } // namespace denso::ui

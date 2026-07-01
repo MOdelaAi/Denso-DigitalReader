@@ -20,6 +20,7 @@ add_library(denso_core STATIC
     settings/repo.cpp
     camera/repo.cpp
     camera/area_points.cpp
+    camera/area_geometry.cpp
     detection/class_names.cpp
     detection/repo.cpp
     ui/convert.cpp

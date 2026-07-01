@@ -57,6 +57,10 @@ void CameraGrid::reload() {
         const std::string dir = QCoreApplication::applicationDirPath().toStdString();
         engines_ = std::make_unique<EngineRegistry>(dir + "/models",
                                                      dir + "/models/trt_cache");
+        // Load + warm every model once, up front (this is the first reload, run
+        // during startup before any capture thread), so the first detected frame
+        // doesn't stall on CUDA init. Cameras reuse these cached, warm engines.
+        engines_->warm_up();
     }
 
     std::vector<camera::Camera> cams = camera::all(db_);
@@ -72,7 +76,8 @@ void CameraGrid::reload() {
         const camera::Camera& cam = cams[static_cast<size_t>(i)];
 
         auto* tile = new CameraTile(QString::fromStdString(cam.name));
-        tile->set_areas(camera::areas_for(db_, cam.id));  // ROI overlay (if any)
+        std::vector<camera::CameraArea> areas = camera::areas_for(db_, cam.id);
+        tile->set_areas(areas);  // ROI overlay (if any)
 
         const detection::CameraDetection det = detection::detection_for(db_, cam.id);
         std::unique_ptr<FrameProcessor> proc;
@@ -92,7 +97,7 @@ void CameraGrid::reload() {
             } else {
                 proc = std::make_unique<DetectionProcessor>(
                     static_cast<int>(cam.rotation), cam.pitch, cam.roll,
-                    std::move(runs));
+                    std::move(runs), std::move(areas));
             }
         }
         auto* stream = new CameraStream(cam, std::move(proc));

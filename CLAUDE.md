@@ -17,6 +17,15 @@ mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja`). ONNX Runtime is
 provisioned into `third_party/onnxruntime/` (git-ignored — see
 `docs/GPU_SETUP.md`).
 
+IP-camera streaming uses OpenCV's **GStreamer** backend (low latency — it drops
+stale frames, unlike the buffering FFMPEG backend). That needs the decode
+plugins present or the app silently falls back to FFMPEG and lag returns:
+`pacman -S mingw-w64-ucrt-x86_64-gst-plugins-base
+mingw-w64-ucrt-x86_64-gst-plugins-good mingw-w64-ucrt-x86_64-gst-plugins-bad
+mingw-w64-ucrt-x86_64-gst-libav` (bad = h264parse/h265parse + d3d12 HW decoder,
+libav = avdec software fallback). On the Jetson target these ship with the
+NVIDIA GStreamer stack.
+
 | Action | Command |
 |---|---|
 | Configure | `cmake -S . -B build -G Ninja` |

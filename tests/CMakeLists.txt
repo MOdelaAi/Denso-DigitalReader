@@ -26,11 +26,16 @@ add_executable(denso_tests
     test_camera_repo.cpp
     test_detection_repo.cpp
     test_area_points.cpp
+    test_area_geometry.cpp
     test_class_names.cpp
     test_rtsp_templates.cpp
     # rtsp_templates lives in the GUI app target but depends only on QtCore
     # (QString), so compile it straight into the tests for unit coverage.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/rtsp_templates.cpp
+    test_gst_pipeline.cpp
+    # gst_pipeline is GUI-target code but a pure std::string builder (no Qt/
+    # OpenCV), so compile it into the tests for unit coverage.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/gst_pipeline.cpp
     test_snapshot.cpp
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/snapshot.cpp
     test_roi_geometry.cpp
@@ -40,6 +45,9 @@ add_executable(denso_tests
     test_grid_layout.cpp
     # grid_layout is GUI-target code but pure int math (no Qt), so compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/grid_layout.cpp
+    test_fps_meter.cpp
+    # fps_meter is GUI-target code but pure std::chrono (no Qt), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/fps_meter.cpp
     test_letterbox.cpp
     # letterbox is GUI-target code but pure OpenCV (no Qt), so compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/letterbox.cpp

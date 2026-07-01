@@ -8,6 +8,7 @@
 // capture loop or the tile has to change.
 #pragma once
 
+#include "camera/camera.h"  // CameraArea
 #include "detection/detection.h"
 #include "ui/camera/shared/detection/inference_engine.h"
 
@@ -46,6 +47,11 @@ private:
 /// entry pairs a shared engine with the camera's per-class selections (class id
 /// → min confidence). Orientation is applied first (so a detection tile matches
 /// the others), then detection is drawn on the oriented frame.
+///
+/// If the camera has ROI `areas`, detection is confined to them: a box is drawn
+/// only when its center lands inside some area polygon. Empty `areas` means no
+/// confinement — every detection is drawn, as before. The displayed frame is
+/// unchanged either way; only which boxes are drawn differs.
 class DetectionProcessor : public FrameProcessor {
 public:
     struct ModelRun {
@@ -55,7 +61,8 @@ public:
     };
 
     DetectionProcessor(int degrees, double pitch, double roll,
-                       std::vector<ModelRun> models);
+                       std::vector<ModelRun> models,
+                       std::vector<denso::camera::CameraArea> areas = {});
     QImage process(const QImage& frame) override;
 
 private:
@@ -63,6 +70,7 @@ private:
     double pitch_;
     double roll_;
     std::vector<ModelRun> models_;
+    std::vector<denso::camera::CameraArea> areas_;  // empty = whole frame
 };
 
 } // namespace denso::ui

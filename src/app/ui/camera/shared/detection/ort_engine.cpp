@@ -10,30 +10,45 @@
 #include <opencv2/imgproc.hpp>
 
 #include <array>
+#include <unordered_map>
 
 namespace denso::ui {
 
 namespace {
 
 // Build a session for the requested provider tier; returns nullptr on failure.
-// tier: 0 = CUDA (GPU), 1 = CPU only.
+// tier: 0 = TensorRT (FP16, cached engine), 1 = CUDA, 2 = CPU.
 //
-// TensorRT is intentionally NOT used: its execution provider compiles an engine
-// from the .onnx on the first inference — a minutes-long, non-interruptible
-// build that runs inside the capture thread and blocks stream teardown (join()),
-// freezing the UI and leaving a process that can't exit. CUDA runs the ONNX
-// graph directly on the GPU with no build step, so a bare .onnx "just works".
+// The TensorRT EP builds an optimized engine the first time it runs the model
+// and caches it under cache_dir (trt_engine_cache_*); every later run loads that
+// prebuilt engine instead. The first build is minutes-long and NON-interruptible,
+// so it must be triggered during the startup warm-up (main thread, before any
+// capture thread exists) — never lazily on a capture thread, where it froze the
+// UI and blocked stream teardown (join()), the reason TensorRT was dropped
+// before. CUDA (tier 1) runs the graph directly with no build; CPU (tier 2) is
+// the last resort. The first tier whose session builds wins.
 std::unique_ptr<Ort::Session> make_session(Ort::Env& env, const std::wstring& path,
-                                           int tier) {
+                                           const std::string& cache_dir, int tier) {
     try {
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(1);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         if (tier == 0) {
+            Ort::TensorRTProviderOptions trt;
+            trt.Update({
+                {"device_id", "0"},
+                {"trt_fp16_enable", "1"},
+                {"trt_engine_cache_enable", "1"},
+                {"trt_engine_cache_path", cache_dir},
+                {"trt_timing_cache_enable", "1"},
+            });
+            opts.AppendExecutionProvider_TensorRT_V2(*trt);
+        } else if (tier == 1) {
             OrtCUDAProviderOptions cuda{};
             cuda.device_id = 0;
             opts.AppendExecutionProvider_CUDA(cuda);
         }
+        // tier 2: no provider appended → ORT's default CPU execution.
         return std::make_unique<Ort::Session>(env, path.c_str(), opts);
     } catch (const Ort::Exception& e) {
         qWarning().noquote() << "[ort] tier" << tier << "failed:" << e.what();
@@ -47,14 +62,15 @@ std::wstring widen(const std::string& s) {
 
 } // namespace
 
-OrtEngine::OrtEngine(const std::string& model_path, const std::string& /*engine_cache_dir*/)
+OrtEngine::OrtEngine(const std::string& model_path, const std::string& engine_cache_dir)
     : env_(ORT_LOGGING_LEVEL_WARNING, "denso") {
     const std::wstring wpath = widen(model_path);
-    for (int tier = 0; tier <= 1 && !session_; ++tier) {
-        session_ = make_session(env_, wpath, tier);
+    static constexpr const char* kTierName[] = {"TensorRT", "CUDA", "CPU"};
+    for (int tier = 0; tier <= 2 && !session_; ++tier) {
+        session_ = make_session(env_, wpath, engine_cache_dir, tier);
         if (session_) {
             qInfo().noquote() << "[ort] loaded" << QString::fromStdString(model_path)
-                              << "tier" << tier;
+                              << "on" << kTierName[tier];
         }
     }
     if (!session_) {

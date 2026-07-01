@@ -23,6 +23,12 @@ public:
     /// failed to load. Cached across calls.
     InferenceEngine* get(const std::string& filename);
 
+    /// Load AND warm (one blank inference) every *.onnx in models_dir. Call once
+    /// at startup, before the capture threads run, so the first real frame
+    /// doesn't stall on CUDA kernel init / allocation. Engines are cached, so
+    /// cameras reuse the already-warm sessions. Blocking; logs per model.
+    void warm_up();
+
 private:
     std::string models_dir_;
     std::string cache_dir_;

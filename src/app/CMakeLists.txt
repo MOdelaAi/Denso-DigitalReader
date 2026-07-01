@@ -21,6 +21,7 @@ add_executable(denso WIN32
     ui/camera/shared/snapshot.cpp
     ui/camera/shared/frame_convert.cpp
     ui/camera/shared/rtsp_templates.cpp
+    ui/camera/shared/gst_pipeline.cpp
     ui/camera/shared/roi_geometry.cpp
     ui/camera/shared/detection/letterbox.cpp
     ui/camera/shared/detection/yolo_decode.cpp
@@ -33,6 +34,7 @@ add_executable(denso WIN32
     ui/camera/grid/camera_stream.cpp
     ui/camera/grid/camera_tile.cpp
     ui/camera/grid/frame_processor.cpp
+    ui/camera/grid/fps_meter.cpp
     ui/camera/grid/grid_layout.cpp
     # camera — management modal internals
     ui/camera/dialog/page_util.cpp
