@@ -96,8 +96,13 @@ void MainWindow::open_camera() {
     if (!camera_) {
         camera_ = new CameraDialog(db_, this);
         camera_->setModal(true);
-        connect(camera_, &CameraDialog::cameras_changed, camera_view_, &CameraView::reload);
+        // Rebuild + restart the grid only once the modal closes — restarting
+        // mid-flow would fight the modal's snapshot for the same USB device.
+        connect(camera_, &QDialog::finished, camera_view_,
+                [this](int) { camera_view_->reload(); });
     }
+    // Free the cameras so the modal's Configure/Areas snapshot can open them.
+    camera_view_->release_streams();
     camera_->show();
     camera_->raise();
     camera_->activateWindow();

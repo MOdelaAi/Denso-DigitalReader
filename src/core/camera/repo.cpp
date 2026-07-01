@@ -1,9 +1,13 @@
 #include "camera/repo.h"
 
+#include "camera/area_points.h"
+
 #include <QMetaType>
 #include <QSqlQuery>
 #include <QString>
 #include <QVariant>
+
+#include <utility>
 
 namespace denso::camera {
 
@@ -135,6 +139,63 @@ std::vector<Camera> all(const QSqlDatabase& db) {
         out.push_back(from_row(q));
     }
     return out;
+}
+
+std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id) {
+    std::vector<CameraArea> out;
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT id, camera_id, name, points FROM camera_area "
+        "WHERE camera_id = ? ORDER BY id"));
+    q.addBindValue(static_cast<qlonglong>(camera_id));
+    if (!q.exec()) {
+        return out;
+    }
+    while (q.next()) {
+        CameraArea a;
+        a.id = q.value(0).toLongLong();
+        a.camera_id = q.value(1).toLongLong();
+        a.name = q.value(2).toString().toStdString();
+        a.points = parse_points(q.value(3).toString().toStdString());
+        out.push_back(std::move(a));
+    }
+    return out;
+}
+
+bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
+                   const std::vector<CameraArea>& areas) {
+    // Delete-all + re-insert as one unit so a mid-write failure can't leave a
+    // half-updated ROI set behind. transaction()/commit()/rollback() are
+    // non-const; a QSqlDatabase copy shares the same underlying connection.
+    QSqlDatabase conn(db);
+    if (!conn.transaction()) {
+        return false;
+    }
+    const auto rollback = [&conn] {
+        conn.rollback();
+        return false;
+    };
+
+    QSqlQuery del(db);
+    del.prepare(QStringLiteral("DELETE FROM camera_area WHERE camera_id = ?"));
+    del.addBindValue(static_cast<qlonglong>(camera_id));
+    if (!del.exec()) {
+        return rollback();
+    }
+
+    for (const CameraArea& a : areas) {
+        QSqlQuery ins(db);
+        ins.prepare(QStringLiteral(
+            "INSERT INTO camera_area (camera_id, name, points) VALUES (?, ?, ?)"));
+        ins.addBindValue(static_cast<qlonglong>(camera_id));
+        ins.addBindValue(QString::fromStdString(a.name));
+        ins.addBindValue(QString::fromStdString(serialize_points(a.points)));
+        if (!ins.exec()) {
+            return rollback();
+        }
+    }
+
+    return conn.commit() || rollback();
 }
 
 } // namespace denso::camera

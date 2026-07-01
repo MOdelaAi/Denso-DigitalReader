@@ -11,14 +11,58 @@
 
 #include <QApplication>
 #include <QDebug>
+#include <QFile>
 #include <QFileInfo>
+#include <QLocale>
+#include <QMutex>
 #include <QString>
 #include <QtGlobal>
 
+#include <opencv2/core.hpp>
+
+#include <cstdio>
 #include <memory>
+
+namespace {
+
+// Route Qt log messages to `denso.log` next to the executable (and stderr).
+// The app is a GUI-subsystem binary on Windows, so qWarning() is otherwise
+// invisible; a file sink also helps field debugging on the Pi/Jetson. Thread-
+// safe — capture workers log from their own threads.
+void file_message_handler(QtMsgType type, const QMessageLogContext& ctx,
+                          const QString& msg) {
+    static QMutex mutex;
+    static QFile file(QCoreApplication::applicationDirPath() +
+                      QStringLiteral("/denso.log"));
+    static const bool opened =
+        file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+
+    const QString line = qFormatLogMessage(type, ctx, msg);
+    QMutexLocker lock(&mutex);
+    if (opened) {
+        file.write(line.toUtf8());
+        file.write("\n");
+        file.flush();
+    }
+    std::fprintf(stderr, "%s\n", line.toLocal8Bit().constData());
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    qInstallMessageHandler(file_message_handler);
+
+    // Run OpenCV ops (e.g. cvtColor in the live grid's frame conversion) inline
+    // rather than via its internal parallel_for_ pool. Each camera already has
+    // its own capture thread, so the pool would just oversubscribe the CPU
+    // (N capture threads × M pool threads) for no gain on these small per-frame
+    // conversions.
+    cv::setNumThreads(0);
+
+    // Force Western Arabic digits in numeric widgets (QSpinBox/QDoubleSpinBox),
+    // regardless of the OS regional format (e.g. Thai, which renders Thai numerals).
+    QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
 
     const QString db_path = denso::db::default_path();
     auto db = denso::db::Db::open(db_path);

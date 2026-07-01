@@ -59,7 +59,7 @@ TEST_CASE("migrations create net_config table") {
 
 TEST_CASE("migrations set user_version") {
     const Db db = migrated();
-    REQUIRE(user_version(db.handle()) == 6);
+    REQUIRE(user_version(db.handle()) == 7);
 }
 
 TEST_CASE("migrations are idempotent") {
@@ -67,7 +67,7 @@ TEST_CASE("migrations are idempotent") {
     REQUIRE(db.has_value());
     REQUIRE(run_migrations(db->handle()));
     REQUIRE(run_migrations(db->handle()));
-    REQUIRE(user_version(db->handle()) == 6);
+    REQUIRE(user_version(db->handle()) == 7);
 }
 
 TEST_CASE("open enables WAL mode") {

@@ -15,7 +15,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 6;
+constexpr int SCHEMA_VERSION = 7;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -244,6 +244,31 @@ bool run_migrations(const QSqlDatabase& db) {
             return false;
         }
         if (!run("ALTER TABLE camera ADD COLUMN manufacturer TEXT")) {
+            return false;
+        }
+    }
+
+    if (version < 7) {
+        // ROI areas become polygons (3+ vertices) instead of a single
+        // rectangle. `camera_area` has no writers yet (CRUD lands with this
+        // slice), so the old x1..y2 shape carries no data — drop and recreate
+        // with one `points` TEXT column holding normalized "x,y;x,y;..." pairs.
+        if (!run("DROP INDEX IF EXISTS idx_camera_area_camera")) {
+            return false;
+        }
+        if (!run("DROP TABLE IF EXISTS camera_area")) {
+            return false;
+        }
+        if (!run("CREATE TABLE IF NOT EXISTS camera_area ("
+                 "    id        INTEGER PRIMARY KEY,"
+                 "    camera_id INTEGER NOT NULL REFERENCES camera(id),"
+                 "    name      TEXT    NOT NULL,"
+                 "    points    TEXT    NOT NULL"
+                 ")")) {
+            return false;
+        }
+        if (!run("CREATE INDEX IF NOT EXISTS idx_camera_area_camera "
+                 "ON camera_area(camera_id)")) {
             return false;
         }
     }

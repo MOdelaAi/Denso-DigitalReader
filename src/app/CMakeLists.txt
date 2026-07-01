@@ -14,13 +14,29 @@ add_executable(denso WIN32
     # settings modal
     ui/settings/settings_dialog.cpp
     ui/settings/netcard.cpp
-    # camera management
+    # camera management — entry points
     ui/camera/camera_view.cpp
     ui/camera/camera_dialog.cpp
-    ui/camera/camera_devices.cpp
-    ui/camera/ip_scan.cpp
-    ui/camera/rtsp_templates.cpp
-    ui/camera/snapshot.cpp
+    # camera — cross-cutting primitives (used by both surfaces)
+    ui/camera/shared/snapshot.cpp
+    ui/camera/shared/rtsp_templates.cpp
+    ui/camera/shared/roi_geometry.cpp
+    # camera — live-view grid internals
+    ui/camera/grid/camera_grid.cpp
+    ui/camera/grid/camera_stream.cpp
+    ui/camera/grid/camera_tile.cpp
+    ui/camera/grid/frame_processor.cpp
+    ui/camera/grid/grid_layout.cpp
+    # camera — management modal internals
+    ui/camera/dialog/page_util.cpp
+    ui/camera/dialog/list_page.cpp
+    ui/camera/dialog/add_page.cpp
+    ui/camera/dialog/configure_page.cpp
+    ui/camera/dialog/areas_page.cpp
+    ui/camera/dialog/wizard_stepper.cpp
+    ui/camera/dialog/roi_canvas.cpp
+    ui/camera/dialog/camera_devices.cpp
+    ui/camera/dialog/ip_scan.cpp
 )
 target_include_directories(denso PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(denso PRIVATE denso_core Qt6::Widgets Qt6::Multimedia Qt6::Network)

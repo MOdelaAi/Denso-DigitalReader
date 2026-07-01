@@ -8,10 +8,14 @@
 #include <utility>
 
 using denso::camera::all;
+using denso::camera::areas_for;
 using denso::camera::Camera;
+using denso::camera::CameraArea;
 using denso::camera::get;
 using denso::camera::insert;
+using denso::camera::Point;
 using denso::camera::remove;
+using denso::camera::replace_areas;
 using denso::camera::update;
 using denso::db::Db;
 using denso::db::run_migrations;
@@ -167,4 +171,84 @@ TEST_CASE("remove deletes the camera") {
     REQUIRE(remove(d.handle(), *id));
     REQUIRE_FALSE(get(d.handle(), *id).has_value());
     REQUIRE(all(d.handle()).empty());
+}
+
+TEST_CASE("areas_for is empty for a camera with no ROIs") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+    REQUIRE(areas_for(d.handle(), *id).empty());
+}
+
+TEST_CASE("replace_areas saves named polygons and areas_for round-trips them") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+
+    CameraArea tri;
+    tri.camera_id = *id;
+    tri.name = "Display A";
+    tri.points = {{0.2f, 0.3f}, {0.6f, 0.3f}, {0.4f, 0.7f}};
+    CameraArea rect;
+    rect.camera_id = *id;
+    rect.name = "Display B";
+    rect.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.9f, 0.5f}, {0.1f, 0.5f}};
+    REQUIRE(replace_areas(d.handle(), *id, {tri, rect}));
+
+    const auto got = areas_for(d.handle(), *id);
+    REQUIRE(got.size() == 2);
+    REQUIRE(got[0].name == "Display A");
+    REQUIRE(got[0].camera_id == *id);
+    REQUIRE(got[0].points.size() == 3);
+    REQUIRE(got[0].points[2].x == 0.4f);
+    REQUIRE(got[1].name == "Display B");
+    REQUIRE(got[1].points.size() == 4);
+}
+
+TEST_CASE("replace_areas overwrites the previous set for that camera") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+
+    CameraArea a;
+    a.camera_id = *id;
+    a.name = "First";
+    a.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.5f, 1.0f}};
+    REQUIRE(replace_areas(d.handle(), *id, {a, a, a}));
+    REQUIRE(areas_for(d.handle(), *id).size() == 3);
+
+    CameraArea b;
+    b.camera_id = *id;
+    b.name = "Only";
+    b.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}};
+    REQUIRE(replace_areas(d.handle(), *id, {b}));
+    const auto got = areas_for(d.handle(), *id);
+    REQUIRE(got.size() == 1);
+    REQUIRE(got[0].name == "Only");
+}
+
+TEST_CASE("replace_areas with an empty set clears a camera's ROIs") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+    CameraArea a;
+    a.camera_id = *id;
+    a.name = "X";
+    a.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.5f, 1.0f}};
+    REQUIRE(replace_areas(d.handle(), *id, {a}));
+    REQUIRE(replace_areas(d.handle(), *id, {}));
+    REQUIRE(areas_for(d.handle(), *id).empty());
+}
+
+TEST_CASE("remove deletes the camera's areas too") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+    CameraArea a;
+    a.camera_id = *id;
+    a.name = "X";
+    a.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.5f, 1.0f}};
+    REQUIRE(replace_areas(d.handle(), *id, {a}));
+    REQUIRE(remove(d.handle(), *id));
+    REQUIRE(areas_for(d.handle(), *id).empty());
 }

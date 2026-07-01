@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram name="Data Model">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- ===== COLUMN LABELS ===== -->
+        <mxCell id="lbl1" value="Rust Structs"
+          style="text;html=1;strokeColor=none;fillColor=none;fontStyle=1;fontSize=13;align=center;"
+          vertex="1" parent="1">
+          <mxGeometry x="80" y="20" width="200" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="lbl2" value="SQLite Tables  (denso.db)"
+          style="text;html=1;strokeColor=none;fillColor=none;fontStyle=1;fontSize=13;align=center;"
+          vertex="1" parent="1">
+          <mxGeometry x="460" y="20" width="220" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="lbl3" value="Slint View Types"
+          style="text;html=1;strokeColor=none;fillColor=none;fontStyle=1;fontSize=13;align=center;"
+          vertex="1" parent="1">
+          <mxGeometry x="810" y="20" width="200" height="24" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== SETTINGS ===== -->
+        <mxCell id="st"
+          value="&lt;b&gt;Settings&lt;/b&gt;&lt;hr/&gt;width: u32&lt;br/&gt;height: u32&lt;br/&gt;dark: bool&lt;br/&gt;fullscreen: bool"
+          style="text;html=1;strokeColor=#6c8ebf;fillColor=#dae8fc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="50" width="200" height="98" as="geometry"/>
+        </mxCell>
+
+        <!-- settings TABLE -->
+        <mxCell id="t_set"
+          value="&lt;b&gt;settings&lt;/b&gt;&lt;hr/&gt;key  TEXT  PK&lt;br/&gt;value  TEXT  NOT NULL"
+          style="text;html=1;strokeColor=#82b366;fillColor=#d5e8d4;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="450" y="50" width="220" height="68" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="a1" value="save / load" style="edgeStyle=orthogonalEdgeStyle;dashed=1;endArrow=open;endFill=0;fontSize=10;" edge="1" source="st" target="t_set" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== READING ===== -->
+        <mxCell id="rd"
+          value="&lt;b&gt;Reading&lt;/b&gt;&lt;hr/&gt;id: i64&lt;br/&gt;ts: i64  (unix ms)&lt;br/&gt;value: String&lt;br/&gt;confidence: Option&lt;f64&gt;&lt;br/&gt;image_path: Option&lt;String&gt;"
+          style="text;html=1;strokeColor=#6c8ebf;fillColor=#dae8fc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="170" width="200" height="118" as="geometry"/>
+        </mxCell>
+
+        <!-- readings TABLE -->
+        <mxCell id="t_rd"
+          value="&lt;b&gt;readings&lt;/b&gt;&lt;hr/&gt;id  INTEGER  PK&lt;br/&gt;ts  INTEGER  NOT NULL&lt;br/&gt;value  TEXT  NOT NULL&lt;br/&gt;confidence  REAL&lt;br/&gt;image_path  TEXT&lt;br/&gt;&lt;i&gt;INDEX on ts&lt;/i&gt;"
+          style="text;html=1;strokeColor=#82b366;fillColor=#d5e8d4;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="450" y="140" width="220" height="142" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="a2" value="insert / recent" style="edgeStyle=orthogonalEdgeStyle;dashed=1;endArrow=open;endFill=0;fontSize=10;" edge="1" source="rd" target="t_rd" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== HARDWARE SPEC ===== -->
+        <mxCell id="hw"
+          value="&lt;b&gt;HardwareSpec&lt;/b&gt;  (not persisted)&lt;hr/&gt;os: String&lt;br/&gt;device: String&lt;br/&gt;ram: String&lt;br/&gt;storage: String"
+          style="text;html=1;strokeColor=#6c8ebf;fillColor=#dae8fc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="310" width="200" height="100" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== NET CONFIG ===== -->
+        <mxCell id="nc"
+          value="&lt;b&gt;NetConfig&lt;/b&gt;&lt;hr/&gt;iface: String&lt;br/&gt;mode: String&lt;br/&gt;ip: Option&lt;String&gt;&lt;br/&gt;prefix: Option&lt;u32&gt;&lt;br/&gt;gateway: Option&lt;String&gt;&lt;br/&gt;dns1: Option&lt;String&gt;&lt;br/&gt;dns2: Option&lt;String&gt;&lt;br/&gt;ssid: Option&lt;String&gt;&lt;br/&gt;security: Option&lt;String&gt;"
+          style="text;html=1;strokeColor=#6c8ebf;fillColor=#dae8fc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="430" width="200" height="210" as="geometry"/>
+        </mxCell>
+
+        <!-- net_config TABLE -->
+        <mxCell id="t_nc"
+          value="&lt;b&gt;net_config&lt;/b&gt;&lt;hr/&gt;iface  TEXT  PK&lt;br/&gt;mode  TEXT  NOT NULL&lt;br/&gt;ip  TEXT&lt;br/&gt;prefix  INTEGER&lt;br/&gt;gateway  TEXT&lt;br/&gt;dns1  TEXT&lt;br/&gt;dns2  TEXT&lt;br/&gt;ssid  TEXT&lt;br/&gt;security  TEXT"
+          style="text;html=1;strokeColor=#82b366;fillColor=#d5e8d4;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="450" y="310" width="220" height="210" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="a3" value="save / load" style="edgeStyle=orthogonalEdgeStyle;dashed=1;endArrow=open;endFill=0;fontSize=10;" edge="1" source="nc" target="t_nc" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== INTERFACE STATUS ===== -->
+        <mxCell id="is"
+          value="&lt;b&gt;InterfaceStatus&lt;/b&gt;  (live, not stored)&lt;hr/&gt;connected: bool&lt;br/&gt;ip: String&lt;br/&gt;gateway: String&lt;br/&gt;ssid: String&lt;br/&gt;signal: String"
+          style="text;html=1;strokeColor=#6c8ebf;fillColor=#dae8fc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="660" width="200" height="118" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== NETWORK SNAPSHOT ===== -->
+        <mxCell id="ns"
+          value="&lt;b&gt;NetworkSnapshot&lt;/b&gt;&lt;hr/&gt;ethernet: InterfaceStatus&lt;br/&gt;wifi: InterfaceStatus"
+          style="text;html=1;strokeColor=#6c8ebf;fillColor=#dae8fc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="300" y="660" width="200" height="72" as="geometry"/>
+        </mxCell>
+
+        <!-- NetworkSnapshot → InterfaceStatus -->
+        <mxCell id="a4" value="contains ×2" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;endFill=0;fontSize=10;" edge="1" source="ns" target="is" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== WIFI NETWORK ===== -->
+        <mxCell id="wn"
+          value="&lt;b&gt;WifiNetwork&lt;/b&gt;  (scan result)&lt;hr/&gt;ssid: String&lt;br/&gt;signal: String&lt;br/&gt;secured: bool"
+          style="text;html=1;strokeColor=#6c8ebf;fillColor=#dae8fc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="748" width="200" height="82" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== SLINT: NetStatus ===== -->
+        <mxCell id="sl_ns"
+          value="&lt;b&gt;NetStatus&lt;/b&gt;&lt;hr/&gt;connected: bool&lt;br/&gt;ip: SharedString&lt;br/&gt;gateway: SharedString&lt;br/&gt;ssid: SharedString&lt;br/&gt;signal: SharedString"
+          style="text;html=1;strokeColor=#d6b656;fillColor=#ffe6cc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="790" y="660" width="200" height="118" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== SLINT: NetConfigUi ===== -->
+        <mxCell id="sl_ncui"
+          value="&lt;b&gt;NetConfigUi&lt;/b&gt;&lt;hr/&gt;mode: SharedString&lt;br/&gt;ip: SharedString&lt;br/&gt;prefix: SharedString&lt;br/&gt;gateway: SharedString&lt;br/&gt;dns1: SharedString&lt;br/&gt;dns2: SharedString"
+          style="text;html=1;strokeColor=#d6b656;fillColor=#ffe6cc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="790" y="430" width="200" height="142" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== SLINT: WifiRow ===== -->
+        <mxCell id="sl_wr"
+          value="&lt;b&gt;WifiRow&lt;/b&gt;&lt;hr/&gt;ssid: SharedString&lt;br/&gt;signal: SharedString&lt;br/&gt;secured: bool&lt;br/&gt;connected: bool"
+          style="text;html=1;strokeColor=#d6b656;fillColor=#ffe6cc;align=left;verticalAlign=top;spacingLeft=8;overflow=hidden;rounded=1;whiteSpace=wrap;"
+          vertex="1" parent="1">
+          <mxGeometry x="790" y="748" width="200" height="100" as="geometry"/>
+        </mxCell>
+
+        <!-- Convert arrows (via wiring/convert.rs) -->
+        <mxCell id="a5" value="to_net_status" style="edgeStyle=orthogonalEdgeStyle;dashed=1;endArrow=open;endFill=0;fontSize=10;" edge="1" source="is" target="sl_ns" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="a6" value="to_ui_config / from_ui_config" style="edgeStyle=orthogonalEdgeStyle;dashed=1;endArrow=open;endFill=0;fontSize=10;" edge="1" source="nc" target="sl_ncui" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="a7" value="wifi_rows" style="edgeStyle=orthogonalEdgeStyle;dashed=1;endArrow=open;endFill=0;fontSize=10;" edge="1" source="wn" target="sl_wr" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== LEGEND ===== -->
+        <mxCell id="leg1" value=""
+          style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="850" width="16" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg1t" value="Rust struct"
+          style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="82" y="848" width="100" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg2" value=""
+          style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;"
+          vertex="1" parent="1">
+          <mxGeometry x="200" y="850" width="16" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg2t" value="SQLite table"
+          style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="222" y="848" width="100" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg3" value=""
+          style="rounded=1;fillColor=#ffe6cc;strokeColor=#d6b656;"
+          vertex="1" parent="1">
+          <mxGeometry x="340" y="850" width="16" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg3t" value="Slint view type"
+          style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="362" y="848" width="120" height="20" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

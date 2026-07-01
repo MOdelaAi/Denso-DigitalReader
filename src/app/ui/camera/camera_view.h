@@ -1,17 +1,18 @@
-// The main content area's camera view. Reflects the camera count: zero shows
-// the "no cameras yet" empty state; one or more shows a "configured" placeholder
-// (the real 1–4 live preview grid lands in a later slice). The "Add Camera"
-// button asks the window to open the Camera modal. Independent of the rest of
-// the app — zero cameras just shows the empty state and nothing captures.
+// The main content area's camera view. With no cameras it shows the "no cameras
+// yet" empty state + an Add button; with one or more it shows the live 1–4
+// streaming grid. reload() re-reads the camera list and switches/refreshes
+// accordingly. release_streams() stops capture (e.g. while the Camera modal is
+// open, so it can grab the same USB device); the next reload() restarts.
 #pragma once
 
 #include <QSqlDatabase>
 #include <QWidget>
 
-class QLabel;
-class QPushButton;
+class QStackedWidget;
 
 namespace denso::ui {
+
+class CameraGrid;
 
 class CameraView : public QWidget {
     Q_OBJECT
@@ -19,16 +20,19 @@ class CameraView : public QWidget {
 public:
     explicit CameraView(QSqlDatabase db, QWidget* parent = nullptr);
 
-    /// Re-read the camera count and update the displayed state.
+    /// Re-read the camera list, switch empty-state vs grid, and (re)start streams.
     void reload();
+
+    /// Stop capture without tearing the view down (frees devices for the modal).
+    void release_streams();
 
 signals:
     void add_camera_requested();
 
 private:
     QSqlDatabase db_;
-    QLabel* title_ = nullptr;
-    QLabel* subtitle_ = nullptr;
+    QStackedWidget* stack_ = nullptr;
+    CameraGrid* grid_ = nullptr;
 };
 
 } // namespace denso::ui

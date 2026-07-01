@@ -44,15 +44,22 @@ struct Camera {
     uint32_t rotation = 0;  // 0 | 90 | 180 | 270
 };
 
-/// One ROI area belonging to a camera. A camera can have many areas.
+/// A single polygon vertex, normalized to the frame: x and y are fractions in
+/// [0, 1] of the (oriented) image width/height, so an area is resolution-
+/// independent and lands on the same spot at any display or capture size.
+struct Point {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+/// One ROI area belonging to a camera. A camera can have many areas. The area
+/// is a closed polygon of 3+ vertices (triangle, rectangle, …); the closing
+/// edge from the last vertex back to the first is implicit, never stored.
 struct CameraArea {
     int64_t id = 0;
     int64_t camera_id = 0;  // FK → camera.id
     std::string name;
-    float x1 = 0.0f;
-    float y1 = 0.0f;
-    float x2 = 0.0f;
-    float y2 = 0.0f;
+    std::vector<Point> points;
 };
 
 // ─── Runtime (transient — never stored) ──────────────────────────────────────

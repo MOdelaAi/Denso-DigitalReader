@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/rtsp_templates.h"
+#include "ui/camera/shared/rtsp_templates.h"
 
 using denso::ui::build_rtsp;
 using denso::ui::rtsp_manufacturers;

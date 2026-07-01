@@ -1,23 +1,31 @@
 #include "ui/camera/camera_view.h"
 
 #include "camera/repo.h"
+#include "ui/camera/grid/camera_grid.h"
 
 #include <QFont>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QStackedWidget>
 #include <QVBoxLayout>
 
 namespace denso::ui {
 
 CameraView::CameraView(QSqlDatabase db, QWidget* parent)
     : QWidget(parent), db_(std::move(db)) {
-    setObjectName(QStringLiteral("mainContent"));  // picks up the content-panel background
+    setObjectName(QStringLiteral("mainContent"));  // content-panel background
 
-    // Center the column vertically and horizontally.
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(24, 24, 24, 24);
-    root->addStretch(1);
+
+    stack_ = new QStackedWidget;
+    root->addWidget(stack_);
+
+    // ── Page 0: empty state ────────────────────────────────────────────────
+    auto* empty = new QWidget;
+    auto* ev = new QVBoxLayout(empty);
+    ev->addStretch(1);
 
     auto* col = new QVBoxLayout;
     col->setSpacing(12);
@@ -29,49 +37,50 @@ CameraView::CameraView(QSqlDatabase db, QWidget* parent)
     glyph->setFont(gf);
     glyph->setAlignment(Qt::AlignCenter);
 
-    title_ = new QLabel;
-    QFont tf = title_->font();
+    auto* title = new QLabel(QStringLiteral("No cameras yet"));
+    QFont tf = title->font();
     tf.setPointSizeF(tf.pointSizeF() + 4.0);
     tf.setBold(true);
-    title_->setFont(tf);
-    title_->setAlignment(Qt::AlignCenter);
+    title->setFont(tf);
+    title->setAlignment(Qt::AlignCenter);
 
-    subtitle_ = new QLabel;
-    subtitle_->setProperty("faint", true);
-    subtitle_->setAlignment(Qt::AlignCenter);
+    auto* subtitle = new QLabel(QStringLiteral("Add a camera to start reading"));
+    subtitle->setProperty("faint", true);
+    subtitle->setAlignment(Qt::AlignCenter);
 
     auto* add = new QPushButton(QStringLiteral("+ Add Camera"));
     add->setProperty("gold", true);
     connect(add, &QPushButton::clicked, this, &CameraView::add_camera_requested);
 
     col->addWidget(glyph);
-    col->addWidget(title_);
-    col->addWidget(subtitle_);
+    col->addWidget(title);
+    col->addWidget(subtitle);
     col->addSpacing(8);
-
     auto* btn_row = new QHBoxLayout;
     btn_row->addStretch(1);
     btn_row->addWidget(add, 0);
     btn_row->addStretch(1);
     col->addLayout(btn_row);
 
-    root->addLayout(col);
-    root->addStretch(1);
+    ev->addLayout(col);
+    ev->addStretch(1);
+    stack_->addWidget(empty);  // index 0
+
+    // ── Page 1: live grid ──────────────────────────────────────────────────
+    grid_ = new CameraGrid(db_);
+    stack_->addWidget(grid_);  // index 1
 
     reload();
 }
 
 void CameraView::reload() {
     const int n = static_cast<int>(camera::all(db_).size());
-    if (n == 0) {
-        title_->setText(QStringLiteral("No cameras yet"));
-        subtitle_->setText(QStringLiteral("Add a camera to start reading"));
-    } else {
-        title_->setText(QStringLiteral("%1 camera%2 configured")
-                            .arg(n)
-                            .arg(n == 1 ? QString() : QStringLiteral("s")));
-        subtitle_->setText(QStringLiteral("Live preview coming soon"));
-    }
+    grid_->reload();  // rebuild + start streams (clears to nothing when n == 0)
+    stack_->setCurrentIndex(n == 0 ? 0 : 1);
+}
+
+void CameraView::release_streams() {
+    grid_->release_streams();
 }
 
 } // namespace denso::ui

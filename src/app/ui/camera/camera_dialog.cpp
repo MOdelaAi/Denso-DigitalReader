@@ -2,47 +2,34 @@
 
 #include "camera/model.h"
 #include "camera/repo.h"
-#include "ui/camera/camera_devices.h"
-#include "ui/camera/ip_scan.h"
-#include "ui/camera/rtsp_templates.h"
-#include "ui/camera/snapshot.h"
+#include "ui/camera/dialog/add_page.h"
+#include "ui/camera/dialog/areas_page.h"
+#include "ui/camera/dialog/configure_page.h"
+#include "ui/camera/dialog/list_page.h"
+#include "ui/camera/shared/rtsp_templates.h"  // with_credentials
+#include "ui/camera/shared/snapshot.h"
+#include "ui/camera/dialog/wizard_stepper.h"
 
-#include <QComboBox>
-#include <QDoubleSpinBox>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
-#include <QLineEdit>
-#include <QListWidget>
-#include <QListWidgetItem>
-#include <QPixmap>
+#include <QMetaObject>
 #include <QPushButton>
-#include <QRadioButton>
+#include <QScreen>
+#include <QShowEvent>
 #include <QSize>
-#include <QSpinBox>
 #include <QStackedWidget>
 #include <QThread>
 #include <QVBoxLayout>
 
 #include <cstdint>
-#include <iterator>
+#include <optional>
 #include <vector>
 
 namespace denso::ui {
 namespace {
-
-constexpr const char* kStatusBad = "#ef4444";
-
-struct ResPreset { const char* label; int w; int h; };
-constexpr ResPreset kResPresets[] = {
-    {"640 × 480", 640, 480},
-    {"1280 × 720", 1280, 720},
-    {"1920 × 1080", 1920, 1080},
-    {"2560 × 1440", 2560, 1440},
-};
-constexpr int kDefaultResIndex = 1;  // 1280 × 720
 
 /// Header chrome: "Camera" title + close glyph + gold rule.
 QVBoxLayout* header(QDialog* dlg) {
@@ -68,473 +55,158 @@ QVBoxLayout* header(QDialog* dlg) {
     return h;
 }
 
-QLabel* dim_label(const QString& text) {
-    auto* l = new QLabel(text);
-    l->setProperty("dim", true);
-    return l;
-}
-
 } // namespace
 
 CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     : QDialog(parent), db_(std::move(db)) {
     setWindowTitle(QStringLiteral("Camera"));
     setObjectName(QStringLiteral("dialogPanel"));
-    resize(720, 560);
+    resize(760, 600);
 
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(24, 24, 24, 24);
     outer->setSpacing(22);
     outer->addLayout(header(this));
 
+    // Wizard step indicator — shown only during the add/edit flow (pages 1–3),
+    // hidden on the list; driven by show_page().
+    stepper_ = new WizardStepper(
+        {QStringLiteral("Source"), QStringLiteral("Configure"),
+         QStringLiteral("Areas")});
+    stepper_->setVisible(false);
+    outer->addWidget(stepper_, 0);
+
     stack_ = new QStackedWidget;
 
-    // ── List page ─────────────────────────────────────────────────────────
-    auto* list_page = new QWidget;
-    auto* list_v = new QVBoxLayout(list_page);
-    list_v->setContentsMargins(0, 0, 0, 0);
-    list_v->setSpacing(10);
+    // ── List page (index 0) ───────────────────────────────────────────────
+    list_page_ = new CameraListPage(db_);
+    connect(list_page_, &CameraListPage::add_requested, this, &CameraDialog::show_add);
+    connect(list_page_, &CameraListPage::configure_requested, this,
+            [this](const camera::Camera& cam) {
+                begin_configure(cam, cam.id, QStringLiteral("Capturing…"));
+            });
+    connect(list_page_, &CameraListPage::areas_requested, this,
+            [this](const camera::Camera& cam) {
+                editing_id_ = cam.id;
+                draft_ = cam;
+                last_frame_ = QImage();
+                enter_areas(/*direct=*/true);
+                capture_snapshot();
+            });
+    connect(list_page_, &CameraListPage::changed, this, &CameraDialog::cameras_changed);
+    stack_->addWidget(list_page_);
 
-    empty_label_ = dim_label(QStringLiteral("No cameras — add one to get started."));
-    empty_label_->setAlignment(Qt::AlignCenter);
-    list_v->addWidget(empty_label_);
+    // ── Add / Source page (index 1) ───────────────────────────────────────
+    add_page_ = new CameraAddPage;
+    connect(add_page_, &CameraAddPage::cancel_requested, this, &CameraDialog::show_list);
+    connect(add_page_, &CameraAddPage::next_requested, this,
+            [this](const camera::Camera& draft) {
+                begin_configure(draft, std::nullopt,
+                                QStringLiteral("Click Capture to preview"));
+            });
+    stack_->addWidget(add_page_);
 
-    auto* rows_host = new QWidget;
-    rows_box_ = new QVBoxLayout(rows_host);
-    rows_box_->setContentsMargins(0, 0, 0, 0);
-    rows_box_->setSpacing(8);
-    list_v->addWidget(rows_host);
-    list_v->addStretch(1);
-
-    auto* list_footer = new QHBoxLayout;
-    list_footer->addStretch(1);
-    auto* add_btn = new QPushButton(QStringLiteral("+ Add Camera"));
-    add_btn->setProperty("gold", true);
-    connect(add_btn, &QPushButton::clicked, this, &CameraDialog::show_add);
-    list_footer->addWidget(add_btn, 0);
-    list_v->addLayout(list_footer);
-
-    stack_->addWidget(list_page);
-
-    // ── Add page ──────────────────────────────────────────────────────────
-    auto* add_page = new QWidget;
-    auto* add_v = new QVBoxLayout(add_page);
-    add_v->setContentsMargins(0, 0, 0, 0);
-    add_v->setSpacing(12);
-
-    auto* type_row = new QHBoxLayout;
-    usb_radio_ = new QRadioButton(QStringLiteral("USB"));
-    ip_radio_ = new QRadioButton(QStringLiteral("IP / RTSP"));
-    usb_radio_->setChecked(true);
-    connect(usb_radio_, &QRadioButton::toggled, this, &CameraDialog::update_source_fields);
-    type_row->addWidget(usb_radio_, 0);
-    type_row->addWidget(ip_radio_, 0);
-    type_row->addStretch(1);
-    add_v->addLayout(type_row);
-
-    auto* name_row = new QHBoxLayout;
-    name_row->addWidget(dim_label(QStringLiteral("Name")), 0);
-    name_edit_ = new QLineEdit;
-    name_edit_->setPlaceholderText(QStringLiteral("Camera name"));
-    name_row->addWidget(name_edit_, 1);
-    add_v->addLayout(name_row);
-
-    // USB inputs — a Scan button + a selectable results list (like Wi-Fi scan).
-    usb_box_ = new QWidget;
-    auto* usb_v = new QVBoxLayout(usb_box_);
-    usb_v->setContentsMargins(0, 0, 0, 0);
-    usb_v->setSpacing(6);
-    auto* scan_row = new QHBoxLayout;
-    scan_row->addWidget(dim_label(QStringLiteral("Detected cameras")), 1);
-    scan_btn_ = new QPushButton(QStringLiteral("Scan"));
-    scan_btn_->setProperty("flatText", true);
-    connect(scan_btn_, &QPushButton::clicked, this, &CameraDialog::scan_usb);
-    scan_row->addWidget(scan_btn_, 0);
-    usb_v->addLayout(scan_row);
-    usb_list_ = new QListWidget;
-    usb_list_->setMaximumHeight(160);
-    usb_v->addWidget(usb_list_);
-    add_v->addWidget(usb_box_);
-
-    // IP inputs — a subnet Scan (open RTSP port) + results list, then the URL.
-    ip_box_ = new QWidget;
-    auto* ip_l = new QVBoxLayout(ip_box_);
-    ip_l->setContentsMargins(0, 0, 0, 0);
-    ip_l->setSpacing(8);
-
-    auto* ip_scan_row = new QHBoxLayout;
-    ip_scan_row->addWidget(dim_label(QStringLiteral("Discovered hosts")), 1);
-    ip_scan_btn_ = new QPushButton(QStringLiteral("Scan"));
-    ip_scan_btn_->setProperty("flatText", true);
-    connect(ip_scan_btn_, &QPushButton::clicked, this, &CameraDialog::scan_ip);
-    ip_scan_row->addWidget(ip_scan_btn_, 0);
-    ip_l->addLayout(ip_scan_row);
-
-    ip_list_ = new QListWidget;
-    ip_list_->setMaximumHeight(110);
-    connect(ip_list_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
-        if (!(item->flags() & Qt::ItemIsSelectable)) return;
-        ip_edit_->setText(item->data(Qt::UserRole).toString());
+    // ── Configure page (index 2) ──────────────────────────────────────────
+    configure_page_ = new CameraConfigurePage;
+    connect(configure_page_, &CameraConfigurePage::back_requested, this, [this] {
+        // Editing an existing camera has no Source step to return to.
+        if (editing_id_.has_value()) show_list();
+        else show_page(1);
     });
-    ip_l->addWidget(ip_list_);
+    connect(configure_page_, &CameraConfigurePage::next_requested, this,
+            &CameraDialog::save_configured_camera);
+    connect(configure_page_, &CameraConfigurePage::capture_requested, this,
+            &CameraDialog::capture_snapshot);
+    stack_->addWidget(configure_page_);
 
-    // A labelled field row, reused for the IP camera inputs.
-    const auto field = [&](const QString& label, QWidget* w) {
-        auto* row = new QHBoxLayout;
-        auto* l = dim_label(label);
-        l->setFixedWidth(96);
-        row->addWidget(l, 0);
-        row->addWidget(w, 1);
-        ip_l->addLayout(row);
-    };
-
-    mfr_combo_ = new QComboBox;
-    for (size_t i = 0; i < rtsp_manufacturers().size(); ++i) {
-        mfr_combo_->addItem(rtsp_manufacturers()[i].name, static_cast<int>(i));
-    }
-    field(QStringLiteral("Manufacturer"), mfr_combo_);
-
-    stream_combo_ = new QComboBox;
-    stream_combo_->addItems({QStringLiteral("Main stream"), QStringLiteral("Sub stream")});
-    field(QStringLiteral("Stream"), stream_combo_);
-
-    channel_spin_ = new QSpinBox;
-    channel_spin_->setRange(1, 255);
-    channel_spin_->setValue(1);
-    field(QStringLiteral("Channel"), channel_spin_);
-
-    ip_edit_ = new QLineEdit;
-    ip_edit_->setPlaceholderText(QStringLiteral("192.168.1.20"));
-    field(QStringLiteral("IP address"), ip_edit_);
-
-    user_edit_ = new QLineEdit;
-    user_edit_->setPlaceholderText(QStringLiteral("admin"));
-    field(QStringLiteral("Username"), user_edit_);
-
-    pass_edit_ = new QLineEdit;
-    pass_edit_->setEchoMode(QLineEdit::Password);
-    field(QStringLiteral("Password"), pass_edit_);
-
-    rtsp_preview_ = new QLabel;
-    rtsp_preview_->setProperty("faint", true);
-    rtsp_preview_->setWordWrap(true);
-    rtsp_preview_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    field(QStringLiteral("RTSP URL"), rtsp_preview_);
-
-    connect(mfr_combo_, &QComboBox::currentIndexChanged, this,
-            &CameraDialog::update_rtsp_preview);
-    connect(stream_combo_, &QComboBox::currentIndexChanged, this,
-            &CameraDialog::update_rtsp_preview);
-    connect(channel_spin_, &QSpinBox::valueChanged, this, &CameraDialog::update_rtsp_preview);
-    connect(ip_edit_, &QLineEdit::textChanged, this, &CameraDialog::update_rtsp_preview);
-
-    add_v->addWidget(ip_box_);
-
-    add_error_ = new QLabel;
-    add_error_->setStyleSheet(QStringLiteral("color: %1;").arg(QString::fromLatin1(kStatusBad)));
-    add_error_->setVisible(false);
-    add_v->addWidget(add_error_);
-    add_v->addStretch(1);
-
-    auto* add_footer = new QHBoxLayout;
-    auto* cancel = new QPushButton(QStringLiteral("Cancel"));
-    connect(cancel, &QPushButton::clicked, this, &CameraDialog::show_list);
-    add_footer->addWidget(cancel, 0);
-    add_footer->addStretch(1);
-    auto* save = new QPushButton(QStringLiteral("Configure…"));
-    save->setProperty("gold", true);
-    connect(save, &QPushButton::clicked, this, &CameraDialog::begin_configure_new);
-    add_footer->addWidget(save, 0);
-    add_v->addLayout(add_footer);
-
-    stack_->addWidget(add_page);
-
-    build_configure_page();
+    // ── Areas page (index 3) ──────────────────────────────────────────────
+    areas_page_ = new CameraAreasPage;
+    connect(areas_page_, &CameraAreasPage::back_requested, this, [this] {
+        // Direct entry (per-row Areas) has no Configure step to return to.
+        if (entered_areas_directly_) show_list();
+        else show_page(2);
+    });
+    connect(areas_page_, &CameraAreasPage::skip_requested, this, &CameraDialog::show_list);
+    connect(areas_page_, &CameraAreasPage::save_requested, this, &CameraDialog::save_areas);
+    stack_->addWidget(areas_page_);
 
     outer->addWidget(stack_, 1);
 
-    rebuild_list();
+    list_page_->reload();
+}
+
+void CameraDialog::showEvent(QShowEvent* e) {
+    QDialog::showEvent(e);
+    // The dialog is created once and reused; always reopen on the list page at
+    // the compact size, even if it was closed mid-flow on the expanded Areas
+    // step.
+    show_list();
+}
+
+void CameraDialog::show_page(int index) {
+    // The stepper belongs to the add/edit flow (pages 1–3), not the list.
+    stepper_->setVisible(index >= 1);
+    if (index >= 1) {
+        stepper_->set_current(index - 1);  // page 1→step 0, 2→1, 3→2
+    }
+    // Near-fullscreen only while drawing areas; restore the compact size else.
+    if (index == 3) {
+        expand_for_areas();
+    } else {
+        restore_size();
+    }
+    stack_->setCurrentIndex(index);
+}
+
+void CameraDialog::expand_for_areas() {
+    if (areas_expanded_) {
+        return;
+    }
+    pre_areas_geometry_ = geometry();
+    areas_expanded_ = true;
+    if (QScreen* s = screen()) {
+        const QRect avail = s->availableGeometry();
+        const int w = static_cast<int>(avail.width() * 0.92);
+        const int h = static_cast<int>(avail.height() * 0.92);
+        resize(w, h);
+        move(avail.center() - QPoint(w / 2, h / 2));
+    }
+}
+
+void CameraDialog::restore_size() {
+    if (!areas_expanded_) {
+        return;
+    }
+    areas_expanded_ = false;
+    setGeometry(pre_areas_geometry_);
 }
 
 void CameraDialog::show_list() {
-    rebuild_list();
-    stack_->setCurrentIndex(0);
+    list_page_->reload();
+    show_page(0);
 }
 
 void CameraDialog::show_add() {
-    // Reset the form and refresh the detected-device list.
-    usb_radio_->setChecked(true);
-    name_edit_->clear();
-    ip_edit_->clear();
-    user_edit_->clear();
-    pass_edit_->clear();
-    mfr_combo_->setCurrentIndex(0);
-    stream_combo_->setCurrentIndex(0);
-    channel_spin_->setValue(1);
-    ip_list_->clear();  // IP scan is on-demand (slow); not run on open
-    update_rtsp_preview();
-    add_error_->setVisible(false);
-
-    scan_usb();
-
-    update_source_fields();
-    stack_->setCurrentIndex(1);
+    add_page_->reset();
+    show_page(1);
 }
 
-void CameraDialog::scan_usb() {
-    usb_list_->clear();
-    const std::vector<UsbCamera> cams = list_usb_cameras();
-    for (const UsbCamera& cam : cams) {
-        auto* item = new QListWidgetItem(cam.name, usb_list_);
-        item->setData(Qt::UserRole, cam.index);
-    }
-    if (cams.empty()) {
-        auto* none = new QListWidgetItem(QStringLiteral("No USB cameras found"), usb_list_);
-        none->setFlags(Qt::NoItemFlags);  // not selectable
-    } else {
-        usb_list_->setCurrentRow(0);  // preselect the first
-    }
-}
-
-void CameraDialog::scan_ip() {
-    ip_scan_btn_->setText(QStringLiteral("Scanning…"));
-    ip_scan_btn_->setEnabled(false);
-    ip_list_->clear();
-
-    // The subnet probe blocks for a few seconds, so run it off the GUI thread
-    // (like the Wi-Fi scan) and post the results back via a queued call.
-    auto* thread = QThread::create([this] {
-        const std::vector<QString> hosts = scan_rtsp_subnet();
-        QMetaObject::invokeMethod(
-            this,
-            [this, hosts] {
-                ip_list_->clear();
-                for (const QString& ip : hosts) {
-                    auto* item = new QListWidgetItem(
-                        QStringLiteral("%1 : 554 open").arg(ip), ip_list_);
-                    item->setData(Qt::UserRole, ip);
-                }
-                if (hosts.empty()) {
-                    auto* none = new QListWidgetItem(
-                        QStringLiteral("No RTSP hosts found"), ip_list_);
-                    none->setFlags(Qt::NoItemFlags);
-                }
-                ip_scan_btn_->setText(QStringLiteral("Scan"));
-                ip_scan_btn_->setEnabled(true);
-            },
-            Qt::QueuedConnection);
-    });
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
-}
-
-void CameraDialog::update_rtsp_preview() {
-    if (rtsp_manufacturers().empty()) return;
-    const RtspManufacturer& m =
-        rtsp_manufacturers()[static_cast<size_t>(mfr_combo_->currentData().toInt())];
-    const QString ip = ip_edit_->text().trimmed();
-    rtsp_preview_->setText(
-        ip.isEmpty() ? QStringLiteral("—")
-                     : build_rtsp(m, ip, channel_spin_->value(),
-                                  stream_combo_->currentIndex() == 1));
-}
-
-void CameraDialog::update_source_fields() {
-    const bool usb = usb_radio_->isChecked();
-    usb_box_->setVisible(usb);
-    ip_box_->setVisible(!usb);
-}
-
-void CameraDialog::rebuild_list() {
-    while (QLayoutItem* item = rows_box_->takeAt(0)) {
-        if (QWidget* w = item->widget()) w->deleteLater();
-        delete item;
-    }
-
-    const std::vector<camera::Camera> cams = camera::all(db_);
-    empty_label_->setVisible(cams.empty());
-
-    for (const camera::Camera& cam : cams) {
-        auto* row = new QWidget;
-        row->setObjectName(QStringLiteral("card"));
-        auto* rl = new QHBoxLayout(row);
-        rl->setContentsMargins(12, 8, 12, 8);
-        rl->setSpacing(8);
-
-        rl->addWidget(new QLabel(QString::fromStdString(cam.name)), 1);
-
-        auto* badge = dim_label(cam.camera_type == "ip" ? QStringLiteral("IP")
-                                                         : QStringLiteral("USB"));
-        rl->addWidget(badge, 0);
-
-        auto* cfg = new QPushButton(QStringLiteral("Configure"));
-        cfg->setProperty("flatText", true);
-        const camera::Camera row_cam = cam;  // capture by value for the lambda
-        connect(cfg, &QPushButton::clicked, this, [this, row_cam] {
-            editing_id_ = row_cam.id;
-            draft_ = row_cam;
-            last_frame_ = QImage();
-            populate_configure(draft_);
-            preview_label_->setText(QStringLiteral("Capturing…"));
-            add_error_->setVisible(false);
-            stack_->setCurrentIndex(2);
-            capture_snapshot();
-        });
-        rl->addWidget(cfg, 0);
-
-        auto* del = new QPushButton(QStringLiteral("Delete"));
-        del->setProperty("flatText", true);
-        const int64_t id = cam.id;
-        connect(del, &QPushButton::clicked, this, [this, id] {
-            camera::remove(db_, id);
-            emit cameras_changed();
-            rebuild_list();
-        });
-        rl->addWidget(del, 0);
-
-        rows_box_->addWidget(row);
-    }
-}
-
-void CameraDialog::begin_configure_new() {
-    const auto fail = [this](const QString& msg) {
-        add_error_->setText(msg);
-        add_error_->setVisible(true);
-    };
-
-    camera::Camera c;
-    c.active = true;
-    c.name = name_edit_->text().trimmed().toStdString();
-
-    if (usb_radio_->isChecked()) {
-        QListWidgetItem* item = usb_list_->currentItem();
-        if (!item || !(item->flags() & Qt::ItemIsSelectable)) {
-            fail(QStringLiteral("Select a camera, or click Scan."));
-            return;
-        }
-        c.camera_type = "usb";
-        c.index = static_cast<uint32_t>(item->data(Qt::UserRole).toInt());
-        if (c.name.empty()) c.name = item->text().toStdString();
-    } else {
-        const QString ip = ip_edit_->text().trimmed();
-        if (ip.isEmpty()) {
-            fail(QStringLiteral("An IP address is required."));
-            return;
-        }
-        const RtspManufacturer& m =
-            rtsp_manufacturers()[static_cast<size_t>(mfr_combo_->currentData().toInt())];
-        c.camera_type = "ip";
-        c.ip = ip.toStdString();
-        c.manufacturer = m.name.toStdString();
-        c.stream = static_cast<uint32_t>(stream_combo_->currentIndex());
-        c.channel = static_cast<uint32_t>(channel_spin_->value());
-        c.rtsp = build_rtsp(m, ip, channel_spin_->value(),
-                            stream_combo_->currentIndex() == 1)
-                     .toStdString();
-        const QString user = user_edit_->text();
-        const QString pass = pass_edit_->text();
-        if (!user.isEmpty()) c.username = user.toStdString();
-        if (!pass.isEmpty()) c.password = pass.toStdString();
-        if (c.name.empty()) c.name = ip.toStdString();
-    }
-
-    editing_id_.reset();
-    draft_ = c;
+void CameraDialog::begin_configure(const camera::Camera& cam,
+                                   std::optional<int64_t> id,
+                                   const QString& preview_text) {
+    editing_id_ = id;
+    draft_ = cam;
     last_frame_ = QImage();
-    populate_configure(draft_);     // defaults (draft_ has 0 dims/fps/angle)
-    preview_label_->setText(QStringLiteral("Click Capture to preview"));
-    stack_->setCurrentIndex(2);
+    configure_page_->populate(draft_);
+    configure_page_->set_preview_text(preview_text);
+    configure_page_->clear_error();
+    show_page(2);
     capture_snapshot();
 }
 
-void CameraDialog::build_configure_page() {
-    config_page_ = new QWidget;
-    auto* v = new QVBoxLayout(config_page_);
-    v->setContentsMargins(0, 0, 0, 0);
-    v->setSpacing(12);
-
-    preview_label_ = new QLabel(QStringLiteral("Click Capture to preview"));
-    preview_label_->setProperty("dim", true);
-    preview_label_->setAlignment(Qt::AlignCenter);
-    preview_label_->setMinimumHeight(240);
-    preview_label_->setObjectName(QStringLiteral("card"));
-    v->addWidget(preview_label_, 1);
-
-    auto* cap_row = new QHBoxLayout;
-    cap_row->addStretch(1);
-    capture_btn_ = new QPushButton(QStringLiteral("Capture"));
-    capture_btn_->setProperty("flatText", true);
-    connect(capture_btn_, &QPushButton::clicked, this, &CameraDialog::capture_snapshot);
-    cap_row->addWidget(capture_btn_, 0);
-    v->addLayout(cap_row);
-
-    const auto field = [&](const QString& label, QWidget* w) {
-        auto* row = new QHBoxLayout;
-        auto* l = dim_label(label);
-        l->setFixedWidth(96);
-        row->addWidget(l, 0);
-        row->addWidget(w, 1);
-        v->addLayout(row);
-    };
-
-    res_combo_ = new QComboBox;
-    for (const ResPreset& p : kResPresets) {
-        res_combo_->addItem(QString::fromUtf8(p.label), QSize(p.w, p.h));
-    }
-    res_combo_->setCurrentIndex(kDefaultResIndex);
-    field(QStringLiteral("Resolution"), res_combo_);
-
-    fps_spin_ = new QSpinBox;
-    fps_spin_->setRange(1, 60);
-    fps_spin_->setValue(30);
-    field(QStringLiteral("FPS"), fps_spin_);
-
-    rotation_combo_ = new QComboBox;
-    for (int deg : {0, 90, 180, 270}) {
-        rotation_combo_->addItem(QStringLiteral("%1°").arg(deg), deg);
-    }
-    connect(rotation_combo_, &QComboBox::currentIndexChanged, this,
-            &CameraDialog::render_preview);
-    field(QStringLiteral("Rotation"), rotation_combo_);
-
-    pitch_spin_ = new QDoubleSpinBox;
-    pitch_spin_->setRange(-45.0, 45.0);
-    pitch_spin_->setSingleStep(0.5);
-    pitch_spin_->setSuffix(QStringLiteral("°"));
-    field(QStringLiteral("Pitch"), pitch_spin_);
-
-    roll_spin_ = new QDoubleSpinBox;
-    roll_spin_->setRange(-45.0, 45.0);
-    roll_spin_->setSingleStep(0.5);
-    roll_spin_->setSuffix(QStringLiteral("°"));
-    field(QStringLiteral("Roll"), roll_spin_);
-
-    config_error_ = new QLabel;
-    config_error_->setStyleSheet(QStringLiteral("color: %1;").arg(QString::fromLatin1(kStatusBad)));
-    config_error_->setVisible(false);
-    v->addWidget(config_error_);
-
-    auto* footer = new QHBoxLayout;
-    auto* back = new QPushButton(QStringLiteral("Back"));
-    connect(back, &QPushButton::clicked, this, [this] {
-        if (editing_id_.has_value()) show_list();
-        else stack_->setCurrentIndex(1);
-    });
-    footer->addWidget(back, 0);
-    footer->addStretch(1);
-    auto* save = new QPushButton(QStringLiteral("Save"));
-    save->setProperty("gold", true);
-    connect(save, &QPushButton::clicked, this, &CameraDialog::save_configured_camera);
-    footer->addWidget(save, 0);
-    v->addLayout(footer);
-
-    stack_->addWidget(config_page_);  // index 2
-}
-
 void CameraDialog::capture_snapshot() {
-    capture_btn_->setText(QStringLiteral("Capturing…"));
-    capture_btn_->setEnabled(false);
-    preview_label_->setText(QStringLiteral("Capturing…"));
+    configure_page_->set_capturing(true);
+    configure_page_->set_preview_text(QStringLiteral("Capturing…"));
 
     std::optional<int> index;
     QString url;
@@ -547,21 +219,21 @@ void CameraDialog::capture_snapshot() {
         const QString pass = draft_.password ? QString::fromStdString(*draft_.password) : QString();
         url = with_credentials(rtsp, user, pass);
     }
-    const QSize res = res_combo_->currentData().toSize();
+    const QSize res = configure_page_->resolution();
 
     auto* thread = QThread::create([this, index, url, res] {
         const Snapshot snap = grab_snapshot(index, url, res.width(), res.height());
         QMetaObject::invokeMethod(
             this,
             [this, snap] {
-                capture_btn_->setText(QStringLiteral("Capture"));
-                capture_btn_->setEnabled(true);
+                configure_page_->set_capturing(false);
                 if (snap.image.isNull()) {
-                    preview_label_->setText(snap.error);
+                    configure_page_->set_preview_text(snap.error);
                     return;
                 }
                 last_frame_ = snap.image;
-                render_preview();
+                configure_page_->set_frame(last_frame_);
+                update_areas_background();  // refresh the ROI canvas if it's showing
             },
             Qt::QueuedConnection);
     });
@@ -569,86 +241,56 @@ void CameraDialog::capture_snapshot() {
     thread->start();
 }
 
-void CameraDialog::render_preview() {
-    if (last_frame_.isNull()) {
-        return;
-    }
-    const int deg = rotation_combo_->currentData().toInt();
-    const QImage shown = apply_rotation(last_frame_, deg);
-    preview_label_->setPixmap(QPixmap::fromImage(shown).scaled(
-        preview_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-}
-
-void CameraDialog::populate_configure(const camera::Camera& cam) {
-    // Drop any custom resolution entry left over from a previous open, so it
-    // can't accumulate across repeated Configure opens (presets sit at the tail).
-    const int preset_count = static_cast<int>(std::size(kResPresets));
-    while (res_combo_->count() > preset_count) {
-        res_combo_->removeItem(0);
-    }
-
-    // Resolution: match a preset, else prepend a "custom" entry and select it.
-    int res_idx = -1;
-    for (int i = 0; i < res_combo_->count(); ++i) {
-        const QSize s = res_combo_->itemData(i).toSize();
-        if (s.width() == static_cast<int>(cam.width) &&
-            s.height() == static_cast<int>(cam.height)) {
-            res_idx = i;
-            break;
-        }
-    }
-    if (res_idx < 0) {
-        if (cam.width > 0 && cam.height > 0) {
-            res_combo_->insertItem(
-                0, QStringLiteral("%1 × %2 (custom)").arg(cam.width).arg(cam.height),
-                QSize(static_cast<int>(cam.width), static_cast<int>(cam.height)));
-            res_idx = 0;
-        } else {
-            // No stored size (fresh add) → use the default preset.
-            res_idx = res_combo_->findData(QSize(kResPresets[kDefaultResIndex].w,
-                                                 kResPresets[kDefaultResIndex].h));
-            if (res_idx < 0) res_idx = 0;
-        }
-    }
-    res_combo_->setCurrentIndex(res_idx);
-
-    fps_spin_->setValue(cam.fps > 0 ? static_cast<int>(cam.fps) : 30);
-
-    int rot_idx = rotation_combo_->findData(static_cast<int>(cam.rotation));
-    rotation_combo_->setCurrentIndex(rot_idx < 0 ? 0 : rot_idx);
-
-    pitch_spin_->setValue(cam.pitch);
-    roll_spin_->setValue(cam.roll);
-}
-
-void CameraDialog::read_configure_into_draft() {
-    const QSize res = res_combo_->currentData().toSize();
-    draft_.width = static_cast<uint32_t>(res.width());
-    draft_.height = static_cast<uint32_t>(res.height());
-    draft_.fps = static_cast<uint32_t>(fps_spin_->value());
-    draft_.rotation = static_cast<uint32_t>(rotation_combo_->currentData().toInt());
-    draft_.pitch = static_cast<float>(pitch_spin_->value());
-    draft_.roll = static_cast<float>(roll_spin_->value());
-}
-
 void CameraDialog::save_configured_camera() {
-    read_configure_into_draft();
+    configure_page_->read_into(draft_);
 
     if (editing_id_.has_value()) {
         draft_.id = *editing_id_;
         if (!camera::update(db_, draft_)) {
-            config_error_->setText(QStringLiteral("Failed to save the camera."));
-            config_error_->setVisible(true);
+            configure_page_->show_error(QStringLiteral("Failed to save the camera."));
             return;
         }
     } else {
-        if (!camera::insert(db_, draft_)) {
-            config_error_->setText(QStringLiteral("Failed to save the camera."));
-            config_error_->setVisible(true);
+        const auto new_id = camera::insert(db_, draft_);
+        if (!new_id.has_value()) {
+            configure_page_->show_error(QStringLiteral("Failed to save the camera."));
             return;
         }
+        // Adopt the assigned id so the (optional) Areas step that follows can
+        // attach ROIs to the just-inserted camera.
+        editing_id_ = *new_id;
+        draft_.id = *new_id;
     }
     emit cameras_changed();
+    // Advance to the optional Draw-ROI step; the snapshot is already captured,
+    // so reuse it. Reached via Next, so Back from Areas returns to Configure.
+    enter_areas(/*direct=*/false);
+}
+
+void CameraDialog::enter_areas(bool direct) {
+    entered_areas_directly_ = direct;
+    areas_page_->load(editing_id_.has_value()
+                          ? camera::areas_for(db_, *editing_id_)
+                          : std::vector<camera::CameraArea>{});
+    update_areas_background();
+    show_page(3);
+}
+
+void CameraDialog::update_areas_background() {
+    if (last_frame_.isNull()) {
+        areas_page_->set_background(QImage());
+        return;
+    }
+    areas_page_->set_background(apply_orientation(
+        last_frame_, static_cast<int>(draft_.rotation), draft_.pitch, draft_.roll));
+}
+
+void CameraDialog::save_areas(const std::vector<camera::CameraArea>& areas) {
+    if (editing_id_.has_value() &&
+        !camera::replace_areas(db_, *editing_id_, areas)) {
+        areas_page_->show_save_error();
+        return;
+    }
     show_list();
 }
 
