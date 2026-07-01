@@ -16,4 +16,12 @@ std::vector<Detection> decode_yolo(const float* out, int num_classes,
                                    int orig_w, int orig_h, float conf_floor,
                                    float nms_iou);
 
+// Decode an end-to-end (NMS-free) YOLO ONNX output ([1, num_dets, 6], each row
+// x1,y1,x2,y2,score,class_id in letterboxed input pixels) into Detections in
+// original-frame pixels. NMS is already applied by the model, so this only
+// filters by confidence and maps boxes back via undo_letterbox. Pure — tested.
+std::vector<Detection> decode_yolo_end2end(const float* out, int num_dets,
+                                           const LetterboxInfo& lb, int orig_w,
+                                           int orig_h, float conf_floor);
+
 } // namespace denso::ui

@@ -6,6 +6,7 @@
 #include <vector>
 
 using denso::ui::decode_yolo;
+using denso::ui::decode_yolo_end2end;
 using denso::ui::Detection;
 using denso::ui::LetterboxInfo;
 
@@ -30,4 +31,21 @@ TEST_CASE("decode_yolo returns the argmax class above the conf floor") {
     REQUIRE(dets[0].conf == 0.90f);
     REQUIRE(dets[0].box.x == 288);   // 320 - 32
     REQUIRE(dets[0].box.width == 64);
+}
+
+TEST_CASE("decode_yolo_end2end filters by conf and maps xyxy boxes back") {
+    LetterboxInfo lb; lb.scale = 1.0f; lb.pad_x = 0; lb.pad_y = 0; lb.size = 640;
+    // [num_dets, 6] row-major: x1,y1,x2,y2,score,class_id
+    std::vector<float> out = {
+        100.f, 100.f, 200.f, 200.f, 0.90f, 3.f,   // keep
+         10.f,  10.f,  50.f,  50.f, 0.10f, 1.f,    // below floor -> drop
+    };
+    const auto dets = decode_yolo_end2end(out.data(), 2, lb, 640, 640, 0.25f);
+    REQUIRE(dets.size() == 1);
+    REQUIRE(dets[0].class_id == 3);
+    REQUIRE(dets[0].conf == 0.90f);
+    REQUIRE(dets[0].box.x == 100);
+    REQUIRE(dets[0].box.y == 100);
+    REQUIRE(dets[0].box.width == 100);
+    REQUIRE(dets[0].box.height == 100);
 }

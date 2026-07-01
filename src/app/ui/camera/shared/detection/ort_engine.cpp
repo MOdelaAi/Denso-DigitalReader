@@ -118,13 +118,17 @@ std::vector<Detection> OrtEngine::infer(const cv::Mat& bgr) {
         return {};
     }
 
-    // Output shape [1, 4+nc, na].
     const auto info = outputs[0].GetTensorTypeAndShapeInfo();
-    const std::vector<int64_t> shape = info.GetShape();  // {1, 4+nc, na}
+    const std::vector<int64_t> shape = info.GetShape();
+    const float* out = outputs[0].GetTensorData<float>();
+    // End-to-end (NMS-free) models emit [1, num_dets, 6]; the raw YOLOv8 head
+    // emits [1, 4+nc, anchors] where anchors is always large (never 6).
+    if (shape.size() == 3 && shape[2] == 6) {
+        return decode_yolo_end2end(out, static_cast<int>(shape[1]), lb,
+                                   bgr.cols, bgr.rows, kConfFloor);
+    }
     const int num_classes = static_cast<int>(shape[1]) - 4;
     const int num_anchors = static_cast<int>(shape[2]);
-    const float* out = outputs[0].GetTensorData<float>();
-
     return decode_yolo(out, num_classes, num_anchors, lb, bgr.cols, bgr.rows,
                        kConfFloor, kNmsIou);
 }
