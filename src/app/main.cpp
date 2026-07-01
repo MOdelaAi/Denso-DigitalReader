@@ -7,6 +7,7 @@
 #include "network/backend.h"
 #include "settings/repo.h"
 #include "settings/settings.h"
+#include "ui/camera/shared/detection/model_sync.h"
 #include "ui/mainwindow.h"
 
 #include <QApplication>
@@ -77,6 +78,10 @@ int main(int argc, char** argv) {
     // One-time migration of any pre-SQLite settings.json sitting beside the DB.
     const QString legacy_json = QFileInfo(db_path).absolutePath() + QStringLiteral("/settings.json");
     denso::settings::import_legacy(conn, legacy_json);
+
+    // Sync the detection-model catalog with the models/ folder beside the exe:
+    // any *.onnx present becomes selectable in the camera Models step.
+    denso::ui::sync_models(conn, QCoreApplication::applicationDirPath() + QStringLiteral("/models"));
 
     // The app owns network config: reassert it to the OS at boot. Non-fatal —
     // a failed apply is logged, never blocks startup.
