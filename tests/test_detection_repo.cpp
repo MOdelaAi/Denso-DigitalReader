@@ -72,3 +72,87 @@ TEST_CASE("upsert_model updates by filename without adding a row") {
     REQUIRE(models[0].name == "new");
     REQUIRE(models[0].class_names.size() == 2);
 }
+
+#include "camera/camera.h"
+#include "camera/repo.h"
+#include "detection/repo.h"
+
+using denso::detection::CameraModel;
+using denso::detection::detection_for;
+using denso::detection::models_for;
+using denso::detection::ModelClassSelection;
+using denso::detection::set_camera_models;
+
+namespace {
+int64_t seed_camera(const QSqlDatabase& db) {
+    denso::camera::Camera c;
+    c.name = "Cam";
+    c.camera_type = "usb";
+    c.active = true;
+    c.index = 0;
+    c.width = 640; c.height = 480; c.fps = 30;
+    return *denso::camera::insert(db, c);
+}
+int64_t seed_model(const QSqlDatabase& db) {
+    denso::detection::DetectionModel m;
+    m.name = "denso"; m.filename = "denso.onnx";
+    m.class_names = {"0", "1", "2", "3"};
+    return *upsert_model(db, m);
+}
+} // namespace
+
+TEST_CASE("set_camera_models + models_for round-trip attachments and classes") {
+    auto d = mem();
+    const int64_t cam = seed_camera(d.handle());
+    const int64_t model = seed_model(d.handle());
+
+    CameraModel cm;
+    cm.camera_id = cam;
+    cm.model_id = model;
+    cm.classes = {ModelClassSelection{1, 0.6f}, ModelClassSelection{3, 0.4f}};
+    REQUIRE(set_camera_models(d.handle(), cam, {cm}));
+
+    const auto got = models_for(d.handle(), cam);
+    REQUIRE(got.size() == 1);
+    REQUIRE(got[0].model_id == model);
+    REQUIRE(got[0].classes.size() == 2);
+    REQUIRE(got[0].classes[0].class_id == 1);
+    REQUIRE(got[0].classes[0].conf == 0.6f);
+    REQUIRE(got[0].classes[1].class_id == 3);
+}
+
+TEST_CASE("set_camera_models replaces the previous set") {
+    auto d = mem();
+    const int64_t cam = seed_camera(d.handle());
+    const int64_t model = seed_model(d.handle());
+    CameraModel cm; cm.camera_id = cam; cm.model_id = model;
+    cm.classes = {ModelClassSelection{0, 0.5f}};
+    REQUIRE(set_camera_models(d.handle(), cam, {cm, cm}));
+    REQUIRE(models_for(d.handle(), cam).size() == 2);
+    REQUIRE(set_camera_models(d.handle(), cam, {}));
+    REQUIRE(models_for(d.handle(), cam).empty());
+}
+
+TEST_CASE("detection_for resolves filename + class_names from the model") {
+    auto d = mem();
+    const int64_t cam = seed_camera(d.handle());
+    const int64_t model = seed_model(d.handle());
+    CameraModel cm; cm.camera_id = cam; cm.model_id = model;
+    cm.classes = {ModelClassSelection{2, 0.7f}};
+    REQUIRE(set_camera_models(d.handle(), cam, {cm}));
+
+    const auto det = detection_for(d.handle(), cam);
+    REQUIRE(det.camera_id == cam);
+    REQUIRE(det.models.size() == 1);
+    REQUIRE(det.models[0].filename == "denso.onnx");
+    REQUIRE(det.models[0].class_names.size() == 4);
+    REQUIRE(det.models[0].classes.size() == 1);
+    REQUIRE(det.models[0].classes[0].class_id == 2);
+    REQUIRE(det.models[0].classes[0].conf == 0.7f);
+}
+
+TEST_CASE("detection_for is empty for a camera with no models") {
+    auto d = mem();
+    const int64_t cam = seed_camera(d.handle());
+    REQUIRE(detection_for(d.handle(), cam).models.empty());
+}
