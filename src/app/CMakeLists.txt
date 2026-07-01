@@ -54,8 +54,13 @@ target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")
 
 target_link_libraries(denso PRIVATE onnxruntime)
 
-# ORT runtime DLLs + the model must sit beside the exe (Windows DLL search +
-# the app resolves models/denso.onnx relative to the executable dir).
+# ORT runtime DLLs + the models must sit beside the exe (Windows DLL search +
+# the app scans models/ relative to the executable dir at startup via
+# sync_models). ALL models/*.onnx are deployed, not just denso.onnx, so every
+# model in the source models/ folder appears in the catalog. (Configure-time
+# glob — re-run cmake after adding a new .onnx, or drop it into
+# <exe-dir>/models directly.)
+file(GLOB MODEL_ONNX_FILES "${CMAKE_SOURCE_DIR}/models/*.onnx")
 add_custom_command(TARGET denso POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${ORT_DIR}/lib/onnxruntime.dll
@@ -65,8 +70,8 @@ add_custom_command(TARGET denso POST_BUILD
         $<TARGET_FILE_DIR:denso>
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:denso>/models
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_SOURCE_DIR}/models/denso.onnx
-        $<TARGET_FILE_DIR:denso>/models/denso.onnx
+        ${MODEL_ONNX_FILES}
+        $<TARGET_FILE_DIR:denso>/models
     VERBATIM)
 
 # CUDA execution-provider runtime dependencies: ORT's CUDA/TensorRT providers
