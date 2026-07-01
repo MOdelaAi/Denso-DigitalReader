@@ -14,6 +14,16 @@ add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Sql Widgets Multimedia Network)
 find_package(OpenCV REQUIRED)
 
+# ONNX Runtime (GPU build, provisioned into third_party/). MinGW links the C
+# API directly against the MSVC-built DLL (clean C ABI — verified). The GPU
+# provider DLLs (CUDA/TensorRT) are loaded by ORT at runtime, not linked.
+set(ORT_DIR ${CMAKE_SOURCE_DIR}/third_party/onnxruntime)
+add_library(onnxruntime SHARED IMPORTED GLOBAL)
+set_target_properties(onnxruntime PROPERTIES
+    IMPORTED_LOCATION ${ORT_DIR}/lib/onnxruntime.dll
+    IMPORTED_IMPLIB   ${ORT_DIR}/lib/onnxruntime.dll
+    INTERFACE_INCLUDE_DIRECTORIES ${ORT_DIR}/include)
+
 enable_testing()
 
 # Two targets, one per concern (see each subdir's CMakeLists):

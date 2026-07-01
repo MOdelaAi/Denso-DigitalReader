@@ -50,6 +50,10 @@ add_executable(denso_tests
     # names_metadata is GUI-target code but OpenCV/ORT-free pure string parsing,
     # so compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/names_metadata.cpp
+    test_frame_convert.cpp
+    # frame_convert (qimage_to_mat) is GUI-target code but pure OpenCV/QImage
+    # conversion (no widgets), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/frame_convert.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)

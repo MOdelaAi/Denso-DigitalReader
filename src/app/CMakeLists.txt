@@ -19,6 +19,7 @@ add_executable(denso WIN32
     ui/camera/camera_dialog.cpp
     # camera — cross-cutting primitives (used by both surfaces)
     ui/camera/shared/snapshot.cpp
+    ui/camera/shared/frame_convert.cpp
     ui/camera/shared/rtsp_templates.cpp
     ui/camera/shared/roi_geometry.cpp
     # camera — live-view grid internals
@@ -43,3 +44,20 @@ target_link_libraries(denso PRIVATE denso_core Qt6::Widgets Qt6::Multimedia Qt6:
 target_include_directories(denso PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(denso PRIVATE ${OpenCV_LIBS})
 target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")
+
+target_link_libraries(denso PRIVATE onnxruntime)
+
+# ORT runtime DLLs + the model must sit beside the exe (Windows DLL search +
+# the app resolves models/denso.onnx relative to the executable dir).
+add_custom_command(TARGET denso POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${ORT_DIR}/lib/onnxruntime.dll
+        ${ORT_DIR}/lib/onnxruntime_providers_shared.dll
+        ${ORT_DIR}/lib/onnxruntime_providers_cuda.dll
+        ${ORT_DIR}/lib/onnxruntime_providers_tensorrt.dll
+        $<TARGET_FILE_DIR:denso>
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:denso>/models
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/models/denso.onnx
+        $<TARGET_FILE_DIR:denso>/models/denso.onnx
+    VERBATIM)

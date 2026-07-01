@@ -12,4 +12,7 @@ namespace denso::ui {
 /// BGR `cv::Mat` (CV_8UC3) → RGB888 QImage that owns its bytes. Empty in → null.
 QImage mat_to_qimage(const cv::Mat& bgr);
 
+/// RGB/ARGB QImage → BGR cv::Mat (CV_8UC3) that owns its bytes. Null in → empty.
+cv::Mat qimage_to_mat(const QImage& img);
+
 } // namespace denso::ui
