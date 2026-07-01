@@ -303,7 +303,7 @@ void CameraDialog::enter_areas(bool direct) {
                           ? camera::areas_for(db_, *editing_id_)
                           : std::vector<camera::CameraArea>{});
     update_areas_background();
-    show_page(3);
+    show_page(4);
 }
 
 void CameraDialog::update_areas_background() {
