@@ -1,11 +1,14 @@
 #include "ui/camera/grid/camera_grid.h"
 
 #include "camera/repo.h"
+#include "detection/repo.h"
 #include "ui/camera/grid/camera_stream.h"
 #include "ui/camera/grid/camera_tile.h"
 #include "ui/camera/grid/frame_processor.h"
 #include "ui/camera/grid/grid_layout.h"
+#include "ui/camera/shared/detection/engine_registry.h"
 
+#include <QCoreApplication>
 #include <QGridLayout>
 #include <QString>
 
@@ -50,6 +53,12 @@ void CameraGrid::clear() {
 void CameraGrid::reload() {
     clear();
 
+    if (!engines_) {
+        const std::string dir = QCoreApplication::applicationDirPath().toStdString();
+        engines_ = std::make_unique<EngineRegistry>(dir + "/models",
+                                                     dir + "/models/trt_cache");
+    }
+
     std::vector<camera::Camera> cams = camera::all(db_);
     if (cams.size() > static_cast<size_t>(kMaxTiles)) {
         cams.resize(kMaxTiles);  // first four by id
@@ -64,9 +73,29 @@ void CameraGrid::reload() {
 
         auto* tile = new CameraTile(QString::fromStdString(cam.name));
         tile->set_areas(camera::areas_for(db_, cam.id));  // ROI overlay (if any)
-        auto* stream = new CameraStream(
-            cam, std::make_unique<OrientationProcessor>(
-                     static_cast<int>(cam.rotation), cam.pitch, cam.roll));
+
+        const detection::CameraDetection det = detection::detection_for(db_, cam.id);
+        std::unique_ptr<FrameProcessor> proc;
+        if (det.models.empty()) {
+            proc = std::make_unique<OrientationProcessor>(
+                static_cast<int>(cam.rotation), cam.pitch, cam.roll);
+        } else {
+            std::vector<DetectionProcessor::ModelRun> runs;
+            for (const detection::ResolvedModel& rm : det.models) {
+                InferenceEngine* eng = engines_->get(rm.filename);
+                if (!eng) continue;  // model failed to load — skip it
+                runs.push_back({eng, rm.class_names, rm.classes});
+            }
+            if (runs.empty()) {
+                proc = std::make_unique<OrientationProcessor>(
+                    static_cast<int>(cam.rotation), cam.pitch, cam.roll);
+            } else {
+                proc = std::make_unique<DetectionProcessor>(
+                    static_cast<int>(cam.rotation), cam.pitch, cam.roll,
+                    std::move(runs));
+            }
+        }
+        auto* stream = new CameraStream(cam, std::move(proc));
         connect(stream, &CameraStream::frame_ready, tile, &CameraTile::set_frame);
         connect(stream, &CameraStream::status_changed, tile, &CameraTile::set_status);
 

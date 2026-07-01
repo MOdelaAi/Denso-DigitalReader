@@ -5,9 +5,12 @@
 // tearing down the tiles. Streaming stops on destruction.
 #pragma once
 
+#include "ui/camera/shared/detection/engine_registry.h"
+
 #include <QSqlDatabase>
 #include <QWidget>
 
+#include <memory>
 #include <vector>
 
 class QGridLayout;
@@ -35,6 +38,7 @@ private:
     QGridLayout* grid_ = nullptr;
     std::vector<CameraStream*> streams_;
     std::vector<CameraTile*> tiles_;
+    std::unique_ptr<EngineRegistry> engines_;
 };
 
 } // namespace denso::ui
