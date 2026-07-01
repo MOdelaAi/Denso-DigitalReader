@@ -4,7 +4,7 @@
 // arrive via slots wired to a CameraStream; it owns no capture logic.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QImage>
 #include <QString>

@@ -3,7 +3,7 @@
 // coordinator drives navigation by listening to the request signals.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QSqlDatabase>
 #include <QWidget>

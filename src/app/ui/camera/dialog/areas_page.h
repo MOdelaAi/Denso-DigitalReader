@@ -4,7 +4,7 @@
 // owns no DB access — it just edits polygons.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QImage>
 #include <QWidget>

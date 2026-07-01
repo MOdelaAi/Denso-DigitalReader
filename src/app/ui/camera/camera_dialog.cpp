@@ -1,6 +1,6 @@
 #include "ui/camera/camera_dialog.h"
 
-#include "camera/model.h"
+#include "camera/camera.h"
 #include "camera/repo.h"
 #include "ui/camera/dialog/add_page.h"
 #include "ui/camera/dialog/areas_page.h"

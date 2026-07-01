@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "camera/model.h"
+#include "camera/camera.h"
 #include "camera/repo.h"
 #include "db/db.h"
 

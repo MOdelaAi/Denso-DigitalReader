@@ -7,7 +7,7 @@
 // owns no data policy — the dialog loads/persists areas around it.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QImage>
 #include <QWidget>

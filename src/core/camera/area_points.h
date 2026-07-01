@@ -6,7 +6,7 @@
 // rather than throwing, so a hand-edited or partial DB value can't crash a read.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <string>
 #include <vector>

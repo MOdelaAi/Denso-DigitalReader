@@ -5,7 +5,7 @@
 // later slice; `remove` already cascades them.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QSqlDatabase>
 

@@ -11,3 +11,6 @@ denso.db-wal
 
 # Screenshots / generated images (assets/icon.png is force-tracked)
 *.png
+
+# ONNX Runtime binaries (provisioned per platform, not tracked)
+third_party/onnxruntime/

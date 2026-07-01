@@ -9,7 +9,7 @@
 // teardown from hanging on a dead camera.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QImage>
 #include <QObject>

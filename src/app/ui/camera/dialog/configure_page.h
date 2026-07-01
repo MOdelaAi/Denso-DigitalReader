@@ -4,7 +4,7 @@
 // with its own orientation controls and reads its values back into a draft.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QImage>
 #include <QSize>

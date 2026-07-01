@@ -4,7 +4,7 @@
 // the coordinator owns what happens next.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QWidget>
 

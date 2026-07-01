@@ -9,7 +9,7 @@
 // optional: it's offered right after Save and reachable later per-camera.
 #pragma once
 
-#include "camera/model.h"
+#include "camera/camera.h"
 
 #include <QDialog>
 #include <QImage>

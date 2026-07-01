@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "camera/area_points.h"
-#include "camera/model.h"
+#include "camera/camera.h"
 
 using denso::camera::parse_points;
 using denso::camera::Point;
