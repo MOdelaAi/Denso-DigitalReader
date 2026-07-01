@@ -26,6 +26,7 @@ add_executable(denso WIN32
     ui/camera/shared/detection/yolo_decode.cpp
     ui/camera/shared/detection/names_metadata.cpp
     ui/camera/shared/detection/ort_engine.cpp
+    ui/camera/shared/detection/engine_registry.cpp
     # camera — live-view grid internals
     ui/camera/grid/camera_grid.cpp
     ui/camera/grid/camera_stream.cpp
