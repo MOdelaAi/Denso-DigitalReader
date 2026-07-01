@@ -16,23 +16,20 @@ namespace denso::ui {
 namespace {
 
 // Build a session for the requested provider tier; returns nullptr on failure.
-// tier: 0 = TensorRT+CUDA, 1 = CUDA, 2 = CPU only.
+// tier: 0 = CUDA (GPU), 1 = CPU only.
+//
+// TensorRT is intentionally NOT used: its execution provider compiles an engine
+// from the .onnx on the first inference — a minutes-long, non-interruptible
+// build that runs inside the capture thread and blocks stream teardown (join()),
+// freezing the UI and leaving a process that can't exit. CUDA runs the ONNX
+// graph directly on the GPU with no build step, so a bare .onnx "just works".
 std::unique_ptr<Ort::Session> make_session(Ort::Env& env, const std::wstring& path,
-                                           int tier, const std::string& cache_dir) {
+                                           int tier) {
     try {
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(1);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         if (tier == 0) {
-            OrtTensorRTProviderOptions trt{};
-            trt.device_id = 0;
-            trt.trt_engine_cache_enable = 1;
-            trt.trt_engine_cache_path = cache_dir.c_str();
-            opts.AppendExecutionProvider_TensorRT(trt);
-            OrtCUDAProviderOptions cuda{};
-            cuda.device_id = 0;
-            opts.AppendExecutionProvider_CUDA(cuda);
-        } else if (tier == 1) {
             OrtCUDAProviderOptions cuda{};
             cuda.device_id = 0;
             opts.AppendExecutionProvider_CUDA(cuda);
@@ -50,11 +47,11 @@ std::wstring widen(const std::string& s) {
 
 } // namespace
 
-OrtEngine::OrtEngine(const std::string& model_path, const std::string& engine_cache_dir)
+OrtEngine::OrtEngine(const std::string& model_path, const std::string& /*engine_cache_dir*/)
     : env_(ORT_LOGGING_LEVEL_WARNING, "denso") {
     const std::wstring wpath = widen(model_path);
-    for (int tier = 0; tier <= 2 && !session_; ++tier) {
-        session_ = make_session(env_, wpath, tier, engine_cache_dir);
+    for (int tier = 0; tier <= 1 && !session_; ++tier) {
+        session_ = make_session(env_, wpath, tier);
         if (session_) {
             qInfo().noquote() << "[ort] loaded" << QString::fromStdString(model_path)
                               << "tier" << tier;
