@@ -26,6 +26,7 @@ add_executable(denso_tests
     test_camera_repo.cpp
     test_detection_repo.cpp
     test_area_points.cpp
+    test_class_names.cpp
     test_rtsp_templates.cpp
     # rtsp_templates lives in the GUI app target but depends only on QtCore
     # (QString), so compile it straight into the tests for unit coverage.
