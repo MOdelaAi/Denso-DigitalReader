@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # sources carry UTF-8 literals (✕, …, —, 🔒, ×) that must reach the binary
 # byte-for-byte, so tell MSVC to read/emit UTF-8 (the files have no BOM).
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Sql Widgets Multimedia Network)

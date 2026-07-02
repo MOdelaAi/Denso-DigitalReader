@@ -8,6 +8,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 add_executable(denso WIN32
     main.cpp
+    resources.qrc
     # app shell
     ui/theme.cpp
     ui/mainwindow.cpp
