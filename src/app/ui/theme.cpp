@@ -83,7 +83,7 @@ QString style_sheet(const Palette& p) {
 
         QPushButton {
             background: %(panel3); color: %(txt);
-            border: none; border-radius: 8px; padding: 6px 14px;
+            border: none; border-radius: 12px; padding: 8px 18px;
         }
         QPushButton:hover { background: %(panel2); }
         QPushButton[gold="true"] {
@@ -98,12 +98,12 @@ QString style_sheet(const Palette& p) {
 
         QLineEdit {
             background: %(panel); color: %(txt);
-            border: 1px solid %(panel3); border-radius: 6px; padding: 4px 6px;
+            border: 1px solid %(panel3); border-radius: 10px; padding: 6px 10px;
             selection-background-color: %(gold);
         }
         QComboBox {
             background: %(panel); color: %(txt);
-            border: 1px solid %(panel3); border-radius: 6px; padding: 4px 6px;
+            border: 1px solid %(panel3); border-radius: 10px; padding: 6px 10px;
         }
         QComboBox QAbstractItemView {
             background: %(panel2); color: %(txt);
@@ -111,12 +111,14 @@ QString style_sheet(const Palette& p) {
         }
         QAbstractSpinBox {
             background: %(panel); color: %(txt);
-            border: 1px solid %(panel3); border-radius: 6px; padding: 4px 6px;
+            border: 1px solid %(panel3); border-radius: 10px; padding: 6px 10px;
             selection-background-color: %(gold);
         }
         QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
             background: %(panel3); border: none; width: 16px;
         }
+        QAbstractSpinBox::up-button { border-top-right-radius: 10px; }
+        QAbstractSpinBox::down-button { border-bottom-right-radius: 10px; }
         QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
             background: %(gold);
         }
@@ -124,15 +126,15 @@ QString style_sheet(const Palette& p) {
 
         #navList { background: transparent; border: none; }
         #navList::item {
-            color: %(txtDim); padding: 8px 10px; border-radius: 6px; margin: 2px 0px;
+            color: %(txtDim); padding: 9px 12px; border-radius: 10px; margin: 2px 0px;
         }
         #navList::item:selected { background: %(panel3); color: %(gold); }
         #navList::item:hover { background: %(panel3); }
 
-        #card { background: %(panel3); border-radius: 10px; }
+        #card { background: %(panel3); border-radius: 16px; }
         #dialogPanel {
             background: %(panel2);
-            border: 1px solid %(panel3); border-radius: 12px;
+            border: 1px solid %(panel3); border-radius: 18px;
         }
         QScrollArea { border: none; background: transparent; }
     )")
