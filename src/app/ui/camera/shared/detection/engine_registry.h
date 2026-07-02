@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <functional>
 
 namespace denso::ui {
 
@@ -27,7 +28,9 @@ public:
     /// at startup, before the capture threads run, so the first real frame
     /// doesn't stall on CUDA kernel init / allocation. Engines are cached, so
     /// cameras reuse the already-warm sessions. Blocking; logs per model.
-    void warm_up();
+    /// `on_model`, if set, is called with each model's filename just before it is
+    /// prepared — used to drive a startup progress display.
+    void warm_up(std::function<void(const std::string&)> on_model = {});
 
 private:
     std::string models_dir_;

@@ -21,7 +21,7 @@ InferenceEngine* EngineRegistry::get(const std::string& filename) {
     return (e && e->ok()) ? e : nullptr;
 }
 
-void EngineRegistry::warm_up() {
+void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model) {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::is_directory(models_dir_, ec)) {
@@ -47,6 +47,9 @@ void EngineRegistry::warm_up() {
         }
         const std::string filename = entry.path().filename().string();
         const QString name = QString::fromStdString(filename);
+        if (on_model) {
+            on_model(filename);
+        }
         // First run per model builds the TensorRT engine — minutes-long — then
         // caches it; later runs just load. Log around it so the freeze isn't
         // mistaken for a hang.
