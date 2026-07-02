@@ -85,11 +85,12 @@ Grouped by feature so the folder scales: the **app shell** at `ui/` root, with
 The folder is a clean 3-layer stack under two root entry points. **Root** holds
 the public surfaces (`camera_view`, `camera_dialog`). **`grid/`** is the live-view
 internals (`camera_grid`, `camera_stream`, `camera_tile`, `frame_processor`,
-`grid_layout`). **`dialog/`** is the modal internals (the four page widgets +
-`page_util`, plus the dialog-only `wizard_stepper`, `roi_canvas`, and the source
-scanners `camera_devices`, `ip_scan`). **`shared/`** is the cross-cutting
-primitives used by *both* surfaces (`snapshot`, `frame_convert`, `rtsp_templates`,
-`roi_geometry`). Dependencies flow one way: `shared/` is a leaf; `grid/` and
+`fps_meter`, `grid_layout`). **`dialog/`** is the modal internals (the five page
+widgets + `page_util`, plus the dialog-only `wizard_stepper`, `roi_canvas`, and
+the source scanners `camera_devices`, `ip_scan`). **`shared/`** is the
+cross-cutting primitives used by *both* surfaces (`snapshot`, `frame_convert`,
+`rtsp_templates`, `gst_pipeline`, `roi_geometry`). Dependencies flow one way:
+`shared/` is a leaf; `grid/` and
 `dialog/` depend only on it, never on each other; the root entry points compose
 all three.
 
@@ -104,18 +105,29 @@ all three.
   `std::thread`**, converts each frame (`mat_to_qimage`), runs it through a
   `FrameProcessor`, and emits `frame_ready`/`status_changed` as **queued**
   signals to its tile (capped ~15 fps; finite open/read timeout so a dead camera
-  can't hang teardown; `stop()` joins). `CameraTile` is a pure view — paints the
-  latest frame aspect-fit with a name + status dot, and overlays the camera's
-  saved ROI polygons (`set_areas`) as gold outlines. The overlay maps the
-  normalized vertices through the **same** `roi_geometry::fitted_image_rect` the
-  frame is drawn into, and the frame is already oriented (the stream's
-  `OrientationProcessor`), so ROIs — stored normalized to the oriented frame —
-  line up without extra transform. Frames stay raw underneath (orientation only)
-  so the future detection model consumes the ROI as metadata, not pixels.
+  can't hang teardown; `stop()` joins). USB cameras open by device index; IP
+  cameras open through a low-latency `rtsp_gst_pipeline` on the **GStreamer**
+  backend (`cv::CAP_GSTREAMER`) with an **FFMPEG fallback** if GStreamer can't
+  open — GStreamer drops stale frames so glass-to-glass lag stays bounded. The
+  display cap is paced by a high-resolution waitable timer (`precise_sleep`),
+  because MinGW's `std::this_thread::sleep_for` is pinned to the ~15.6 ms OS
+  tick and would undershoot the target rate (~9 fps for a 15 fps cap).
+  `CameraTile` is a pure view — paints the latest frame aspect-fit with a name,
+  status dot, and a live per-tile FPS readout (`FpsMeter`), and overlays the
+  camera's saved ROI polygons (`set_areas`) as gold outlines. The overlay maps
+  the normalized vertices through the **same** `roi_geometry::fitted_image_rect`
+  the frame is drawn into, and the frame is already oriented (the stream's
+  processor), so ROIs — stored normalized to the oriented frame — line up
+  without extra transform. When detection is active the ROI is also enforced on
+  the *pixels*: `DetectionProcessor` keeps only boxes whose centre falls inside
+  an area polygon (empty areas = whole frame).
 - `frame_processor.{h,cpp}` — the per-camera processing seam. `FrameProcessor`
   is the interface; `OrientationProcessor` (applies rotation/pitch/roll) is the
   orientation-only impl, and `DetectionProcessor` layers ONNX inference on top
-  (orient → infer → per-class confidence filter → draw labelled boxes).
+  (orient → infer → per-class confidence filter → ROI confinement → draw
+  labelled boxes). The ROI step keeps only boxes whose normalized centre lands
+  inside one of the camera's area polygons (`camera::inside_any_area`); a camera
+  with no areas detects the whole frame.
   `camera_grid` picks per camera: `DetectionProcessor` when the camera has
   attached, loadable models (resolved via `detection::detection_for` +
   `EngineRegistry`), else plain `OrientationProcessor` — the capture loop and
@@ -226,28 +238,43 @@ with per-class `ModelClassSelection`, and the resolved `CameraDetection` bundle)
 (`models_for`/`set_camera_models`, replace-all in one transaction), and
 `detection_for`, the resolve query that joins a camera's attachments to their
 filenames + class names for the runtime. Schema is migration **v8**
-(`model` / `camera_model` / `camera_model_class`).
+(`model` / `camera_model` / `camera_model_class`). ROI confinement rides on the
+camera domain: `camera/area_geometry` (`point_in_polygon` / `inside_any_area`,
+Qt/OpenCV-free, unit-tested) tests a detection's normalized box centre against a
+camera's area polygons.
 
 **Runtime** (`src/app/ui/camera/shared/detection/`, OpenCV + ONNX Runtime, app
 target only): pure unit-tested helpers `letterbox` (aspect-preserving resize +
-gray pad to 640, plus the inverse box map), `yolo_decode` (the transposed
-`[1, 4+nc, na]` `output0` → boxes via per-anchor argmax, confidence floor, and
-class-agnostic `cv::dnn::NMSBoxes`), and `names_metadata` (parse the ONNX `names`
-dict). These feed the `InferenceEngine` interface, implemented by `OrtEngine`
-(one ORT session with a **TensorRT → CUDA → CPU** execution-provider fallback).
+gray pad to 640, plus the inverse box map), `yolo_decode` (two decoders chosen by
+output shape — `decode_yolo` for the raw transposed `[1, 4+nc, na]` head via
+per-anchor argmax + confidence floor + class-agnostic `cv::dnn::NMSBoxes`, and
+`decode_yolo_end2end` for an NMS-free `[1, N, 6]` output where the model already
+did NMS so only a confidence floor + inverse box map remain), and
+`names_metadata` (parse the ONNX `names` dict). These feed the `InferenceEngine`
+interface, implemented by `OrtEngine` (one ORT session with a **TensorRT → CUDA →
+CPU** execution-provider fallback). The TensorRT tier runs FP16 with a serialized
+engine cache (`models/trt_cache/`); its first-run build is minutes-long and
+non-interruptible, so `EngineRegistry::warm_up()` loads **and** runs one blank
+inference over every `models/*.onnx` at startup — on the main thread, before any
+capture thread — to absorb that build and CUDA kernel init off the hot path.
 `EngineRegistry` keeps one shared engine per model filename (lazy, failed loads
 cached as `nullptr` so a bad model isn't retried per frame). `model_sync` runs at
 boot to keep the catalog in step with `models/*.onnx`.
 
+Streaming feeds these: IP cameras capture through `rtsp_gst_pipeline` (a pure
+string builder for an explicit depay/parse/`avdec` GStreamer chain with a
+drop-on-latency `rtspsrc`, leaky queue, and shallow dropping appsink) on the
+GStreamer backend, falling back to FFMPEG when GStreamer can't open.
+
 `CameraGrid` chooses per camera: it resolves `detection_for`, asks the registry
 for each attached model, and constructs a `DetectionProcessor` (orient → infer →
-per-class conf filter → draw labelled boxes) when ≥1 model loads, else a plain
-`OrientationProcessor`. The registry (and thus ORT) is touched only on the UI
-thread; the engines outlive the capture streams. ORT + provider DLLs and
-`models/denso.onnx` are copied beside the exe by a `POST_BUILD` step; the GPU
-provider DLLs come from the git-ignored `third_party/gpu_ep/` (see
-`docs/GPU_SETUP.md`), and a missing GPU stack silently degrades to the CPU
-provider.
+per-class conf filter → ROI confinement → draw labelled boxes) when ≥1 model
+loads, else a plain `OrientationProcessor`. The registry (and thus ORT) is
+touched only on the UI thread; the engines outlive the capture streams. ORT +
+provider DLLs and every `models/*.onnx` are copied beside the exe by a
+`POST_BUILD` step; the GPU provider DLLs come from the git-ignored
+`third_party/gpu_ep/` (see `docs/GPU_SETUP.md`), and a missing GPU stack silently
+degrades to the CPU provider.
 
 ## Gotchas
 
@@ -286,3 +313,23 @@ provider.
   duration. `qWarning()` is routed to a `denso.log` file beside the exe (GUI
   subsystem on Windows has no console); `cv::setNumThreads(0)` keeps OpenCV
   conversions inline since each camera already has its own thread.
+- **MinGW `sleep_for` is pinned to the ~15.6 ms OS scheduler tick** and ignores
+  `timeBeginPeriod`, so a 66 ms (15 fps) pace overshoots to ~100 ms and delivers
+  ~9 fps. `CameraStream` sleeps via `precise_sleep`, a high-resolution waitable
+  timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), falling back to `sleep_for`
+  off-Windows or if the timer can't be created.
+- **Never call `cap.set(CAP_PROP_FRAME_WIDTH/HEIGHT)` on a live GStreamer
+  pipeline** — it reconfigures the pipeline caps and segfaults inside
+  `gst_caps_new_simple`. The capture-resolution request is gated to USB devices;
+  an RTSP camera dictates its own resolution, and any IP-side reframing belongs
+  in the pipeline (`videoscale`), not `VideoCapture::set`.
+- **The TensorRT EP's first-run engine build is minutes-long and
+  non-interruptible.** It must be triggered from `EngineRegistry::warm_up()` on
+  the main thread at startup, never lazily on a capture thread — the latter froze
+  the UI and blocked stream `join()` on teardown (the reason TensorRT was dropped
+  once before it was re-added behind the warm-up). Later runs load the cached
+  engine from `models/trt_cache/`.
+- **IP-camera latency depends on the GStreamer decode plugins being installed.**
+  Without them `cv::CAP_GSTREAMER` fails to open and `CameraStream` silently
+  falls back to the buffering FFMPEG backend, and RTSP lag returns — install the
+  `gst-plugins-{base,good,bad}` + `gst-libav` packages (see `CLAUDE.md`).
