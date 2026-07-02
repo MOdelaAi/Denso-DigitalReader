@@ -59,23 +59,30 @@ across the whole widget tree:
 
 - **Selected nav item:** in addition to the gold text, add a thin gold
   left-edge accent bar and bold weight, so the current page reads at a glance.
-  (Achieved with a `border-left` on `#navList::item:selected`.)
-- **Heading role:** add an optional `QLabel[heading="true"]` token (larger,
-  bolder). It only affects labels that opt in by setting the property, so it is
-  additive and safe; wiring specific headings to it is left to the
-  implementation plan where it clearly helps (e.g. page titles).
+  (Achieved with a `border-left` on `#navList::item:selected`, with matching
+  left padding on the base item so the text doesn't shift on selection.)
+
+> **Dropped (YAGNI):** an earlier draft proposed a `QLabel[heading="true"]`
+> stylesheet token. Review found headings are already distinguished per-widget
+> via `QFont` (e.g. the Settings title is +6pt bold, the empty-state title +4pt
+> bold, section titles bold with letter-spacing). A parallel stylesheet
+> mechanism would be redundant and risk font conflicts, so it is intentionally
+> not added.
 
 ## Files touched
 
-- `src/app/ui/theme.cpp` — the bulk: radius scale, padding, focus/hover/disabled
-  states, nav accent, heading role.
-- `src/app/ui/theme.h` — only if a new token/helper is needed (likely not).
-- Inline-style spots brought into the same radius/padding scale so nothing looks
-  out of step:
-  - `src/app/ui/settings/netcard.cpp` (5 inline styles)
-  - `src/app/ui/camera/dialog/wizard_stepper.cpp` (2)
-  - `src/app/ui/camera/dialog/add_page.cpp` (1)
-  - `src/app/ui/camera/dialog/configure_page.cpp` (1)
+- `src/app/ui/theme.cpp` — the **entire** refresh: radius scale, padding,
+  focus/hover/disabled states, nav accent, heading role. Everything in this
+  design is expressible through the one central `style_sheet()` builder.
+- `src/app/ui/theme.h` — not expected to change (no new token/helper needed).
+
+**Reviewed and intentionally NOT touched:** the inline `setStyleSheet` calls in
+`netcard.cpp`, `wizard_stepper.cpp`, `add_page.cpp`, `configure_page.cpp` were
+all found to set **text color / font-weight only** (status lines, error labels,
+wizard step emphasis) — they carry no corner radii or padding, so the rounding
+and spacing goals do not reach them. They do hardcode hex colors that drift
+slightly from the palette tokens, but re-tokenizing colors is a separate concern
+outside this "keep colors, make rounder" refresh and is deliberately left alone.
 
 ## Testing / verification
 
