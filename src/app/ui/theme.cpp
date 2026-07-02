@@ -95,6 +95,15 @@ QString style_sheet(const Palette& p) {
             background: transparent; color: %(txtFaint); padding: 6px 10px;
         }
         QPushButton[flatText="true"]:hover { background: %(panel3); color: %(txt); }
+        QPushButton:disabled {
+            background: %(panel2); color: %(txtFaint);
+        }
+        QPushButton[gold="true"]:disabled {
+            background: %(panel3); color: %(txtFaint);
+        }
+        QPushButton[flatText="true"]:disabled {
+            background: transparent; color: %(txtFaint);
+        }
 
         QLineEdit {
             background: %(panel); color: %(txt);
@@ -122,13 +131,23 @@ QString style_sheet(const Palette& p) {
         QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
             background: %(gold);
         }
+        QLineEdit:hover, QComboBox:hover, QAbstractSpinBox:hover {
+            border: 1px solid %(txtFaint);
+        }
+        QLineEdit:focus, QComboBox:focus, QAbstractSpinBox:focus {
+            border: 1px solid %(gold);
+        }
         QCheckBox { color: %(txt); background: transparent; }
 
         #navList { background: transparent; border: none; }
         #navList::item {
             color: %(txtDim); padding: 9px 12px; border-radius: 10px; margin: 2px 0px;
+            border-left: 3px solid transparent;
         }
-        #navList::item:selected { background: %(panel3); color: %(gold); }
+        #navList::item:selected {
+            background: %(panel3); color: %(gold);
+            border-left: 3px solid %(gold); font-weight: 600;
+        }
         #navList::item:hover { background: %(panel3); }
 
         #card { background: %(panel3); border-radius: 16px; }
