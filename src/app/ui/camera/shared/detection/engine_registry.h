@@ -1,7 +1,9 @@
 // One shared inference engine per distinct model file. Cameras that attach the
 // same model reuse a single Ort::Session (loaded lazily on first request), so
 // N cameras on the same model pay for one load, not N. Owns the engines; hand
-// out non-owning pointers. Not thread-safe: build/query it from the UI thread
+// out non-owning pointers. Not internally synchronized: warm_up() builds the
+// engines on the startup worker thread (see ui/startup), which is joined before
+// anything queries them; get() is then called only from the UI thread
 // (CameraGrid::reload), before the capture threads start.
 #pragma once
 
