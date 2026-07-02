@@ -54,6 +54,9 @@ add_executable(denso_tests
     test_yolo_decode.cpp
     # yolo_decode is GUI-target code but pure OpenCV (no Qt), so compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/yolo_decode.cpp
+    test_merge_detections.cpp
+    # merge_detections is GUI-target code but pure OpenCV (no Qt), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/merge_detections.cpp
     test_names_metadata.cpp
     # names_metadata is GUI-target code but OpenCV/ORT-free pure string parsing,
     # so compile it in.

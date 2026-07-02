@@ -29,6 +29,7 @@ add_executable(denso WIN32
     ui/camera/shared/roi_geometry.cpp
     ui/camera/shared/detection/letterbox.cpp
     ui/camera/shared/detection/yolo_decode.cpp
+    ui/camera/shared/detection/merge_detections.cpp
     ui/camera/shared/detection/names_metadata.cpp
     ui/camera/shared/detection/ort_engine.cpp
     ui/camera/shared/detection/engine_registry.cpp
