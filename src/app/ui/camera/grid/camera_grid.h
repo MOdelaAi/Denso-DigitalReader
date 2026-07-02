@@ -24,7 +24,8 @@ class CameraGrid : public QWidget {
     Q_OBJECT
 
 public:
-    explicit CameraGrid(QSqlDatabase db, QWidget* parent = nullptr);
+    explicit CameraGrid(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
+                        QWidget* parent = nullptr);
     ~CameraGrid() override;
 
     void reload();            // rebuild tiles + streams from the DB, then start
@@ -38,7 +39,7 @@ private:
     QGridLayout* grid_ = nullptr;
     std::vector<CameraStream*> streams_;
     std::vector<CameraTile*> tiles_;
-    std::unique_ptr<EngineRegistry> engines_;
+    std::shared_ptr<EngineRegistry> engines_;
 };
 
 } // namespace denso::ui

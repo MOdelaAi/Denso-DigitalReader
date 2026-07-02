@@ -113,9 +113,11 @@ Per-camera YOLO detection is an **app-only** feature — the domain config lives
   `third_party/gpu_ep/` (git-ignored) and glob-copied beside the exe when present.
 - The TensorRT EP builds an optimized engine on first run (FP16, cached under
   `models/trt_cache/`) — a **minutes-long, non-interruptible** build. It must run
-  during the startup `EngineRegistry::warm_up()` (main thread, before any capture
-  thread exists), never lazily on a capture thread where it froze the UI and
-  blocked stream teardown — the reason TensorRT was dropped once before.
+  during the startup `EngineRegistry::warm_up()` (on a dedicated startup worker
+  thread driven by `ui/startup`, while the `StartupScreen` splash animates —
+  completing **before the window shows and before any capture thread exists**),
+  never lazily on a capture thread where it froze the UI and blocked stream
+  teardown — the reason TensorRT was dropped once before.
   `tools/build_trt_engine.sh` builds standalone `trtexec` engines offline;
   `models/*.engine` and `models/trt_cache/` are git-ignored.
 - `models/*.onnx` are synced into the `model` catalog at startup (`model_sync`),

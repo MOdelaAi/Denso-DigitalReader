@@ -5,8 +5,12 @@
 // open, so it can grab the same USB device); the next reload() restarts.
 #pragma once
 
+#include "ui/camera/shared/detection/engine_registry.h"
+
 #include <QSqlDatabase>
 #include <QWidget>
+
+#include <memory>
 
 class QStackedWidget;
 
@@ -18,7 +22,8 @@ class CameraView : public QWidget {
     Q_OBJECT
 
 public:
-    explicit CameraView(QSqlDatabase db, QWidget* parent = nullptr);
+    explicit CameraView(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
+                        QWidget* parent = nullptr);
 
     /// Re-read the camera list, switch empty-state vs grid, and (re)start streams.
     void reload();
@@ -33,6 +38,7 @@ private:
     QSqlDatabase db_;
     QStackedWidget* stack_ = nullptr;
     CameraGrid* grid_ = nullptr;
+    std::shared_ptr<EngineRegistry> engines_;
 };
 
 } // namespace denso::ui

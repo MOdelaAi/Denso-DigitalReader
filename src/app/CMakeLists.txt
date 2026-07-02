@@ -14,6 +14,7 @@ add_executable(denso WIN32
     ui/mainwindow.cpp
     ui/startup_screen.cpp
     ui/warmup_worker.cpp
+    ui/startup.cpp
     # settings modal
     ui/settings/settings_dialog.cpp
     ui/settings/netcard.cpp

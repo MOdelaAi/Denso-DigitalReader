@@ -21,8 +21,9 @@ namespace {
 constexpr int kMaxTiles = 4;
 }
 
-CameraGrid::CameraGrid(QSqlDatabase db, QWidget* parent)
-    : QWidget(parent), db_(std::move(db)) {
+CameraGrid::CameraGrid(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
+                       QWidget* parent)
+    : QWidget(parent), db_(std::move(db)), engines_(std::move(engines)) {
     grid_ = new QGridLayout(this);
     grid_->setContentsMargins(0, 0, 0, 0);
     grid_->setSpacing(12);
@@ -52,16 +53,6 @@ void CameraGrid::clear() {
 
 void CameraGrid::reload() {
     clear();
-
-    if (!engines_) {
-        const std::string dir = QCoreApplication::applicationDirPath().toStdString();
-        engines_ = std::make_unique<EngineRegistry>(dir + "/models",
-                                                     dir + "/models/trt_cache");
-        // Load + warm every model once, up front (this is the first reload, run
-        // during startup before any capture thread), so the first detected frame
-        // doesn't stall on CUDA init. Cameras reuse these cached, warm engines.
-        engines_->warm_up();
-    }
 
     std::vector<camera::Camera> cams = camera::all(db_);
     if (cams.size() > static_cast<size_t>(kMaxTiles)) {

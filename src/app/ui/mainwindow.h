@@ -18,13 +18,14 @@ namespace denso::ui {
 class SettingsDialog;
 class CameraDialog;
 class CameraView;
+class EngineRegistry;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
     MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> state,
-               QWidget* parent = nullptr);
+               std::shared_ptr<EngineRegistry> engines, QWidget* parent = nullptr);
 
     /// Populate read-only fields (version, hardware), seed the persisted
     /// settings into the window + dialog, and apply the theme — the Qt port of

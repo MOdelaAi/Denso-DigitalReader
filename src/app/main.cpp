@@ -8,7 +8,7 @@
 #include "settings/repo.h"
 #include "settings/settings.h"
 #include "ui/camera/shared/detection/model_sync.h"
-#include "ui/mainwindow.h"
+#include "ui/startup.h"
 
 #include <QApplication>
 #include <QDebug>
@@ -92,9 +92,5 @@ int main(int argc, char** argv) {
 
     auto state = std::make_shared<denso::settings::Settings>(denso::settings::load(conn));
 
-    denso::ui::MainWindow window(conn, state);
-    window.apply_startup();
-    window.show();
-
-    return app.exec();
+    return denso::ui::launch(app, conn, state);
 }

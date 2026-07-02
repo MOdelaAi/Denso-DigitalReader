@@ -20,7 +20,7 @@
 namespace denso::ui {
 
 MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> state,
-                       QWidget* parent)
+                       std::shared_ptr<EngineRegistry> engines, QWidget* parent)
     : QMainWindow(parent), db_(std::move(db)), state_(std::move(state)) {
     setWindowTitle(QStringLiteral("Denso Digital Reader"));
 
@@ -45,7 +45,7 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     col->addWidget(top);
 
     // Main content area: the camera view (empty state / configured count).
-    camera_view_ = new CameraView(db_);
+    camera_view_ = new CameraView(db_, engines);
     connect(camera_view_, &CameraView::add_camera_requested, this, &MainWindow::open_camera);
     col->addWidget(camera_view_, 1);
 
