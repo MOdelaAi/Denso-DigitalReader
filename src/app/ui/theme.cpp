@@ -75,6 +75,7 @@ QString style_sheet(const Palette& p) {
         QMainWindow, QDialog { background: %(panel2); }
         #mainContent { background: %(panel); }
         #topBar { background: %(panel2); }
+        #appTitle { color: %(txt); font-size: 14px; font-weight: 600; }
 
         QLabel { background: transparent; color: %(txt); }
         QLabel[dim="true"] { color: %(txtDim); }

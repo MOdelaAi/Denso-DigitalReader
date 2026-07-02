@@ -32,14 +32,26 @@ public:
     /// `wiring::apply_startup`. Call before show().
     void apply_startup();
 
+protected:
+    void showEvent(QShowEvent* event) override;
+
 private:
     void open_settings();
     void open_camera();
+
+    /// Resize + centre the window so the whole frame fits the screen's work
+    /// area. A preset as tall as the screen (1920×1080 on a 1080p monitor)
+    /// would otherwise push the title bar + bottom rows under the taskbar.
+    void resize_within_screen(int width, int height);
 
     void on_apply_resolution(int index);
     void on_theme_changed(bool dark);
     void on_toggle_fullscreen(bool fullscreen);
     void on_reset_defaults();
+
+    /// Enter/leave fullscreen and persist the choice. F11 toggles it; Esc leaves
+    /// it — convenience shortcuts so fullscreen isn't only reachable via Settings.
+    void set_fullscreen(bool on);
 
     void apply_theme(bool dark);
 
@@ -48,6 +60,7 @@ private:
     SettingsDialog* settings_ = nullptr;
     CameraDialog* camera_ = nullptr;
     CameraView* camera_view_ = nullptr;
+    bool fitted_ = false;  // first-show re-fit has run
 };
 
 } // namespace denso::ui

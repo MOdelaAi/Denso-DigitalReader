@@ -1,7 +1,7 @@
 #include "ui/camera/grid/camera_tile.h"
 
 #include "ui/camera/grid/camera_stream.h"  // Status enum
-#include "ui/camera/shared/roi_geometry.h"   // fitted_image_rect, to_widget
+#include "ui/camera/shared/roi_geometry.h"   // to_widget
 
 #include <QColor>
 #include <QFont>
@@ -70,8 +70,11 @@ void CameraTile::paintEvent(QPaintEvent*) {
     p.fillRect(rect(), kBg);
 
     if (!frame_.isNull()) {
-        // Aspect-fit, centered — the same rect the ROI overlay maps onto.
-        const QRectF img = fitted_image_rect(QSizeF(frame_.size()), QSizeF(size()));
+        // Stretch-to-fill — the CCTV/NVR full-bleed look: the frame is scaled to
+        // the whole tile with no bands and nothing cropped (aspect may distort
+        // slightly). Same rect the ROI overlay maps onto so the polygons track
+        // the displayed image.
+        const QRectF img(rect());
         p.drawImage(img, frame_);
         draw_areas(p, img);
     } else {

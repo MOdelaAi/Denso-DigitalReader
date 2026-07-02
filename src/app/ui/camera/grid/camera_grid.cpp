@@ -9,16 +9,22 @@
 #include "ui/camera/shared/detection/engine_registry.h"
 
 #include <QCoreApplication>
+#include <QColor>
 #include <QGridLayout>
+#include <QPainter>
+#include <QPaintEvent>
+#include <QResizeEvent>
 #include <QString>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 
 namespace denso::ui {
 
 namespace {
 constexpr int kMaxTiles = 4;
+constexpr double kTileAspect = 16.0 / 9.0;  // each cell is 16:9 (camera native)
 }
 
 CameraGrid::CameraGrid(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
@@ -26,7 +32,7 @@ CameraGrid::CameraGrid(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
     : QWidget(parent), db_(std::move(db)), engines_(std::move(engines)) {
     grid_ = new QGridLayout(this);
     grid_->setContentsMargins(0, 0, 0, 0);
-    grid_->setSpacing(12);
+    grid_->setSpacing(0);  // flush tiles — no gap between feeds (CCTV wall)
 }
 
 CameraGrid::~CameraGrid() { clear(); }
@@ -44,6 +50,9 @@ void CameraGrid::clear() {
         delete t;
     }
     tiles_.clear();
+    rows_ = 0;
+    cols_ = 0;
+    grid_->setContentsMargins(0, 0, 0, 0);
     // Reset stretch so a previous larger layout doesn't leave empty tracks.
     for (int i = 0; i < 2; ++i) {
         grid_->setRowStretch(i, 0);
@@ -101,6 +110,9 @@ void CameraGrid::reload() {
     }
     for (int r = 0; r < dims.rows; ++r) grid_->setRowStretch(r, 1);
     for (int c = 0; c < dims.cols; ++c) grid_->setColumnStretch(c, 1);
+    rows_ = dims.rows;
+    cols_ = dims.cols;
+    relayout_letterbox();
 
     start_streams();
 }
@@ -115,6 +127,39 @@ void CameraGrid::start_streams() {
     for (CameraStream* s : streams_) {
         s->start();
     }
+}
+
+void CameraGrid::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    relayout_letterbox();
+}
+
+void CameraGrid::paintEvent(QPaintEvent*) {
+    // The tiles cover the centred block; this fills the letterbox margins around
+    // it with black so the wall reads as one framed 16:9 surface.
+    QPainter p(this);
+    p.fillRect(rect(), QColor(0, 0, 0));
+}
+
+void CameraGrid::relayout_letterbox() {
+    if (rows_ <= 0 || cols_ <= 0) {
+        return;  // no cameras → nothing to centre
+    }
+    // Largest rect whose per-tile aspect is 16:9 that fits the widget, centred.
+    // Block aspect = (cols·16) : (rows·9); solve for the block, then split the
+    // leftover space into equal margins the grid layout reserves on each side.
+    const double block_aspect = (cols_ * kTileAspect) / rows_;
+    const double avail_w = width();
+    const double avail_h = height();
+    double block_w = avail_w;
+    double block_h = avail_w / block_aspect;
+    if (block_h > avail_h) {
+        block_h = avail_h;
+        block_w = avail_h * block_aspect;
+    }
+    const int mx = std::max(0, static_cast<int>(std::lround((avail_w - block_w) / 2.0)));
+    const int my = std::max(0, static_cast<int>(std::lround((avail_h - block_h) / 2.0)));
+    grid_->setContentsMargins(mx, my, mx, my);
 }
 
 } // namespace denso::ui

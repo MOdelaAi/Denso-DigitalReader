@@ -32,14 +32,21 @@ public:
     void release_streams();   // stop capture, keep the tiles on screen
     void start_streams();     // (re)start the existing streams
 
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;  // black letterbox margins
+
 private:
     void clear();             // stop + delete all streams and tiles
+    void relayout_letterbox();  // centre the tile block as one 16:9-per-tile wall
 
     QSqlDatabase db_;
     QGridLayout* grid_ = nullptr;
     std::vector<CameraStream*> streams_;
     std::vector<CameraTile*> tiles_;
     std::shared_ptr<EngineRegistry> engines_;
+    int rows_ = 0;  // current grid dims (0 = empty); drives the letterbox aspect
+    int cols_ = 0;
 };
 
 } // namespace denso::ui

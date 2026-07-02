@@ -18,7 +18,8 @@ CameraView::CameraView(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
     setObjectName(QStringLiteral("mainContent"));  // content-panel background
 
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(24, 24, 24, 24);
+    // Flush CCTV-wall look: the live grid runs edge-to-edge with no margin.
+    root->setContentsMargins(0, 0, 0, 0);
 
     stack_ = new QStackedWidget;
     root->addWidget(stack_);
