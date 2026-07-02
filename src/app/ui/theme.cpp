@@ -92,7 +92,7 @@ QString style_sheet(const Palette& p) {
         QPushButton[gold="true"]:hover { background: %(gold300); }
         QPushButton[gold="true"]:pressed { background: %(gold500); }
         QPushButton[flatText="true"] {
-            background: transparent; color: %(txtFaint); padding: 6px 10px;
+            background: transparent; color: %(txtFaint); padding: 8px 14px;
         }
         QPushButton[flatText="true"]:hover { background: %(panel3); color: %(txt); }
         QPushButton:disabled {
@@ -107,41 +107,43 @@ QString style_sheet(const Palette& p) {
 
         QLineEdit {
             background: %(panel); color: %(txt);
-            border: 1px solid %(panel3); border-radius: 10px; padding: 6px 10px;
+            border: 1px solid %(panel3); border-radius: 10px;
+            padding: 6px 10px; min-height: 20px;
             selection-background-color: %(gold);
         }
         QComboBox {
             background: %(panel); color: %(txt);
-            border: 1px solid %(panel3); border-radius: 10px; padding: 6px 10px;
+            border: 1px solid %(panel3); border-radius: 10px;
+            padding: 6px 10px; min-height: 20px;
         }
+        QComboBox::drop-down { width: 24px; }
         QComboBox QAbstractItemView {
             background: %(panel2); color: %(txt);
             selection-background-color: %(panel3);
         }
         QAbstractSpinBox {
             background: %(panel); color: %(txt);
-            border: 1px solid %(panel3); border-radius: 10px; padding: 6px 10px;
+            border: 1px solid %(panel3); border-radius: 10px;
+            padding: 6px 10px; min-height: 20px;
             selection-background-color: %(gold);
         }
-        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
-            background: %(panel3); border: none; width: 16px;
-        }
-        QAbstractSpinBox::up-button { border-top-right-radius: 10px; }
-        QAbstractSpinBox::down-button { border-bottom-right-radius: 10px; }
-        QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
-            background: %(gold);
-        }
+        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 24px; }
         QLineEdit:hover, QComboBox:hover, QAbstractSpinBox:hover {
             border: 1px solid %(txtFaint);
         }
         QLineEdit:focus, QComboBox:focus, QAbstractSpinBox:focus {
             border: 1px solid %(gold);
         }
+        QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled {
+            background: %(panel2); color: %(txtFaint); border: 1px solid %(panel2);
+        }
         QCheckBox { color: %(txt); background: transparent; }
 
         #navList { background: transparent; border: none; }
         #navList::item {
-            color: %(txtDim); padding: 9px 12px; border-radius: 10px; margin: 2px 0px;
+            color: %(txtDim); padding: 9px 12px; margin: 2px 0px;
+            border-top-right-radius: 10px; border-bottom-right-radius: 10px;
+            border-top-left-radius: 0px; border-bottom-left-radius: 0px;
             border-left: 3px solid transparent;
         }
         #navList::item:selected {
