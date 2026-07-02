@@ -61,7 +61,7 @@ Each target dir is its own include root, so includes read `network/model.h`,
 | `network/windows/{netsh,wifi,parse}.*`, `network/linux/nmcli.*` | Pure, unit-tested OS-command helpers (compiled on every OS for off-device testing). |
 | `network/windows/windows_backend.cpp`, `network/linux/linux_backend.cpp` | OS backends (`QProcess`); one compiled per platform. |
 | `ui/convert.{h,cpp}`, `ui/viewmodel.h` | The **only** domain↔view boundary (Qt-free, testable). |
-| `camera/` | Camera inventory: domain structs (`model.h`: `Camera` + polygon `CameraArea`) + persistence (`repo`, full camera CRUD + ROI-area read/replace). `area_points` (de)serializes a polygon's normalized vertices to the `camera_area.points` TEXT column. |
+| `camera/` | Camera inventory: domain structs (`camera.h`: `Camera` + polygon `CameraArea` over normalized `Point`s) + persistence (`repo`, full camera CRUD + ROI-area read/replace). `area_points` (de)serializes a polygon's normalized vertices to the `camera_area.points` TEXT column; `area_geometry` is pure, unit-tested point-in-polygon (`point_in_polygon`/`inside_any_area`) used to confine detection to the ROI. |
 | `detection/` | Per-camera detection config domain: `detection.h` structs (`DetectionModel`, `CameraModel`, `ModelClassSelection`, resolved `CameraDetection`) + persistence (`repo`: model catalog, per-camera attachments, and the `detection_for` resolve query) + `class_names` JSON (de)serialization. Qt/OpenCV-free — the ORT inference runtime lives in the app. |
 | `util/strutil.h` | Small shared string helpers. |
 
@@ -81,9 +81,10 @@ UI grouped by feature: the **app shell** at `ui/` root, plus `ui/settings/` and
 | `ui/camera/camera_view.{h,cpp}` | **Entry point.** Main content switcher: empty state (+ Add) when 0 cameras, else the live `CameraGrid`. `release_streams()`/`reload()` free + restart capture around the modal. |
 | `ui/camera/camera_dialog.{h,cpp}` | **Entry point.** Camera management modal — a thin **coordinator** over a 5-page stack (the `dialog/` pages) run as a guided wizard: list/delete + add (USB scan / IP manufacturer+stream+credentials) → Configure (preview + resolution/fps/rotation/pitch/roll) → Models (attach 1..N detection models + per-class confidence) → Areas (draw ROI polygons; optional). Owns snapshot capture, add/edit DB writes, navigation + sizing. Stepper header + Back/Next/Finish footers; `show_page()` centralizes page+stepper+sizing; the modal grows near-fullscreen on the Areas step. |
 | `ui/camera/grid/camera_grid.{h,cpp}` | Live 1–4 grid: a tile + `CameraStream` per camera (first 4 by id), laid out via `grid_dims`; owns start/stop/reload. |
-| `ui/camera/grid/camera_stream.{h,cpp}` | Per-camera capture worker (own `std::thread` + `cv::VideoCapture`): read → `FrameProcessor` → queued `frame_ready`/`status_changed`; ~15 fps, clean stop/join. |
-| `ui/camera/grid/camera_tile.{h,cpp}` | One grid cell: paints the latest frame (aspect-fit) + name + status dot + the camera's ROI polygons as gold outlines (`set_areas`); placeholder when connecting/offline. |
-| `ui/camera/grid/frame_processor.{h,cpp}` | The per-camera frame seam: `FrameProcessor` interface + `OrientationProcessor` (orientation only) + `DetectionProcessor` (orientation → ONNX inference → per-class conf filter → draw labelled boxes). `camera_grid` picks per camera: `DetectionProcessor` when the camera has attached, loadable models, else `OrientationProcessor`. |
+| `ui/camera/grid/camera_stream.{h,cpp}` | Per-camera capture worker (own `std::thread` + `cv::VideoCapture`): read → `FrameProcessor` → queued `frame_ready`/`status_changed`; ~15 fps display cap paced by a high-resolution `precise_sleep` (MinGW `sleep_for` is pinned to the ~15.6 ms tick), clean stop/join. USB opens by index; IP opens via `rtsp_gst_pipeline` on `cv::CAP_GSTREAMER`, falling back to FFMPEG. Capture resolution is set for USB only (setting it on a live GStreamer pipeline segfaults). |
+| `ui/camera/grid/camera_tile.{h,cpp}` | One grid cell: paints the latest frame (aspect-fit) + name + status dot + live per-tile FPS + the camera's ROI polygons as gold outlines (`set_areas`); placeholder when connecting/offline. |
+| `ui/camera/grid/fps_meter.{h,cpp}` | Pure (unit-tested) EMA-smoothed FPS estimate from frame-arrival timestamps; each tile `tick()`s it per displayed frame. |
+| `ui/camera/grid/frame_processor.{h,cpp}` | The per-camera frame seam: `FrameProcessor` interface + `OrientationProcessor` (orientation only) + `DetectionProcessor` (orientation → ONNX inference → per-class conf filter → ROI confinement (keep only boxes whose centre is inside an area; empty areas = whole frame, via `area_geometry`) → draw labelled boxes). `camera_grid` picks per camera: `DetectionProcessor` when the camera has attached, loadable models, else `OrientationProcessor`. |
 | `ui/camera/grid/grid_layout.{h,cpp}` | Pure (unit-tested) `grid_dims(n)` → rows/cols (1→1×1, 2→1×2, 3–4→2×2). |
 | `ui/camera/dialog/` (pages) | The dialog's five page widgets + shared `page_util` (`dim_label`): `list_page` (`CameraListPage`), `add_page` (Source form + scans), `configure_page` (preview + orientation controls), `models_page` (`ModelsPage`: attach models + per-class conf), `areas_page` (ROI editing). Pages own their controls and emit request signals; the coordinator drives them. |
 | `ui/camera/dialog/wizard_stepper.{h,cpp}` | Non-interactive "① Source — ② Configure — ③ Models — ④ Areas" step indicator; `set_current()` emphasizes the active step. |
@@ -92,8 +93,9 @@ UI grouped by feature: the **app shell** at `ui/` root, plus `ui/settings/` and
 | `ui/camera/dialog/ip_scan.{h,cpp}` | Subnet RTSP-port scan (Qt Network, threaded). |
 | `ui/camera/shared/snapshot.{h,cpp}`, `shared/frame_convert.h` | Grab one preview frame (OpenCV, off-thread) + orient it: `apply_orientation` composes rotation + roll + pitch (perspective warp) for the live Configure preview. |
 | `ui/camera/shared/rtsp_templates.{h,cpp}` | Manufacturer → RTSP URL templates (Dahua) + `with_credentials`. |
+| `ui/camera/shared/gst_pipeline.{h,cpp}` | Pure (unit-tested) string builder for a low-latency RTSP GStreamer pipeline (explicit depay/parse/`avdec` chain, drop-on-latency `rtspsrc`, leaky queue, shallow dropping appsink) for `cv::CAP_GSTREAMER`. |
 | `ui/camera/shared/roi_geometry.{h,cpp}` | Pure (unit-tested) widget↔normalized point mapping + aspect-fit rect for the canvas. |
-| `ui/camera/shared/detection/` | Per-camera ONNX detection runtime (app-only: OpenCV + ONNX Runtime). Pure, unit-tested helpers `letterbox` (resize+pad to 640 + inverse box map), `yolo_decode` (`output0` → boxes: argmax + conf floor + NMS), `names_metadata` (parse the ONNX `names` dict) feed `inference_engine` (interface) → `ort_engine` (session + TensorRT→CUDA→CPU EP fallback) → `engine_registry` (one shared engine per model file). `model_sync` scans `models/*.onnx` into the `model` catalog at startup. |
+| `ui/camera/shared/detection/` | Per-camera ONNX detection runtime (app-only: OpenCV + ONNX Runtime). Pure, unit-tested helpers `letterbox` (resize+pad to 640 + inverse box map), `yolo_decode` (`decode_yolo`: raw `[1,4+nc,anchors]` → argmax + conf floor + NMS; `decode_yolo_end2end`: NMS-free `[1,N,6]` → conf floor only — `ort_engine` picks by output shape), `names_metadata` (parse the ONNX `names` dict) feed `inference_engine` (interface) → `ort_engine` (session + TensorRT(FP16, cached)→CUDA→CPU EP fallback) → `engine_registry` (one shared engine per model file; `warm_up()` loads + runs one blank inference on every model at startup so the first real frame — and the minutes-long TensorRT build — never stalls a capture thread). `model_sync` scans `models/*.onnx` into the `model` catalog at startup. |
 
 ## Detection / ONNX Runtime
 
@@ -109,6 +111,13 @@ Per-camera YOLO detection is an **app-only** feature — the domain config lives
 - Execution-provider fallback is **TensorRT → CUDA → CPU**; a missing GPU stack
   degrades to CPU, never a hard failure. GPU provider DLLs are staged into
   `third_party/gpu_ep/` (git-ignored) and glob-copied beside the exe when present.
+- The TensorRT EP builds an optimized engine on first run (FP16, cached under
+  `models/trt_cache/`) — a **minutes-long, non-interruptible** build. It must run
+  during the startup `EngineRegistry::warm_up()` (main thread, before any capture
+  thread exists), never lazily on a capture thread where it froze the UI and
+  blocked stream teardown — the reason TensorRT was dropped once before.
+  `tools/build_trt_engine.sh` builds standalone `trtexec` engines offline;
+  `models/*.engine` and `models/trt_cache/` are git-ignored.
 - `models/*.onnx` are synced into the `model` catalog at startup (`model_sync`),
   so dropping a new `.onnx` in `models/` makes it selectable next launch.
 - `denso_core` **never** links OpenCV/ORT — only `Qt6::Core`/`Sql`.
