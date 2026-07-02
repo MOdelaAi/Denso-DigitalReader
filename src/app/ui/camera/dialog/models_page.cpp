@@ -65,6 +65,9 @@ void ModelsPage::load_for(int64_t camera_id) {
     // Seed remembered selections from the DB (name → {selected, conf}), first
     // conf seen wins if two models disagree on a shared name.
     selected_state_.clear();
+    class_rows_.clear();  // drop the previous camera's rows so the reseeding
+                          // rebuild does not fold their stale state back in
+    if (search_) search_->clear();  // reset the class filter for the new camera
     for (const auto& cm : attached) {
         const denso::detection::DetectionModel* dm = nullptr;
         for (const auto& m : catalog_) {
