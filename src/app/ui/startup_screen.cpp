@@ -12,7 +12,10 @@
 namespace denso::ui {
 
 StartupScreen::StartupScreen(bool dark, QWidget* parent) : QWidget(parent) {
-    setWindowFlag(Qt::FramelessWindowHint);
+    // Frameless + stay-on-top so the splash is visible above whatever window
+    // held focus when the app launched (a plain frameless QWidget shown while
+    // another app is active otherwise renders behind it).
+    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     setWindowTitle(QStringLiteral("Denso DigitalReader"));
 
     const Palette p = denso::ui::palette(dark);

@@ -22,6 +22,8 @@ int launch(QApplication& app, QSqlDatabase db,
 
     auto splash = std::make_unique<StartupScreen>(state->dark);
     splash->show();
+    splash->raise();
+    splash->activateWindow();  // claim the foreground at launch
 
     auto* thread = new QThread;
     auto* worker = new WarmupWorker(engines);
@@ -44,6 +46,12 @@ int launch(QApplication& app, QSqlDatabase db,
                          window = std::make_unique<MainWindow>(db, state, engines);
                          window->apply_startup();
                          window->show();
+                         // The window is created after the event loop is already
+                         // running (via this queued handler), so an unraised
+                         // show() can land behind other apps — pull it to front
+                         // and hand over the foreground the splash was holding.
+                         window->raise();
+                         window->activateWindow();
                          splash->close();
                          splash.reset();
                      });
