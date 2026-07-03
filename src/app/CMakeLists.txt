@@ -15,6 +15,10 @@ add_executable(denso WIN32
     ui/startup_screen.cpp
     ui/warmup_worker.cpp
     ui/startup.cpp
+    # common dialog primitives (leaf — used by every dialog)
+    ui/common/form_widgets.cpp
+    ui/common/dialog_chrome.cpp
+    ui/common/async_runner.cpp
     # settings modal
     ui/settings/settings_dialog.cpp
     ui/settings/netcard.cpp
