@@ -11,9 +11,11 @@
 #include "camera/camera.h"  // CameraArea
 #include "detection/detection.h"
 #include "ui/camera/shared/detection/inference_engine.h"
+#include "ui/camera/shared/detection/merge_detections.h"  // NamedDetection
 
 #include <QImage>
 
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -43,6 +45,19 @@ private:
     double roll_;
 };
 
+/// Optional per-frame capture hook for the detection pipeline. When a
+/// DetectionProcessor has a sink, it calls on_reading() with the frame's kept
+/// detections so a consumer can record them (the data-logging feature).
+///
+/// CONTRACT: on_reading() is invoked on the CAPTURE THREAD, in the hot path. An
+/// implementation MUST NOT block or do DB I/O inline — it must hand the data off
+/// to a worker (e.g. a queue or common::post_to_gui) and return immediately.
+struct ReadingSink {
+    virtual ~ReadingSink() = default;
+    virtual void on_reading(int64_t camera_id, int64_t ts_ms,
+                            const std::vector<NamedDetection>& kept) = 0;
+};
+
 /// Runs one or more detection models on each frame and draws the results. Each
 /// entry pairs a shared engine with the camera's per-class selections (class id
 /// → min confidence). Orientation is applied first (so a detection tile matches
@@ -62,7 +77,8 @@ public:
 
     DetectionProcessor(int degrees, double pitch, double roll,
                        std::vector<ModelRun> models,
-                       std::vector<denso::camera::CameraArea> areas = {});
+                       std::vector<denso::camera::CameraArea> areas = {},
+                       int64_t camera_id = 0, ReadingSink* sink = nullptr);
     QImage process(const QImage& frame) override;
 
 private:
@@ -71,6 +87,8 @@ private:
     double roll_;
     std::vector<ModelRun> models_;
     std::vector<denso::camera::CameraArea> areas_;  // empty = whole frame
+    int64_t camera_id_ = 0;
+    ReadingSink* sink_ = nullptr;  // non-owning; null = no reading capture
 };
 
 } // namespace denso::ui

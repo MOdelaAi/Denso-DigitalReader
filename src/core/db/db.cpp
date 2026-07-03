@@ -15,7 +15,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 8;
+constexpr int SCHEMA_VERSION = 9;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -309,6 +309,25 @@ bool run_migrations(const QSqlDatabase& db) {
         }
         if (!run("CREATE INDEX IF NOT EXISTS idx_cmc_camera_model "
                  "ON camera_model_class(camera_model_id)")) {
+            return false;
+        }
+    }
+
+    if (version < 9) {
+        // Recorded readings — an append-only log of detections captured per
+        // camera over time, consumed by the logging/export feature. Indexed on
+        // (camera_id, ts_ms) for the range queries the export UI runs.
+        if (!run("CREATE TABLE IF NOT EXISTS reading ("
+                 "    id        INTEGER PRIMARY KEY,"
+                 "    camera_id INTEGER NOT NULL REFERENCES camera(id),"
+                 "    ts_ms     INTEGER NOT NULL,"
+                 "    value     TEXT    NOT NULL,"
+                 "    conf      REAL    NOT NULL"
+                 ")")) {
+            return false;
+        }
+        if (!run("CREATE INDEX IF NOT EXISTS idx_reading_camera_ts "
+                 "ON reading(camera_id, ts_ms)")) {
             return false;
         }
     }

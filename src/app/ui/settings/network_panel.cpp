@@ -1,0 +1,150 @@
+#include "ui/settings/network_panel.h"
+
+#include "network/backend.h"
+#include "network/model.h"
+#include "network/repo.h"
+#include "ui/common/async_runner.h"
+#include "ui/common/form_widgets.h"
+#include "ui/convert.h"
+#include "ui/settings/netcard.h"
+
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QVBoxLayout>
+
+#include <exception>
+#include <optional>
+#include <vector>
+
+namespace denso::ui {
+namespace {
+
+/// Saved config for `iface`, or a DHCP default when none is stored yet.
+NetConfigUi load_config_or_default(const QSqlDatabase& db, const std::string& iface) {
+    std::optional<network::NetConfig> stored = network::load(db, iface);
+    if (stored) return to_ui_config(*stored);
+    network::NetConfig def;
+    def.iface = iface;
+    def.mode = "dhcp";
+    return to_ui_config(def);
+}
+
+} // namespace
+
+NetworkPanel::NetworkPanel(QSqlDatabase db, QWidget* parent)
+    : QWidget(parent), db_(std::move(db)) {
+    auto* v = new QVBoxLayout(this);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(12);
+
+    auto* head = new QHBoxLayout;
+    head->addWidget(common::eyebrow(QStringLiteral("NETWORK")), 1);
+    refresh_btn_ = new QPushButton(QStringLiteral("Refresh"));
+    refresh_btn_->setProperty("flatText", true);
+    connect(refresh_btn_, &QPushButton::clicked, this, [this] { refresh_network(); });
+    head->addWidget(refresh_btn_, 0);
+    v->addLayout(head);
+
+    eth_config_ = load_config_or_default(db_, "ethernet");
+    eth_card_ = new NetCard(QStringLiteral("Ethernet"), "ethernet", false, eth_config_);
+    eth_card_->on_apply = [this](const std::string& iface, const NetConfigUi& ui) {
+        apply_net_config(iface, ui);
+    };
+    v->addWidget(eth_card_);
+
+    wifi_config_ = load_config_or_default(db_, "wifi");
+    wifi_card_ = new NetCard(QStringLiteral("Wi-Fi"), "wifi", true, wifi_config_);
+    wifi_card_->on_apply = [this](const std::string& iface, const NetConfigUi& ui) {
+        apply_net_config(iface, ui);
+    };
+    wifi_card_->on_scan = [this] { scan_wifi(); };
+    wifi_card_->on_connect = [this](const std::string& ssid, const std::string& pw) {
+        connect_wifi(ssid, pw);
+    };
+    v->addWidget(wifi_card_);
+    v->addStretch(1);
+}
+
+void NetworkPanel::on_shown() {
+    // Re-seed the editors from the saved config (discarding un-applied edits),
+    // then refresh live status — the Slint nav callback's behavior.
+    eth_card_->set_config(eth_config_);
+    wifi_card_->set_config(wifi_config_);
+    refresh_network();
+}
+
+void NetworkPanel::refresh_network() {
+    refresh_btn_->setText(QStringLiteral("Loading…"));
+    common::run_on_worker([this] {
+        const network::NetworkSnapshot snap = network::backend()->snapshot();
+        common::post_to_gui(this, [this, snap] {
+            eth_card_->set_status(to_net_status(snap.ethernet));
+            wifi_card_->set_status(to_net_status(snap.wifi));
+            refresh_btn_->setText(QStringLiteral("Refresh"));
+        });
+    });
+}
+
+void NetworkPanel::apply_net_config(const std::string& iface, const NetConfigUi& ui) {
+    const network::NetConfig cfg = from_ui_config(iface, ui);
+    network::save(db_, cfg);  // app owns the truth; persist before pushing
+    QString status;
+    try {
+        network::backend()->apply_config(cfg);
+        status = QStringLiteral("Applied");
+    } catch (const std::exception& e) {
+        status = QStringLiteral("Error: %1").arg(QString::fromUtf8(e.what()));
+    }
+    const NetConfigUi canonical = to_ui_config(cfg);
+    (iface == "wifi" ? wifi_config_ : eth_config_) = canonical;
+    NetCard* card = iface == "wifi" ? wifi_card_ : eth_card_;
+    card->set_config(canonical);
+    card->set_config_status(status);
+}
+
+void NetworkPanel::scan_wifi() {
+    wifi_card_->set_scanning(true);
+    const std::string current_ssid = wifi_card_->current_ssid();
+    common::run_on_worker([this, current_ssid] {
+        std::optional<std::vector<network::WifiNetwork>> nets;
+        std::string err;
+        try {
+            nets = network::backend()->scan_wifi();
+        } catch (const std::exception& e) {
+            err = e.what();
+        }
+        common::post_to_gui(this, [this, nets, err, current_ssid] {
+            if (nets)
+                wifi_card_->set_networks(wifi_rows(*nets, current_ssid));
+            else
+                wifi_card_->set_connect_status(
+                    QStringLiteral("Scan failed: %1").arg(QString::fromStdString(err)));
+            wifi_card_->set_scanning(false);
+        });
+    });
+}
+
+void NetworkPanel::connect_wifi(const std::string& ssid, const std::string& password) {
+    wifi_card_->set_connect_status(
+        QStringLiteral("Connecting to %1…").arg(QString::fromStdString(ssid)));
+    common::run_on_worker([this, ssid, password] {
+        const std::optional<std::string> pw =
+            password.empty() ? std::nullopt : std::optional<std::string>(password);
+        bool ok = true;
+        std::string err;
+        try {
+            network::backend()->connect_wifi(ssid, pw);
+        } catch (const std::exception& e) {
+            ok = false;
+            err = e.what();
+        }
+        common::post_to_gui(this, [this, ssid, ok, err] {
+            wifi_card_->set_connect_status(
+                ok ? QStringLiteral("Connected to %1").arg(QString::fromStdString(ssid))
+                   : QStringLiteral("Error: %1").arg(QString::fromStdString(err)));
+        });
+    });
+}
+
+} // namespace denso::ui

@@ -15,12 +15,18 @@ add_executable(denso WIN32
     ui/startup_screen.cpp
     ui/warmup_worker.cpp
     ui/startup.cpp
+    # common dialog primitives (leaf — used by every dialog)
+    ui/common/form_widgets.cpp
+    ui/common/dialog_chrome.cpp
+    ui/common/async_runner.cpp
     # settings modal
     ui/settings/settings_dialog.cpp
+    ui/settings/network_panel.cpp
     ui/settings/netcard.cpp
     # camera management — entry points
     ui/camera/camera_view.cpp
     ui/camera/camera_dialog.cpp
+    ui/camera/wizard_controller.cpp
     # camera — cross-cutting primitives (used by both surfaces)
     ui/camera/shared/snapshot.cpp
     ui/camera/shared/frame_convert.cpp

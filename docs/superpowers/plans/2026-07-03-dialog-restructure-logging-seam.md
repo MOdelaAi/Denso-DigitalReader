@@ -325,7 +325,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Expected: build succeeds; `ctest` reports all tests passing, including the two new `reading …` cases (previous 54 → now 56 test cases). If the reading tests are the first run before the repo compiled, they would fail to link — a clean `cmake --build build` compiles `reading/repo.cpp` into `denso_core` first.
+Expected: build succeeds; `ctest` reports all tests passing, including the two new `reading …` cases (green baseline is 136 tests → 138 after this task). If the reading tests are the first run before the repo compiled, they would fail to link — a clean `cmake --build build` compiles `reading/repo.cpp` into `denso_core` first.
 
 - [ ] **Step 8: Commit**
 
@@ -1571,7 +1571,7 @@ export PATH=/c/msys64/ucrt64/bin:$PATH
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
-Expected: build succeeds; all tests still pass (56 cases). `camera_grid` constructs `DetectionProcessor` with the pre-existing 5-argument call, which now binds `camera_id=0, sink=nullptr` via the defaults — so `sink_` is null and the new branch is never taken. No runtime change.
+Expected: build succeeds; all tests still pass (138, unchanged by this task). `camera_grid` constructs `DetectionProcessor` with the pre-existing 5-argument call, which now binds `camera_id=0, sink=nullptr` via the defaults — so `sink_` is null and the new branch is never taken. No runtime change.
 
 - [ ] **Step 4: Commit**
 
@@ -1695,7 +1695,7 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
-Expected: clean configure, build with no warnings, all 56 test cases pass.
+Expected: clean configure, build with no warnings, all tests pass (138).
 
 - [ ] **Step 8: Commit**
 

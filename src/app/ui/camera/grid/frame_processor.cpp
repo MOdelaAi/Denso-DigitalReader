@@ -8,6 +8,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <optional>
 
@@ -22,9 +23,11 @@ QImage OrientationProcessor::process(const QImage& frame) {
 
 DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
                                        std::vector<ModelRun> models,
-                                       std::vector<denso::camera::CameraArea> areas)
+                                       std::vector<denso::camera::CameraArea> areas,
+                                       int64_t camera_id, ReadingSink* sink)
     : degrees_(degrees), pitch_(pitch), roll_(roll),
-      models_(std::move(models)), areas_(std::move(areas)) {}
+      models_(std::move(models)), areas_(std::move(areas)),
+      camera_id_(camera_id), sink_(sink) {}
 
 namespace {
 // Min confidence a camera keeps for class_id, or nullopt if not selected.
@@ -75,6 +78,16 @@ QImage DetectionProcessor::process(const QImage& frame) {
     // Cross-model NMS: within each class name, keep the highest-confidence box.
     const std::vector<NamedDetection> kept =
         merge_detections(std::move(pool), kMergeIoU);
+
+    // Reading-capture seam (dormant until a sink is wired by the logging
+    // feature). Timestamp is only computed when a sink exists, so a camera with
+    // no sink pays nothing.
+    if (sink_) {
+        const int64_t ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count();
+        sink_->on_reading(camera_id_, ts_ms, kept);
+    }
 
     for (const NamedDetection& d : kept) {
         cv::rectangle(bgr, d.box, cv::Scalar(0, 215, 255), 2);

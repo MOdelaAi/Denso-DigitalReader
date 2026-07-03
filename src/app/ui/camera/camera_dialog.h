@@ -3,21 +3,20 @@
 // delete), an "add camera" Source form (USB auto-scan or manual IP/RTSP), a
 // Configure page (snapshot preview + resolution/fps/rotation/pitch/roll), and an
 // Areas page (draw ROI polygons over the snapshot). The pages own their own
-// widgets and emit request signals; this class owns the camera source (snapshot
-// capture), the DB writes for add/edit, wizard navigation and modal sizing, and
-// emits cameras_changed() so the main view can refresh. The Areas step is
-// optional: it's offered right after Save and reachable later per-camera.
+// widgets and emit request signals; this class is a thin view — it owns only
+// the page stack, the stepper, and modal sizing. Flow-state, the threaded
+// snapshot capture, and every DB write for add/edit live in
+// CameraWizardController, driven via an injected show_page callback and its
+// request_show_list() signal. This class emits cameras_changed() so the main
+// view can refresh. The Areas step is optional: it's offered right after Save
+// and reachable later per-camera.
 #pragma once
 
 #include "camera/camera.h"
 
 #include <QDialog>
-#include <QImage>
 #include <QRect>
 #include <QSqlDatabase>
-#include <cstdint>
-#include <optional>
-#include <vector>
 
 class QStackedWidget;
 
@@ -29,6 +28,7 @@ class CameraAddPage;
 class CameraConfigurePage;
 class ModelsPage;
 class CameraAreasPage;
+class CameraWizardController;
 
 class CameraDialog : public QDialog {
     Q_OBJECT
@@ -47,21 +47,6 @@ private:
     void show_list();            // refresh rows + switch to the list page
     void show_add();             // reset the form + switch to the add page
 
-    // Configure flow (the coordinator owns the camera source + DB writes).
-    void begin_configure(const camera::Camera& cam, std::optional<int64_t> id,
-                         const QString& preview_text);  // seed draft + open Configure
-    void capture_snapshot();       // threaded grab → push frame to the pages
-    void save_configured_camera(); // insert/update from draft_, then Models step
-
-    // Models flow.
-    void enter_models();  // load the catalog + current attachments → Models page
-    void save_models();   // persist the attached models → advance to Areas step
-
-    // Areas flow.
-    void enter_areas(bool direct);  // load areas + frame → Areas page
-    void update_areas_background();  // push the oriented frame to the Areas canvas
-    void save_areas(const std::vector<camera::CameraArea>& areas);  // persist + list
-
     void expand_for_areas();  // grow the modal for drawing room
     void restore_size();      // shrink back after the Areas step
 
@@ -75,15 +60,11 @@ private:
     ModelsPage* models_page_ = nullptr;              // stack index 3
     CameraAreasPage* areas_page_ = nullptr;          // stack index 4
 
-    // Add/edit mode state.
-    std::optional<int64_t> editing_id_;  // set in edit mode; empty when adding
-    camera::Camera draft_;               // camera being added/edited
-    QImage last_frame_;                  // most recent un-rotated snapshot frame
+    CameraWizardController* controller_ = nullptr;  // owns flow-state + persistence
 
-    // Areas-step sizing + Back routing.
-    bool areas_expanded_ = false;          // modal currently grown for drawing
-    QRect pre_areas_geometry_;             // geometry to restore when leaving Areas
-    bool entered_areas_directly_ = false;  // true: per-row Areas button (Back → list)
+    // Areas-step sizing (view-owned: only the dialog resizes).
+    bool areas_expanded_ = false;  // modal currently grown for drawing
+    QRect pre_areas_geometry_;     // geometry to restore when leaving Areas
 };
 
 } // namespace denso::ui

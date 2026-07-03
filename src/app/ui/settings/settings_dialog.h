@@ -6,13 +6,9 @@
 // network callbacks + `std::thread`/`upgrade_in_event_loop`).
 #pragma once
 
-#include "ui/viewmodel.h"
-
 #include <QDialog>
 #include <QSqlDatabase>
 #include <QString>
-
-#include <functional>
 
 class QCheckBox;
 class QComboBox;
@@ -23,7 +19,7 @@ class QStackedWidget;
 
 namespace denso::ui {
 
-class NetCard;
+class NetworkPanel;
 
 class SettingsDialog : public QDialog {
     Q_OBJECT
@@ -59,18 +55,6 @@ private:
     QWidget* build_network();
     QWidget* build_about();
 
-    // Network handlers (own the DB + the per-call backend, like the Rust wiring).
-    void refresh_network();
-    void apply_net_config(const std::string& iface, const NetConfigUi& ui);
-    void scan_wifi();
-    void connect_wifi(const std::string& ssid, const std::string& password);
-
-    // Run blocking OS work on a worker thread, posting results back to the GUI
-    // thread (the Qt analog of `std::thread` + `upgrade_in_event_loop`). A real
-    // QThread is used so QProcess in the platform backends has an event
-    // dispatcher.
-    void run_async(std::function<void()> work);
-
     QSqlDatabase db_;
     bool suppress_signals_ = false;
 
@@ -89,14 +73,8 @@ private:
     QLabel* hw_storage_ = nullptr;
     QLabel* about_version_ = nullptr;
 
-    // Network. The configs mirror the Slint window's eth-config/wifi-config
-    // properties: the editors re-seed from them on each Network-tab entry (so
-    // un-applied edits are discarded), and Apply refreshes them.
-    QPushButton* refresh_btn_ = nullptr;
-    NetCard* eth_card_ = nullptr;
-    NetCard* wifi_card_ = nullptr;
-    NetConfigUi eth_config_;
-    NetConfigUi wifi_config_;
+    // Network page — a self-contained widget owning its cards + async handlers.
+    NetworkPanel* network_panel_ = nullptr;
 };
 
 } // namespace denso::ui
