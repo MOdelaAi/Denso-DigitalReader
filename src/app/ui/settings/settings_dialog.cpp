@@ -1,12 +1,11 @@
 #include "ui/settings/settings_dialog.h"
 
+#include "ui/common/dialog_chrome.h"
 #include "ui/common/form_widgets.h"
 #include "ui/settings/network_panel.h"
 
 #include <QCheckBox>
 #include <QComboBox>
-#include <QFont>
-#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -28,27 +27,7 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     outer->setContentsMargins(24, 24, 24, 24);
     outer->setSpacing(22);
 
-    // ── Header ──
-    auto* header = new QVBoxLayout;
-    header->setSpacing(10);
-    auto* title_row = new QHBoxLayout;
-    auto* title = new QLabel(QStringLiteral("Settings"));
-    QFont tf = title->font();
-    tf.setBold(true);
-    tf.setPointSizeF(tf.pointSizeF() + 6.0);
-    title->setFont(tf);
-    auto* close_glyph = new QPushButton(QStringLiteral("✕"));
-    close_glyph->setProperty("flatText", true);
-    close_glyph->setFixedSize(28, 28);
-    connect(close_glyph, &QPushButton::clicked, this, &QDialog::reject);
-    title_row->addWidget(title, 1);
-    title_row->addWidget(close_glyph, 0);
-    header->addLayout(title_row);
-    auto* underline = new QFrame;
-    underline->setObjectName(QStringLiteral("goldUnderline"));
-    underline->setFixedSize(48, 3);
-    header->addWidget(underline, 0, Qt::AlignLeft);
-    outer->addLayout(header);
+    outer->addLayout(common::dialog_header(this, QStringLiteral("Settings")));
 
     // ── Body: nav + content ──
     auto* body = new QHBoxLayout;
