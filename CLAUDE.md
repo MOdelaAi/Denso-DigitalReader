@@ -63,23 +63,25 @@ Each target dir is its own include root, so includes read `network/model.h`,
 | `ui/convert.{h,cpp}`, `ui/viewmodel.h` | The **only** domain↔view boundary (Qt-free, testable). |
 | `camera/` | Camera inventory: domain structs (`camera.h`: `Camera` + polygon `CameraArea` over normalized `Point`s) + persistence (`repo`, full camera CRUD + ROI-area read/replace). `area_points` (de)serializes a polygon's normalized vertices to the `camera_area.points` TEXT column; `area_geometry` is pure, unit-tested point-in-polygon (`point_in_polygon`/`inside_any_area`) used to confine detection to the ROI. |
 | `detection/` | Per-camera detection config domain: `detection.h` structs (`DetectionModel`, `CameraModel`, `ModelClassSelection`, resolved `CameraDetection`) + persistence (`repo`: model catalog, per-camera attachments, and the `detection_for` resolve query) + `class_names` JSON (de)serialization. Qt/OpenCV-free — the ORT inference runtime lives in the app. |
+| `reading/` | Append-only detection-reading log: `reading.h` (`Reading`: camera_id + ts_ms + value + conf) + `repo` (`insert`/`query` by camera + time range). Consumed by the logging/export feature; written by the app-side reading sink. Migration **v9**. |
 | `util/strutil.h` | Small shared string helpers. |
 
 ### `src/app/` (GUI)
 
-UI grouped by feature: the **app shell** at `ui/` root, plus `ui/settings/` and
-`ui/camera/`.
+UI grouped by feature: the **app shell** at `ui/` root, plus `ui/common/`,
+`ui/settings/` and `ui/camera/`.
 
 | Path | Responsibility |
 |---|---|
 | `main.cpp` | Thin orchestrator: open DB → migrate → import legacy → reassert network → load settings → apply startup → run. |
+| `ui/common/` | **Leaf** shared dialog primitives (Qt-only, no feature deps): `dialog_chrome` (`dialog_header`), `async_runner` (`run_on_worker`/`post_to_gui`), `form_widgets` (`eyebrow`/`dim_label`/`spec_row`/`hline`). Both dialogs build on these instead of re-copying chrome. |
 | `ui/theme.{h,cpp}` | Palette + theme-driven app stylesheet. |
 | `ui/mainwindow.{h,cpp}` | Root window (top bar + content); hosts settings-persistence handlers; opens the settings + camera modals. |
-| `ui/settings/settings_dialog.{h,cpp}` | Settings modal: nav + 5 panels; owns DB-backed network apply + threaded scan/connect/refresh. |
+| `ui/settings/settings_dialog.{h,cpp}` | Settings modal: nav + 5 panels; owns DB-backed network apply + threaded scan/connect/refresh. The Network page is a self-contained `ui/settings/network_panel` (`NetworkPanel`) owning its cards + threaded apply/scan/connect/refresh; the dialog is a thin view + nav. |
 | `ui/settings/netcard.{h,cpp}` | Per-interface status + editable config + Wi-Fi scan/connect. |
 | **`ui/camera/`** | Grouped into two entry points (root) + three layers: `grid/` (live view), `dialog/` (modal), `shared/` (cross-cutting primitives). `shared/` is a leaf; `grid/` and `dialog/` depend only on it, never on each other. |
 | `ui/camera/camera_view.{h,cpp}` | **Entry point.** Main content switcher: empty state (+ Add) when 0 cameras, else the live `CameraGrid`. `release_streams()`/`reload()` free + restart capture around the modal. |
-| `ui/camera/camera_dialog.{h,cpp}` | **Entry point.** Camera management modal — a thin **coordinator** over a 5-page stack (the `dialog/` pages) run as a guided wizard: list/delete + add (USB scan / IP manufacturer+stream+credentials) → Configure (preview + resolution/fps/rotation/pitch/roll) → Models (attach 1..N detection models + per-class confidence) → Areas (draw ROI polygons; optional). Owns snapshot capture, add/edit DB writes, navigation + sizing. Stepper header + Back/Next/Finish footers; `show_page()` centralizes page+stepper+sizing; the modal grows near-fullscreen on the Areas step. |
+| `ui/camera/camera_dialog.{h,cpp}` | **Entry point.** Camera management modal — a thin **coordinator** over a 5-page stack (the `dialog/` pages) run as a guided wizard: list/delete + add (USB scan / IP manufacturer+stream+credentials) → Configure (preview + resolution/fps/rotation/pitch/roll) → Models (attach 1..N detection models + per-class confidence) → Areas (draw ROI polygons; optional). Owns snapshot capture, add/edit DB writes, navigation + sizing. Stepper header + Back/Next/Finish footers; `show_page()` centralizes page+stepper+sizing; the modal grows near-fullscreen on the Areas step. Flow-state, threaded snapshot capture, and all DB writes live in `ui/camera/wizard_controller` (`CameraWizardController`); the dialog owns only the page stack, stepper, and sizing. |
 | `ui/camera/grid/camera_grid.{h,cpp}` | Live 1–4 grid: a tile + `CameraStream` per camera (first 4 by id), laid out via `grid_dims`; owns start/stop/reload. |
 | `ui/camera/grid/camera_stream.{h,cpp}` | Per-camera capture worker (own `std::thread` + `cv::VideoCapture`): read → `FrameProcessor` → queued `frame_ready`/`status_changed`; ~15 fps display cap paced by a high-resolution `precise_sleep` (MinGW `sleep_for` is pinned to the ~15.6 ms tick), clean stop/join. USB opens by index; IP opens via `rtsp_gst_pipeline` on `cv::CAP_GSTREAMER`, falling back to FFMPEG. Capture resolution is set for USB only (setting it on a live GStreamer pipeline segfaults). |
 | `ui/camera/grid/camera_tile.{h,cpp}` | One grid cell: paints the latest frame (aspect-fit) + name + status dot + live per-tile FPS + the camera's ROI polygons as gold outlines (`set_areas`); placeholder when connecting/offline. |
@@ -139,6 +141,11 @@ Per-camera YOLO detection is an **app-only** feature — the domain config lives
   testable core.
 - `build/` and `*.png` are git-ignored (see `.gitignore`); `assets/icon.png`
   predates the `*.png` rule and stays tracked as a committed source asset.
+- Dialogs are a **thin view + a controller/panel** that owns flow-state, async
+  work, and persistence. Shared dialog chrome (header, async runner, label
+  factories) lives in `ui/common/` and is never re-copied into a feature. The
+  detection pipeline's `ReadingSink` hook must hand off to a worker — never do
+  DB I/O on the capture thread.
 
 ## Workflow
 

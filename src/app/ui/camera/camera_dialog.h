@@ -3,10 +3,13 @@
 // delete), an "add camera" Source form (USB auto-scan or manual IP/RTSP), a
 // Configure page (snapshot preview + resolution/fps/rotation/pitch/roll), and an
 // Areas page (draw ROI polygons over the snapshot). The pages own their own
-// widgets and emit request signals; this class owns the camera source (snapshot
-// capture), the DB writes for add/edit, wizard navigation and modal sizing, and
-// emits cameras_changed() so the main view can refresh. The Areas step is
-// optional: it's offered right after Save and reachable later per-camera.
+// widgets and emit request signals; this class is a thin view — it owns only
+// the page stack, the stepper, and modal sizing. Flow-state, the threaded
+// snapshot capture, and every DB write for add/edit live in
+// CameraWizardController, driven via an injected show_page callback and its
+// request_show_list() signal. This class emits cameras_changed() so the main
+// view can refresh. The Areas step is optional: it's offered right after Save
+// and reachable later per-camera.
 #pragma once
 
 #include "camera/camera.h"

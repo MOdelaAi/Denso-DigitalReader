@@ -1,0 +1,14 @@
+# Style for Denso-DigitalReader. Matches the existing hand-written style; does
+# not reformat existing files unless run explicitly. Run on new/changed files:
+#   clang-format -i <file>
+---
+Language: Cpp
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Left
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: WithoutElse
+SortIncludes: false

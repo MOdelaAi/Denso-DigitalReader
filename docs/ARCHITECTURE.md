@@ -22,6 +22,12 @@ directory is its own include root: core headers read `network/model.h` /
 `ui/camera/camera_dialog.h`, and the app reaches core headers through
 `denso_core`'s public include dir.
 
+`src/core/reading/` is the append-only detection-reading log (migration v9);
+see [Reading log](#reading-log) below. On the app side, `src/app/ui/common/`
+is a new **leaf**: shared dialog chrome (header, async runner, label/row
+factories) with no feature dependencies, so `settings_dialog` and
+`camera_dialog` build on it instead of each keeping its own copies.
+
 ## Boot sequence (`src/app/main.cpp`)
 
 A thin orchestrator:
@@ -79,10 +85,27 @@ Grouped by feature so the folder scales: the **app shell** at `ui/` root, with
   / fullscreen / reset), since those resize the window and restyle the app, and
   opens the settings + camera modals.
 
+**Common (`ui/common/`)**
+
+A **leaf**: three shared dialog primitives, Qt-only with no feature
+dependencies, so either dialog can build on them without depending on the
+other. `dialog_chrome.{h,cpp}` (`dialog_header`) builds the consistent modal
+title bar; `async_runner.{h,cpp}` (`run_on_worker`/`post_to_gui`) wraps the
+worker-thread-then-marshal-back pattern each dialog's threaded operations
+(scan/connect/refresh, snapshot capture) already needed; `form_widgets.{h,cpp}`
+(`eyebrow`/`dim_label`/`spec_row`/`hline`) are the small label/row factories
+that used to be copy-pasted between `settings_dialog`'s anonymous namespace and
+the camera dialog's `page_util`. `page_util::dim_label` now delegates to
+`common::dim_label` instead of keeping its own definition.
+
 **Settings (`ui/settings/`)**
 - `settings_dialog.{h,cpp}` — modal: a left nav over five panels (Appearance,
-  Display, System, Network, About). Owns the DB-backed network apply and the
-  threaded scan/connect/refresh.
+  Display, System, Network, About). The Network panel is extracted into
+  `network_panel.{h,cpp}` (`NetworkPanel`), a self-contained widget that owns
+  the two `NetCard`s, the DB handle, and the threaded apply/scan/connect/refresh
+  handlers (`on_shown()` re-seeds editors + refreshes status, reproducing the
+  Slint original's "entering the tab reloads"); `settings_dialog` itself is now
+  a thin view over the nav + the four other panels.
 - `netcard.{h,cpp}` — one interface's live status + editable IP/DNS config +
   (Wi-Fi) scan list with per-row connect.
 
@@ -139,21 +162,26 @@ all three.
   `EngineRegistry`), else plain `OrientationProcessor` — the capture loop and
   tile don't change. `grid_layout.{h,cpp}` is the pure, unit-tested
   `grid_dims(n)`.
-- `camera_dialog.{h,cpp}` — the camera management hub: a thin **coordinator**
-  over a 5-page stack run as a guided wizard — list + delete, then **① Source**
+- `camera_dialog.{h,cpp}` — the camera management hub: a thin **view** over a
+  5-page stack run as a guided wizard — list + delete, then **① Source**
   (USB auto-scan, or IP via manufacturer + main/sub stream + credentials with a
   live RTSP-URL preview) → **② Configure** (snapshot preview + resolution / fps /
   rotation / pitch / roll) → **③ Models** (attach 1..N detection models, each with
   per-class confidence) → **④ Areas** (draw ROI polygons). Each page is its
   own widget under `dialog/` (see below), owning its controls and emitting
-  request signals; the coordinator owns the camera source (snapshot capture),
-  the add/edit DB writes, wizard navigation and modal sizing. A `WizardStepper`
-  header shows the current step; footers are consistent Back / Next / Finish.
-  `show_page(index)` is the single entry point that switches the stack page,
-  drives the stepper, and resizes — the modal grows to **near-fullscreen on the
-  Areas step** for drawing room and restores the compact size on leaving. The
-  camera is inserted/updated when Configure's **Next** is pressed, so both the
-  Models and Areas steps attach to a known camera id; Models persists via
+  request signals; the dialog itself owns only the page stack, the
+  `WizardStepper`, and modal sizing (Back/Next/Finish footers; `show_page(index)`
+  switches the stack page, drives the stepper, and resizes — the modal grows to
+  **near-fullscreen on the Areas step** for drawing room and restores the
+  compact size on leaving). All flow-state, the threaded snapshot capture, and
+  every DB write (camera insert/update, model attach, ROI replace) live in
+  `wizard_controller.{h,cpp}` (`CameraWizardController`, a `QObject`, not a
+  widget): the controller never touches the `QStackedWidget` or stepper
+  directly — it drives page transitions through an injected `show_page`
+  callback and a `request_show_list()` signal for "return to the list", and
+  emits `cameras_changed()` for the main view to refresh. The camera is
+  inserted/updated when Configure's **Next** is pressed, so both the Models and
+  Areas steps attach to a known camera id; Models persists via
   `detection::set_camera_models` on its Next, Areas is **optional** (Skip
   returns without writing ROIs, Finish saves them). Each list row also has an
   **Areas** button to draw/edit later. `showEvent` reopens the reused dialog on
@@ -285,6 +313,29 @@ provider DLLs and every `models/*.onnx` are copied beside the exe by a
 `POST_BUILD` step; the GPU provider DLLs come from the git-ignored
 `third_party/gpu_ep/` (see `docs/GPU_SETUP.md`), and a missing GPU stack silently
 degrades to the CPU provider.
+
+## Reading log
+
+`src/core/reading/` is the append-only log of captured readings, Qt/OpenCV-free
+like the rest of `denso_core`: `reading.h` (`Reading`: `id` / `camera_id` /
+`ts_ms` / `value` / `conf`) + `repo` (`insert`, and `query(camera_id, from_ms,
+to_ms)` ordered by `ts_ms` then `id`). Schema is migration **v9** — a `reading`
+table indexed on `(camera_id, ts_ms)` for the by-camera time-range read. It's
+append + range-read only; there is no update/delete, since a reading is an
+immutable capture.
+
+The write side is not wired up yet. `DetectionProcessor` (`frame_processor.h`)
+has a dormant seam for it: an optional `ReadingSink*` (plus a `camera_id`), both
+defaulted so the existing 5-arg construction call is untouched. When a sink is
+set, `process()` calls `sink->on_reading(camera_id, ts_ms, kept)` with the
+frame's post-ROI-confinement detections. **Threading contract:** `on_reading`
+runs on the **capture thread**, in the hot path — an implementation must not
+block or do DB I/O inline; it has to hand the data off to a worker (e.g. via
+`common::run_on_worker`/`post_to_gui`) and return immediately, the same rule
+`camera_stream` already follows for its own frame processing. Assembling a
+sink's kept detections into a `Reading::value` (e.g. digit-string reconstruction
+across models) is deferred to the future logging/export feature (Spec 2) — this
+task only lands the storage + the capture-thread hook, not a consumer.
 
 ## Gotchas
 
