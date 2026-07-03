@@ -26,6 +26,7 @@ add_executable(denso WIN32
     # camera management — entry points
     ui/camera/camera_view.cpp
     ui/camera/camera_dialog.cpp
+    ui/camera/wizard_controller.cpp
     # camera — cross-cutting primitives (used by both surfaces)
     ui/camera/shared/snapshot.cpp
     ui/camera/shared/frame_convert.cpp
