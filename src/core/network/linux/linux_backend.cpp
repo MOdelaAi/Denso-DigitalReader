@@ -15,12 +15,19 @@
 namespace denso::network {
 namespace {
 
+constexpr int kNetCmdTimeoutMs = 15000;  // cap a stuck netsh/ipconfig
+constexpr int kNetCmdGraceMs = 2000;     // grace after kill() before giving up
+
 /// Run one command, returning its stdout (UTF-8, lossy). Empty on spawn failure.
 std::string run(const QString& cmd, const QStringList& args) {
     QProcess p;
     p.start(cmd, args);
     if (!p.waitForStarted()) return {};
-    p.waitForFinished(-1);
+    if (!p.waitForFinished(kNetCmdTimeoutMs)) {
+        p.kill();
+        p.waitForFinished(kNetCmdGraceMs);
+        return {};  // timed out — treat as no output
+    }
     return QString::fromUtf8(p.readAllStandardOutput()).toStdString();
 }
 

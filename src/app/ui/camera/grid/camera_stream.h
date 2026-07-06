@@ -35,6 +35,10 @@ public:
     void start();  // launch the capture thread (no-op if already running)
     void stop();   // signal stop + join; idempotent
 
+    /// Shared drop-oldest backpressure counter: frames emitted but not yet
+    /// consumed by the tile. Handed to the paired CameraTile so it can decrement.
+    std::shared_ptr<std::atomic<int>> frame_counter() const { return queued_; }
+
 signals:
     void frame_ready(const QImage& frame);
     void status_changed(int status);  // CameraStream::Status as int (queued-safe)
@@ -46,6 +50,8 @@ private:
     std::unique_ptr<FrameProcessor> processor_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    std::shared_ptr<std::atomic<int>> queued_{
+        std::make_shared<std::atomic<int>>(0)};
 };
 
 } // namespace denso::ui

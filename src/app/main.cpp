@@ -17,11 +17,13 @@
 #include <QLocale>
 #include <QMutex>
 #include <QString>
+#include <QTimer>
 #include <QtGlobal>
 
 #include <opencv2/core.hpp>
 
 #include <cstdio>
+#include <exception>
 #include <memory>
 
 namespace {
@@ -83,12 +85,22 @@ int main(int argc, char** argv) {
     // any *.onnx present becomes selectable in the camera Models step.
     denso::ui::sync_models(conn, QCoreApplication::applicationDirPath() + QStringLiteral("/models"));
 
-    // The app owns network config: reassert it to the OS at boot. Non-fatal —
-    // a failed apply is logged, never blocks startup.
-    for (const auto& [iface, err] : denso::network::reassert(conn, *denso::network::backend())) {
-        qWarning().noquote() << QStringLiteral("network: failed to apply %1 config: %2")
-                                    .arg(QString::fromStdString(iface), QString::fromStdString(err));
-    }
+    // The app owns network config: reassert it to the OS shortly after the UI is
+    // up (singleShot(0) → first event-loop tick), not before it. A slow or stuck
+    // CLI (now bounded by the backend's QProcess timeout) can no longer keep the
+    // window from appearing; failures are logged, never fatal.
+    QTimer::singleShot(0, [conn] {
+        try {
+            for (const auto& [iface, err] :
+                 denso::network::reassert(conn, *denso::network::backend())) {
+                qWarning().noquote()
+                    << QStringLiteral("network: failed to apply %1 config: %2")
+                           .arg(QString::fromStdString(iface), QString::fromStdString(err));
+            }
+        } catch (const std::exception& e) {
+            qWarning().noquote() << "network: reassert failed:" << e.what();
+        }
+    });
 
     auto state = std::make_shared<denso::settings::Settings>(denso::settings::load(conn));
 

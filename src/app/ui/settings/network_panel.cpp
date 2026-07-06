@@ -10,9 +10,12 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPointer>
 #include <QPushButton>
+#include <QThread>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <exception>
 #include <optional>
 #include <vector>
@@ -66,6 +69,14 @@ NetworkPanel::NetworkPanel(QSqlDatabase db, QWidget* parent)
     v->addStretch(1);
 }
 
+NetworkPanel::~NetworkPanel() {
+    for (const QPointer<QThread>& w : workers_) {
+        if (w && w->isRunning()) {
+            w->wait();
+        }
+    }
+}
+
 void NetworkPanel::on_shown() {
     // Re-seed the editors from the saved config (discarding un-applied edits),
     // then refresh live status — the Slint nav callback's behavior.
@@ -75,38 +86,69 @@ void NetworkPanel::on_shown() {
 }
 
 void NetworkPanel::refresh_network() {
+    if (net_busy_) return;
+    net_busy_ = true;
+    workers_.erase(std::remove_if(workers_.begin(), workers_.end(),
+                                  [](const QPointer<QThread>& w) { return !w; }),
+                   workers_.end());
+    refresh_btn_->setEnabled(false);
     refresh_btn_->setText(QStringLiteral("Loading…"));
-    common::run_on_worker([this] {
+    QPointer<NetworkPanel> self(this);
+    workers_.push_back(common::run_on_worker([this, self] {
         const network::NetworkSnapshot snap = network::backend()->snapshot();
+        if (!self) return;  // panel gone — skip the post
         common::post_to_gui(this, [this, snap] {
             eth_card_->set_status(to_net_status(snap.ethernet));
             wifi_card_->set_status(to_net_status(snap.wifi));
             refresh_btn_->setText(QStringLiteral("Refresh"));
+            refresh_btn_->setEnabled(true);
+            net_busy_ = false;
         });
-    });
+    }));
 }
 
 void NetworkPanel::apply_net_config(const std::string& iface, const NetConfigUi& ui) {
+    if (net_busy_) return;  // first line: a double-click can't double-apply
+    net_busy_ = true;
+    workers_.erase(std::remove_if(workers_.begin(), workers_.end(),
+                                  [](const QPointer<QThread>& w) { return !w; }),
+                   workers_.end());
+
     const network::NetConfig cfg = from_ui_config(iface, ui);
     network::save(db_, cfg);  // app owns the truth; persist before pushing
-    QString status;
-    try {
-        network::backend()->apply_config(cfg);
-        status = QStringLiteral("Applied");
-    } catch (const std::exception& e) {
-        status = QStringLiteral("Error: %1").arg(QString::fromUtf8(e.what()));
-    }
     const NetConfigUi canonical = to_ui_config(cfg);
     (iface == "wifi" ? wifi_config_ : eth_config_) = canonical;
     NetCard* card = iface == "wifi" ? wifi_card_ : eth_card_;
     card->set_config(canonical);
-    card->set_config_status(status);
+    card->set_config_status(QStringLiteral("Applying…"));
+
+    QPointer<NetworkPanel> self(this);
+    workers_.push_back(common::run_on_worker([this, self, cfg, card] {
+        QString status;
+        try {
+            network::backend()->apply_config(cfg);
+            status = QStringLiteral("Applied");
+        } catch (const std::exception& e) {
+            status = QStringLiteral("Error: %1").arg(QString::fromUtf8(e.what()));
+        }
+        if (!self) return;  // panel gone — skip the post
+        common::post_to_gui(this, [this, card, status] {
+            card->set_config_status(status);
+            net_busy_ = false;
+        });
+    }));
 }
 
 void NetworkPanel::scan_wifi() {
+    if (net_busy_) return;
+    net_busy_ = true;
+    workers_.erase(std::remove_if(workers_.begin(), workers_.end(),
+                                  [](const QPointer<QThread>& w) { return !w; }),
+                   workers_.end());
     wifi_card_->set_scanning(true);
     const std::string current_ssid = wifi_card_->current_ssid();
-    common::run_on_worker([this, current_ssid] {
+    QPointer<NetworkPanel> self(this);
+    workers_.push_back(common::run_on_worker([this, self, current_ssid] {
         std::optional<std::vector<network::WifiNetwork>> nets;
         std::string err;
         try {
@@ -114,6 +156,7 @@ void NetworkPanel::scan_wifi() {
         } catch (const std::exception& e) {
             err = e.what();
         }
+        if (!self) return;  // panel gone — skip the post
         common::post_to_gui(this, [this, nets, err, current_ssid] {
             if (nets)
                 wifi_card_->set_networks(wifi_rows(*nets, current_ssid));
@@ -121,14 +164,21 @@ void NetworkPanel::scan_wifi() {
                 wifi_card_->set_connect_status(
                     QStringLiteral("Scan failed: %1").arg(QString::fromStdString(err)));
             wifi_card_->set_scanning(false);
+            net_busy_ = false;
         });
-    });
+    }));
 }
 
 void NetworkPanel::connect_wifi(const std::string& ssid, const std::string& password) {
+    if (net_busy_) return;
+    net_busy_ = true;
+    workers_.erase(std::remove_if(workers_.begin(), workers_.end(),
+                                  [](const QPointer<QThread>& w) { return !w; }),
+                   workers_.end());
     wifi_card_->set_connect_status(
         QStringLiteral("Connecting to %1…").arg(QString::fromStdString(ssid)));
-    common::run_on_worker([this, ssid, password] {
+    QPointer<NetworkPanel> self(this);
+    workers_.push_back(common::run_on_worker([this, self, ssid, password] {
         const std::optional<std::string> pw =
             password.empty() ? std::nullopt : std::optional<std::string>(password);
         bool ok = true;
@@ -139,12 +189,14 @@ void NetworkPanel::connect_wifi(const std::string& ssid, const std::string& pass
             ok = false;
             err = e.what();
         }
+        if (!self) return;  // panel gone — skip the post
         common::post_to_gui(this, [this, ssid, ok, err] {
             wifi_card_->set_connect_status(
                 ok ? QStringLiteral("Connected to %1").arg(QString::fromStdString(ssid))
                    : QStringLiteral("Error: %1").arg(QString::fromStdString(err)));
+            net_busy_ = false;
         });
-    });
+    }));
 }
 
 } // namespace denso::ui

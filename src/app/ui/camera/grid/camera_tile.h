@@ -11,6 +11,8 @@
 #include <QString>
 #include <QWidget>
 
+#include <atomic>
+#include <memory>
 #include <vector>
 
 class QPainter;
@@ -28,6 +30,10 @@ public:
     /// drawn as outlines over the live feed. Empty = no overlay.
     void set_areas(std::vector<camera::CameraArea> areas);
 
+    /// The paired stream's backpressure counter; decremented as each frame is
+    /// consumed. Optional — a tile without one just never decrements.
+    void set_frame_counter(std::shared_ptr<std::atomic<int>> counter);
+
 public slots:
     void set_frame(const QImage& frame);
     void set_status(int status);  // CameraStream::Status as int
@@ -43,6 +49,7 @@ private:
     int status_ = 0;  // Connecting
     std::vector<camera::CameraArea> areas_;
     FpsMeter meter_;  // real live fps from frame arrivals
+    std::shared_ptr<std::atomic<int>> frame_counter_;  // null = no backpressure
 };
 
 } // namespace denso::ui

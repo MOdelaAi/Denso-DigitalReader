@@ -8,10 +8,11 @@
 
 namespace denso::ui::common {
 
-void run_on_worker(std::function<void()> work) {
+QThread* run_on_worker(std::function<void()> work) {
     auto* thread = QThread::create(std::move(work));
     QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     thread->start();
+    return thread;
 }
 
 void post_to_gui(QObject* ctx, std::function<void()> fn) {

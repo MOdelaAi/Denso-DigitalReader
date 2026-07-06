@@ -103,6 +103,7 @@ void CameraGrid::reload() {
         auto* stream = new CameraStream(cam, std::move(proc));
         connect(stream, &CameraStream::frame_ready, tile, &CameraTile::set_frame);
         connect(stream, &CameraStream::status_changed, tile, &CameraTile::set_status);
+        tile->set_frame_counter(stream->frame_counter());
 
         grid_->addWidget(tile, i / dims.cols, i % dims.cols);
         tiles_.push_back(tile);

@@ -45,7 +45,10 @@ A thin orchestrator:
    models dropped into `models/` become selectable in the camera wizard.
 5. `network::reassert` re-applies every saved interface config to the OS — the
    app is the source of truth. Best-effort and non-fatal: failures are logged
-   via `qWarning`, never block startup.
+   via `qWarning`, never block startup. It is **deferred to the first event-loop
+   tick** (`QTimer::singleShot(0, …)`, exceptions swallowed) and runs *after*
+   `ui::launch`, so the window shows first — a slow or stuck OS CLI (now bounded
+   by the backend's `QProcess` timeout) can no longer keep startup from painting.
 6. `settings::load` seeds an in-memory `std::shared_ptr<Settings>`.
 7. `main` hands off to `ui::launch(app, conn, state)` (`src/app/ui/startup.cpp`),
    which shows the `StartupScreen` splash immediately, builds the shared
@@ -132,15 +135,28 @@ all three.
   `CameraStream` per camera (first four by id; `grid_dims` picks 1 / 1×2 / 2×2).
   Each `CameraStream` runs a `cv::VideoCapture` read loop on its **own
   `std::thread`**, converts each frame (`mat_to_qimage`), runs it through a
-  `FrameProcessor`, and emits `frame_ready`/`status_changed` as **queued**
-  signals to its tile (capped ~15 fps; finite open/read timeout so a dead camera
-  can't hang teardown; `stop()` joins). USB cameras open by device index; IP
+  `FrameProcessor` (wrapped in `safe_process` so a throw from a malformed frame
+  can't kill the capture thread), and emits `frame_ready`/`status_changed` as
+  **queued** signals to its tile (capped ~15 fps; finite open/read timeout so a
+  dead camera can't hang teardown; `stop()` joins). `run()` is an **outer
+  reconnect loop**: a failed open or a mid-stream read drop no longer ends the
+  thread — it emits Offline, backs off (`next_backoff_ms`: 1s→×2→10s cap, reset
+  on a live frame) via a stop-responsive `wait_or_stop`, and reopens, so a camera
+  that blinks out recovers on its own without an app restart. USB cameras open by
+  device index; IP
   cameras open through a low-latency `rtsp_gst_pipeline` on the **GStreamer**
   backend (`cv::CAP_GSTREAMER`) with an **FFMPEG fallback** if GStreamer can't
   open — GStreamer drops stale frames so glass-to-glass lag stays bounded. The
   display cap is paced by a high-resolution waitable timer (`precise_sleep`),
   because MinGW's `std::this_thread::sleep_for` is pinned to the ~15.6 ms OS
-  tick and would undershoot the target rate (~9 fps for a 15 fps cap).
+  tick and would undershoot the target rate (~9 fps for a 15 fps cap). The
+  loop's flow-control policy is factored into pure, unit-tested helpers in
+  `stream_pacing.{h,cpp}`: `next_backoff_ms` (reconnect backoff schedule) and
+  `should_emit` (drop-oldest backpressure gate). Backpressure is a
+  `shared_ptr<atomic<int>>` in-flight counter shared by the stream and its tile:
+  the stream only emits when `should_emit(queued, kMaxInFlight=2)` and increments;
+  `CameraTile::set_frame` decrements on consume. A GUI that falls behind drops
+  frames instead of letting full-res `QImage` events pile up unboundedly (OOM).
   `CameraTile` is a pure view — paints the latest frame aspect-fit with a name,
   status dot, and a live per-tile FPS readout (`FpsMeter`), and overlays the
   camera's saved ROI polygons (`set_areas`) as gold outlines. The overlay maps
@@ -160,7 +176,10 @@ all three.
   `camera_grid` picks per camera: `DetectionProcessor` when the camera has
   attached, loadable models (resolved via `detection::detection_for` +
   `EngineRegistry`), else plain `OrientationProcessor` — the capture loop and
-  tile don't change. `grid_layout.{h,cpp}` is the pure, unit-tested
+  tile don't change. Every per-frame `process()` call is wrapped in
+  `safe_process()` (`safe_process.h`) so a throw from a malformed frame is caught
+  on the capture thread and the raw frame is shown instead — one bad frame can't
+  `std::terminate()` the process. `grid_layout.{h,cpp}` is the pure, unit-tested
   `grid_dims(n)`.
 - `camera_dialog.{h,cpp}` — the camera management hub: a thin **view** over a
   5-page stack run as a guided wizard — list + delete, then **① Source**
@@ -226,14 +245,22 @@ all three.
 
 ### Threading
 
-`apply_net_config` runs **synchronously** on the GUI thread (as the Rust
-original did). The blocking OS calls — `scan_wifi`, `connect_wifi`,
+All four blocking OS calls — `apply_net_config`, `scan_wifi`, `connect_wifi`,
 `refresh_network` — run on a worker `QThread` (`QThread::create`, so QProcess in
 the backends has an event dispatcher) and post results back with
 `QMetaObject::invokeMethod(this, …, Qt::QueuedConnection)`. This is the Qt
 analog of the Rust `std::thread` + `upgrade_in_event_loop`. A fresh
-`network::backend()` is created per operation. The settings dialog is created
-once and reused, so worker callbacks always have a valid target.
+`network::backend()` is created per operation. **Worker lifetime is guarded in
+two layers** (a dialog can be closed mid-operation): `run_on_worker` returns the
+`QThread*`, which `NetworkPanel` records in `workers_` and `wait()`s in its
+destructor; and each worker captures a `QPointer<NetworkPanel>` and skips its
+`post_to_gui` if the panel is already gone. Together they close the
+use-after-free window on `this`. A per-panel `net_busy_` flag (set at each
+handler's entry, cleared in its GUI post) plus a disabled Refresh button
+serialize actions, so a rapid double-click can't spawn duplicate workers or
+double-apply a config. Moving `apply_net_config` off the GUI thread means a
+stuck `netsh` (now bounded by the backend's `QProcess` timeout) can no longer
+freeze the UI.
 
 ## Persistence model (`src/core/db/`)
 
@@ -259,7 +286,10 @@ and exactly one `*_backend.cpp` is compiled per OS (the other
 `make_*_backend()` declaration is never odr-used). The pure helpers are
 unit-tested off-device: Windows `netsh`/`parse`/`wifi`, Linux `nmcli`. Errors
 mirror the Rust `Result::Err(String)` as a thrown `std::runtime_error`;
-`reassert` catches them into non-fatal `(iface, message)` pairs.
+`reassert` catches them into non-fatal `(iface, message)` pairs. Every `QProcess`
+wait is **bounded** (`waitForFinished(15s)` → `kill()` + 2s grace), never
+`-1` — a stuck OS CLI can't wedge the calling thread; `run` returns empty on
+timeout, `run_checked` throws a timeout error.
 
 ## Detection feature (`src/core/detection/` + `src/app/ui/camera/shared/detection/`)
 
@@ -378,7 +408,9 @@ task only lands the storage + the capture-thread hook, not a consumer.
   `timeBeginPeriod`, so a 66 ms (15 fps) pace overshoots to ~100 ms and delivers
   ~9 fps. `CameraStream` sleeps via `precise_sleep`, a high-resolution waitable
   timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), falling back to `sleep_for`
-  off-Windows or if the timer can't be created.
+  off-Windows or if the timer can't be created. The `thread_local` timer handle
+  is held in a small RAII struct so its `CloseHandle` runs at thread exit — one
+  kernel handle per capture thread was leaking on every grid reload before.
 - **Never call `cap.set(CAP_PROP_FRAME_WIDTH/HEIGHT)` on a live GStreamer
   pipeline** — it reconfigures the pipeline caps and segfaults inside
   `gst_caps_new_simple`. The capture-resolution request is gated to USB devices;
