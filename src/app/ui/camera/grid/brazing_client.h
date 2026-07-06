@@ -1,9 +1,10 @@
 // Pushes the combined zone snapshot to the brazing backend. Lives on the GUI
 // thread; send() fires an async POST to {base_url}/api/brazing/update via
 // QNetworkAccessManager with a bounded timeout. Best-effort: a failed/slow/
-// unreachable POST is logged (throttled) and dropped — no queue, no retry (the
-// next zone change re-sends the full snapshot). The ZoneReporter marshals
-// snapshots here with common::post_to_gui.
+// unreachable POST is logged and dropped — no queue, no retry (the next zone
+// change re-sends the full snapshot). send() only runs on a stable zone change,
+// so failures are inherently infrequent and can't spin the log. The ZoneReporter
+// marshals snapshots here with common::post_to_gui.
 #pragma once
 
 #include <QObject>
