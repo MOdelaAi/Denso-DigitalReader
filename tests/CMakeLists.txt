@@ -71,6 +71,10 @@ add_executable(denso_tests
     # compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/stream_pacing.cpp
     test_safe_process.cpp
+    test_zone_assembly.cpp
+    # zone_assembly is GUI-target code but pure (OpenCV value types + core
+    # geometry, no widgets/Qt-net), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_assembly.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
