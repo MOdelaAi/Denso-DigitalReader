@@ -145,7 +145,7 @@ std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id) {
     std::vector<CameraArea> out;
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "SELECT id, camera_id, name, points FROM camera_area "
+        "SELECT id, camera_id, name, points, zone FROM camera_area "
         "WHERE camera_id = ? ORDER BY id"));
     q.addBindValue(static_cast<qlonglong>(camera_id));
     if (!q.exec()) {
@@ -157,6 +157,10 @@ std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id) {
         a.camera_id = q.value(1).toLongLong();
         a.name = q.value(2).toString().toStdString();
         a.points = parse_points(q.value(3).toString().toStdString());
+        const QVariant zv = q.value(4);
+        if (!zv.isNull()) {
+            a.zone = zv.toInt();
+        }
         out.push_back(std::move(a));
     }
     return out;
@@ -186,10 +190,13 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
     for (const CameraArea& a : areas) {
         QSqlQuery ins(db);
         ins.prepare(QStringLiteral(
-            "INSERT INTO camera_area (camera_id, name, points) VALUES (?, ?, ?)"));
+            "INSERT INTO camera_area (camera_id, name, points, zone) "
+            "VALUES (?, ?, ?, ?)"));
         ins.addBindValue(static_cast<qlonglong>(camera_id));
         ins.addBindValue(QString::fromStdString(a.name));
         ins.addBindValue(QString::fromStdString(serialize_points(a.points)));
+        ins.addBindValue(a.zone ? QVariant(*a.zone)
+                                : QVariant(QMetaType(QMetaType::Int)));
         if (!ins.exec()) {
             return rollback();
         }

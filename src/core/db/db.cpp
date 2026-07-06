@@ -15,7 +15,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 9;
+constexpr int SCHEMA_VERSION = 10;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -328,6 +328,15 @@ bool run_migrations(const QSqlDatabase& db) {
         }
         if (!run("CREATE INDEX IF NOT EXISTS idx_reading_camera_ts "
                  "ON reading(camera_id, ts_ms)")) {
+            return false;
+        }
+    }
+
+    if (version < 10) {
+        // Per-ROI reporting zone. A camera_area with a `zone` set is reported to
+        // the brazing backend under key "zone<n>"; NULL = ROI-only (confinement,
+        // no reporting). Additive; existing areas default to NULL.
+        if (!run("ALTER TABLE camera_area ADD COLUMN zone INTEGER")) {
             return false;
         }
     }

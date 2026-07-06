@@ -252,3 +252,23 @@ TEST_CASE("remove deletes the camera's areas too") {
     REQUIRE(remove(d.handle(), *id));
     REQUIRE(areas_for(d.handle(), *id).empty());
 }
+
+TEST_CASE("replace_areas round-trips the zone number", "[camera_repo]") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+
+    CameraArea a;
+    a.name = "z";
+    a.zone = 3;
+    a.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    CameraArea b;
+    b.name = "roi_only";  // zone stays nullopt
+    b.points = {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.5f, 0.8f}};
+    REQUIRE(replace_areas(d.handle(), *id, {a, b}));
+
+    const auto got = areas_for(d.handle(), *id);
+    REQUIRE(got.size() == 2);
+    CHECK(got[0].zone == 3);
+    CHECK_FALSE(got[1].zone.has_value());
+}
