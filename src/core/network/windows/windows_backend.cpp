@@ -21,13 +21,20 @@
 namespace denso::network {
 namespace {
 
+constexpr int kNetCmdTimeoutMs = 15000;  // cap a stuck netsh/ipconfig
+constexpr int kNetCmdGraceMs = 2000;     // grace after kill() before giving up
+
 /// Run one command, returning its stdout (UTF-8, lossy). Empty on spawn
 /// failure — mirrors Rust `run` (`Command::output().map(...).unwrap_or_default`).
 std::string run(const QString& cmd, const QStringList& args) {
     QProcess p;
     p.start(cmd, args);
     if (!p.waitForStarted()) return {};
-    p.waitForFinished(-1);
+    if (!p.waitForFinished(kNetCmdTimeoutMs)) {
+        p.kill();
+        p.waitForFinished(kNetCmdGraceMs);
+        return {};  // timed out — treat as no output (mirrors spawn failure)
+    }
     return QString::fromUtf8(p.readAllStandardOutput()).toStdString();
 }
 
@@ -40,7 +47,12 @@ void run_checked(const QStringList& args) {
     if (!p.waitForStarted()) {
         throw std::runtime_error("failed to spawn netsh: " + p.errorString().toStdString());
     }
-    p.waitForFinished(-1);
+    if (!p.waitForFinished(kNetCmdTimeoutMs)) {
+        p.kill();
+        p.waitForFinished(kNetCmdGraceMs);
+        throw std::runtime_error("netsh " + args.join(' ').toStdString() +
+                                 ": timed out after 15s");
+    }
     if (p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0) return;
 
     const QString err = QString::fromUtf8(p.readAllStandardError());
