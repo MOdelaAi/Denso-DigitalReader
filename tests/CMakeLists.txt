@@ -79,6 +79,9 @@ add_executable(denso_tests
     test_zone_aggregator.cpp
     # zone_aggregator is pure std (no Qt/OpenCV), so compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_aggregator.cpp
+    test_brazing_payload.cpp
+    # brazing_payload is pure std::string (no Qt/OpenCV), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/brazing_payload.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
