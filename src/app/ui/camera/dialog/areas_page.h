@@ -14,6 +14,7 @@
 class QLineEdit;
 class QListWidget;
 class QLabel;
+class QSpinBox;
 
 namespace denso::ui {
 
@@ -42,6 +43,7 @@ private:
     RoiCanvas* canvas_ = nullptr;
     QListWidget* list_ = nullptr;
     QLineEdit* name_edit_ = nullptr;
+    QSpinBox* zone_edit_ = nullptr;  // 0 = ROI-only; 1..12 = reporting zone
     QLabel* hint_ = nullptr;
     std::vector<camera::CameraArea> areas_;
 };
