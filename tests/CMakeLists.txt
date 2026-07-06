@@ -75,6 +75,9 @@ add_executable(denso_tests
     # zone_assembly is GUI-target code but pure (OpenCV value types + core
     # geometry, no widgets/Qt-net), so compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_assembly.cpp
+    test_zone_aggregator.cpp
+    # zone_aggregator is pure std (no Qt/OpenCV), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_aggregator.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
