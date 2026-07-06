@@ -8,12 +8,15 @@
 
 #include "ui/viewmodel.h"
 
+#include <QPointer>
 #include <QSqlDatabase>
 #include <QWidget>
 
 #include <string>
+#include <vector>
 
 class QPushButton;
+class QThread;
 
 namespace denso::ui {
 
@@ -24,6 +27,7 @@ class NetworkPanel : public QWidget {
 
 public:
     explicit NetworkPanel(QSqlDatabase db, QWidget* parent = nullptr);
+    ~NetworkPanel() override;
 
     /// Re-seed both cards from saved config, then refresh live status. Called by
     /// the settings dialog when the Network tab becomes visible.
@@ -43,6 +47,7 @@ private:
     // discarded); apply_net_config refreshes them.
     NetConfigUi eth_config_;
     NetConfigUi wifi_config_;
+    std::vector<QPointer<QThread>> workers_;  // outstanding async workers
 };
 
 } // namespace denso::ui

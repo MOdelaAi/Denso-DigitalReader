@@ -74,10 +74,10 @@ UI grouped by feature: the **app shell** at `ui/` root, plus `ui/common/`,
 | Path | Responsibility |
 |---|---|
 | `main.cpp` | Thin orchestrator: open DB → migrate → import legacy → reassert network → load settings → apply startup → run. |
-| `ui/common/` | **Leaf** shared dialog primitives (Qt-only, no feature deps): `dialog_chrome` (`dialog_header`), `async_runner` (`run_on_worker`/`post_to_gui`), `form_widgets` (`eyebrow`/`dim_label`/`spec_row`/`hline`). Both dialogs build on these instead of re-copying chrome. |
+| `ui/common/` | **Leaf** shared dialog primitives (Qt-only, no feature deps): `dialog_chrome` (`dialog_header`), `async_runner` (`run_on_worker` — **returns the `QThread*`** so an owner can track/`wait()` it on teardown — + `post_to_gui`), `form_widgets` (`eyebrow`/`dim_label`/`spec_row`/`hline`). Both dialogs build on these instead of re-copying chrome. |
 | `ui/theme.{h,cpp}` | Palette + theme-driven app stylesheet. |
 | `ui/mainwindow.{h,cpp}` | Root window (top bar + content); hosts settings-persistence handlers; opens the settings + camera modals. |
-| `ui/settings/settings_dialog.{h,cpp}` | Settings modal: a thin **view** — nav + 5 panels + footer. The Network page is a self-contained `ui/settings/network_panel` (`NetworkPanel`) that owns its cards, the DB-backed network apply, and the threaded scan/connect/refresh; the dialog just hosts it. |
+| `ui/settings/settings_dialog.{h,cpp}` | Settings modal: a thin **view** — nav + 5 panels + footer. The Network page is a self-contained `ui/settings/network_panel` (`NetworkPanel`) that owns its cards, the DB-backed network apply, and the threaded scan/connect/refresh; the dialog just hosts it. Each worker is tracked in `workers_` (`QPointer<QThread>`), guarded with a `QPointer<NetworkPanel>` before its GUI post, and `wait()`ed in the destructor — so a dialog closed mid-operation can't use-after-free `this`. |
 | `ui/settings/netcard.{h,cpp}` | Per-interface status + editable config + Wi-Fi scan/connect. |
 | **`ui/camera/`** | Grouped into two entry points (root) + three layers: `grid/` (live view), `dialog/` (modal), `shared/` (cross-cutting primitives). `shared/` is a leaf; `grid/` and `dialog/` depend only on it, never on each other. |
 | `ui/camera/camera_view.{h,cpp}` | **Entry point.** Main content switcher: empty state (+ Add) when 0 cameras, else the live `CameraGrid`. `release_streams()`/`reload()` free + restart capture around the modal. |
