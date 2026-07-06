@@ -26,6 +26,7 @@ add_executable(denso_tests
     test_camera_repo.cpp
     test_detection_repo.cpp
     test_reading_repo.cpp
+    test_brazing_config.cpp
     test_area_points.cpp
     test_area_geometry.cpp
     test_class_names.cpp
