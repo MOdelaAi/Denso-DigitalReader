@@ -367,6 +367,39 @@ sink's kept detections into a `Reading::value` (e.g. digit-string reconstruction
 across models) is deferred to the future logging/export feature (Spec 2) — this
 task only lands the storage + the capture-thread hook, not a consumer.
 
+## Brazing zone reporting
+
+Pushes each ROI's number to a backend as one combined JSON POST on change.
+Config lives in `src/core/brazing/config` (`BrazingConfig{enabled, base_url}` over
+the `settings` key/value table); each ROI (`camera_area`) carries a `zone` number
+(migration **v10**, nullable — NULL = ROI-only, not reported).
+
+Pipeline, all off the GUI thread until the final POST:
+
+```
+capture thread (per camera)
+  DetectionProcessor::process
+    → kept digit boxes (existing detection)
+    → group_into_zones(kept, areas, w, h)   [pure: assemble_zone_value sorts
+                                             digits left-to-right → int, per zone]
+    → ZoneReporter::on_zones(cam_id, zones) [mutex] → ZoneAggregator::observe
+         per-zone debounce (kStableFrames=5) + change detection      [pure]
+         if a stable value changed: post_to_gui(client, send(snapshot)) ──┐ queued
+GUI thread                                                                ▼
+  BrazingClient::send  → POST {base}/api/brazing/update  (async, 5 s timeout,
+                          best-effort: log-and-drop, no queue/retry)
+```
+
+The three pure units (`zone_assembly`, `zone_aggregator`, `brazing_payload`) are
+unit-tested; the structural pieces (reporter/client/wiring) are build + suite +
+on-device verified. **Delivery is best-effort, latest-value-wins**: every POST
+carries the full `{zone_no→value}` snapshot, so a lost POST is superseded by the
+next change — no outbox, no idempotency (unlike the DeepStream sibling). Lifetime
+is safe by teardown order: `CameraGrid::clear()` stops/joins every capture thread
+(so none can still call the reporter) **before** resetting `reporter_` then
+`brazing_client_`; the `post_to_gui` callback targets the client `QObject`, so Qt
+drops any queued POST for a destroyed client.
+
 ## Gotchas
 
 - **QSQLITE keeps a read cursor alive until the `QSqlQuery` is finished or
