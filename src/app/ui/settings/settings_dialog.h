@@ -13,6 +13,7 @@
 class QCheckBox;
 class QComboBox;
 class QLabel;
+class QLineEdit;
 class QListWidget;
 class QPushButton;
 class QStackedWidget;
@@ -53,6 +54,7 @@ private:
     QWidget* build_display();
     QWidget* build_system();
     QWidget* build_network();
+    QWidget* build_server();
     QWidget* build_about();
 
     QSqlDatabase db_;
@@ -75,6 +77,10 @@ private:
 
     // Network page — a self-contained widget owning its cards + async handlers.
     NetworkPanel* network_panel_ = nullptr;
+
+    // Server (brazing reporter)
+    QCheckBox* brazing_enabled_ = nullptr;
+    QLineEdit* brazing_url_ = nullptr;
 };
 
 } // namespace denso::ui
