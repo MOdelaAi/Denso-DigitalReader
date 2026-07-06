@@ -10,6 +10,7 @@
 
 #include "camera/camera.h"  // CameraArea
 #include "detection/detection.h"
+#include "ui/camera/grid/zone_reading.h"  // ZoneReading
 #include "ui/camera/shared/detection/inference_engine.h"
 #include "ui/camera/shared/detection/merge_detections.h"  // NamedDetection
 
@@ -58,6 +59,14 @@ struct ReadingSink {
                             const std::vector<NamedDetection>& kept) = 0;
 };
 
+/// Optional per-frame hook that receives the camera's assembled zone values (the
+/// brazing reporter). Same capture-thread hot-path contract as ReadingSink: the
+/// implementation MUST hand off (no blocking / no I/O inline) and return.
+struct ZoneSink {
+    virtual ~ZoneSink() = default;
+    virtual void on_zones(int64_t camera_id, const std::vector<ZoneReading>& zones) = 0;
+};
+
 /// Runs one or more detection models on each frame and draws the results. Each
 /// entry pairs a shared engine with the camera's per-class selections (class id
 /// → min confidence). Orientation is applied first (so a detection tile matches
@@ -78,7 +87,8 @@ public:
     DetectionProcessor(int degrees, double pitch, double roll,
                        std::vector<ModelRun> models,
                        std::vector<denso::camera::CameraArea> areas = {},
-                       int64_t camera_id = 0, ReadingSink* sink = nullptr);
+                       int64_t camera_id = 0, ReadingSink* sink = nullptr,
+                       ZoneSink* zone_sink = nullptr);
     QImage process(const QImage& frame) override;
 
 private:
@@ -89,6 +99,7 @@ private:
     std::vector<denso::camera::CameraArea> areas_;  // empty = whole frame
     int64_t camera_id_ = 0;
     ReadingSink* sink_ = nullptr;  // non-owning; null = no reading capture
+    ZoneSink* zone_sink_ = nullptr;  // non-owning; null = no zone reporting
 };
 
 } // namespace denso::ui

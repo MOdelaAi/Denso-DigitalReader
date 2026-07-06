@@ -1,6 +1,7 @@
 #include "ui/camera/grid/frame_processor.h"
 
 #include "camera/area_geometry.h"             // inside_any_area
+#include "ui/camera/grid/zone_assembly.h"    // group_into_zones
 #include "ui/camera/shared/frame_convert.h"  // qimage_to_mat, mat_to_qimage
 #include "ui/camera/shared/snapshot.h"       // apply_orientation
 #include "ui/camera/shared/detection/merge_detections.h"  // merge_detections
@@ -24,10 +25,11 @@ QImage OrientationProcessor::process(const QImage& frame) {
 DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
                                        std::vector<ModelRun> models,
                                        std::vector<denso::camera::CameraArea> areas,
-                                       int64_t camera_id, ReadingSink* sink)
+                                       int64_t camera_id, ReadingSink* sink,
+                                       ZoneSink* zone_sink)
     : degrees_(degrees), pitch_(pitch), roll_(roll),
       models_(std::move(models)), areas_(std::move(areas)),
-      camera_id_(camera_id), sink_(sink) {}
+      camera_id_(camera_id), sink_(sink), zone_sink_(zone_sink) {}
 
 namespace {
 // Min confidence a camera keeps for class_id, or nullopt if not selected.
@@ -87,6 +89,12 @@ QImage DetectionProcessor::process(const QImage& frame) {
                                   std::chrono::system_clock::now().time_since_epoch())
                                   .count();
         sink_->on_reading(camera_id_, ts_ms, kept);
+    }
+
+    // Zone-reporting seam (brazing): assemble the kept digits into per-zone
+    // numbers and hand them to the reporter. Costs nothing without a sink.
+    if (zone_sink_) {
+        zone_sink_->on_zones(camera_id_, group_into_zones(kept, areas_, w, h));
     }
 
     for (const NamedDetection& d : kept) {
