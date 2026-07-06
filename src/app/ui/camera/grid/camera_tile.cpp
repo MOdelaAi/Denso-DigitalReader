@@ -44,7 +44,14 @@ CameraTile::CameraTile(const QString& name, QWidget* parent)
     setMinimumSize(240, 160);
 }
 
+void CameraTile::set_frame_counter(std::shared_ptr<std::atomic<int>> counter) {
+    frame_counter_ = std::move(counter);
+}
+
 void CameraTile::set_frame(const QImage& frame) {
+    if (frame_counter_) {
+        frame_counter_->fetch_sub(1);  // consumed one queued frame
+    }
     frame_ = frame;
     meter_.tick(FpsMeter::clock::now());  // one displayed frame → update the rate
     update();

@@ -30,6 +30,7 @@ namespace denso::ui {
 namespace {
 constexpr int kDisplayIntervalMs = 66;  // ~15 fps display cap, per camera
 constexpr int kStopPollMs = 20;         // re-check stop() this often while pacing
+constexpr int kMaxInFlight = 2;         // drop-oldest: max frames queued for the GUI
 
 // Sleep for `d` with sub-millisecond accuracy. std::this_thread::sleep_for on
 // this MinGW runtime is pinned to the ~15.6 ms OS tick (and ignores
@@ -158,8 +159,12 @@ void CameraStream::run() {
                 break;  // dropped — fall through to reconnect (was: return)
             }
             backoff_ms = 0;  // a live frame resets the reconnect schedule
-            const QImage img = mat_to_qimage(frame);
-            emit frame_ready(safe_process(processor_.get(), img));
+            if (should_emit(queued_->load(), kMaxInFlight)) {
+                const QImage img = mat_to_qimage(frame);
+                queued_->fetch_add(1);
+                emit frame_ready(safe_process(processor_.get(), img));
+            }
+            // else: GUI is behind — drop this frame (drop-oldest).
 
             // Cap the display rate; chunked sleep stays responsive to stop().
             auto remaining = interval - (steady_clock::now() - t0);
