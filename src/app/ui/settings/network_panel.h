@@ -48,6 +48,7 @@ private:
     NetConfigUi eth_config_;
     NetConfigUi wifi_config_;
     std::vector<QPointer<QThread>> workers_;  // outstanding async workers
+    bool net_busy_ = false;  // an action is in flight — ignore overlapping clicks
 };
 
 } // namespace denso::ui
