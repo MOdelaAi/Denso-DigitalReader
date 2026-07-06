@@ -1,5 +1,6 @@
 #include "ui/settings/settings_dialog.h"
 
+#include "brazing/config.h"
 #include "ui/common/dialog_chrome.h"
 #include "ui/common/form_widgets.h"
 #include "ui/settings/network_panel.h"
@@ -8,6 +9,7 @@
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QScrollArea>
@@ -38,7 +40,7 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     nav_->setFixedWidth(160);
     nav_->addItems({QStringLiteral("Appearance"), QStringLiteral("Display"),
                     QStringLiteral("System"), QStringLiteral("Network"),
-                    QStringLiteral("About")});
+                    QStringLiteral("Server"), QStringLiteral("About")});
     body->addWidget(nav_, 0);
 
     stack_ = new QStackedWidget;
@@ -46,6 +48,7 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     stack_->addWidget(build_display());
     stack_->addWidget(build_system());
     stack_->addWidget(build_network());
+    stack_->addWidget(build_server());
     stack_->addWidget(build_about());
 
     auto* scroll = new QScrollArea;
@@ -147,6 +150,39 @@ QWidget* SettingsDialog::build_system() {
 QWidget* SettingsDialog::build_network() {
     network_panel_ = new NetworkPanel(db_);
     return network_panel_;
+}
+
+QWidget* SettingsDialog::build_server() {
+    auto* page = new QWidget;
+    auto* v = new QVBoxLayout(page);
+    v->setSpacing(12);
+    v->addWidget(common::eyebrow(QStringLiteral("SERVER")));
+
+    const brazing::BrazingConfig cfg = brazing::load(db_);
+
+    brazing_enabled_ = new QCheckBox(QStringLiteral("Send zone readings to server"));
+    brazing_enabled_->setChecked(cfg.enabled);
+    v->addWidget(brazing_enabled_);
+
+    auto* url_box = new QVBoxLayout;
+    url_box->setSpacing(6);
+    url_box->addWidget(common::dim_label(QStringLiteral("Server base URL")));
+    brazing_url_ = new QLineEdit(QString::fromStdString(cfg.base_url));
+    brazing_url_->setPlaceholderText(QStringLiteral("http://192.168.1.50:8098"));
+    url_box->addWidget(brazing_url_);
+    v->addLayout(url_box);
+
+    auto* save = new QPushButton(QStringLiteral("Save"));
+    save->setProperty("gold", true);
+    connect(save, &QPushButton::clicked, this, [this] {
+        brazing::BrazingConfig out;
+        out.enabled = brazing_enabled_->isChecked();
+        out.base_url = brazing_url_->text().trimmed().toStdString();
+        brazing::save(db_, out);
+    });
+    v->addWidget(save, 0, Qt::AlignLeft);
+    v->addStretch(1);
+    return page;
 }
 
 QWidget* SettingsDialog::build_about() {

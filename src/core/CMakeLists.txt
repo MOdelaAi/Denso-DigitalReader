@@ -24,6 +24,7 @@ add_library(denso_core STATIC
     detection/class_names.cpp
     detection/repo.cpp
     reading/repo.cpp
+    brazing/config.cpp
     ui/convert.cpp
 )
 target_include_directories(denso_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

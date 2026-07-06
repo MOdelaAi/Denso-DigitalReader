@@ -26,6 +26,7 @@ add_executable(denso_tests
     test_camera_repo.cpp
     test_detection_repo.cpp
     test_reading_repo.cpp
+    test_brazing_config.cpp
     test_area_points.cpp
     test_area_geometry.cpp
     test_class_names.cpp
@@ -71,6 +72,16 @@ add_executable(denso_tests
     # compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/stream_pacing.cpp
     test_safe_process.cpp
+    test_zone_assembly.cpp
+    # zone_assembly is GUI-target code but pure (OpenCV value types + core
+    # geometry, no widgets/Qt-net), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_assembly.cpp
+    test_zone_aggregator.cpp
+    # zone_aggregator is pure std (no Qt/OpenCV), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_aggregator.cpp
+    test_brazing_payload.cpp
+    # brazing_payload is pure std::string (no Qt/OpenCV), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/brazing_payload.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)

@@ -44,6 +44,11 @@ add_executable(denso WIN32
     ui/camera/grid/camera_grid.cpp
     ui/camera/grid/camera_stream.cpp
     ui/camera/grid/stream_pacing.cpp
+    ui/camera/grid/zone_assembly.cpp
+    ui/camera/grid/zone_aggregator.cpp
+    ui/camera/grid/brazing_payload.cpp
+    ui/camera/grid/brazing_client.cpp
+    ui/camera/grid/zone_reporter.cpp
     ui/camera/grid/camera_tile.cpp
     ui/camera/grid/frame_processor.cpp
     ui/camera/grid/fps_meter.cpp

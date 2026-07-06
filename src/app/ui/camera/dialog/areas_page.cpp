@@ -8,7 +8,10 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QVBoxLayout>
+
+#include <optional>
 
 #include <utility>
 
@@ -48,10 +51,24 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     });
     side->addWidget(name_edit_);
 
+    side->addWidget(dim_label(QStringLiteral("Report as zone (0 = none)")));
+    zone_edit_ = new QSpinBox;
+    zone_edit_->setRange(0, 12);
+    connect(zone_edit_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            [this](int z) {
+                const int row = list_->currentRow();
+                if (row >= 0 && row < static_cast<int>(areas_.size())) {
+                    auto& a = areas_[static_cast<size_t>(row)];
+                    a.zone = (z == 0) ? std::optional<int>{} : std::optional<int>{z};
+                }
+            });
+    side->addWidget(zone_edit_);
+
     auto* new_btn = new QPushButton(QStringLiteral("+ New area"));
     connect(new_btn, &QPushButton::clicked, this, [this] {
         list_->setCurrentRow(-1);
         name_edit_->clear();
+        zone_edit_->setValue(0);
         canvas_->clear();
         canvas_->setFocus();
     });
@@ -66,6 +83,7 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
             refresh_list();
             canvas_->clear();
             name_edit_->clear();
+            zone_edit_->setValue(0);
         }
     });
     side->addWidget(del_btn);
@@ -102,6 +120,7 @@ void CameraAreasPage::load(std::vector<camera::CameraArea> areas) {
     areas_ = std::move(areas);
     refresh_list();
     name_edit_->clear();
+    zone_edit_->setValue(0);
     canvas_->clear();
     canvas_->setFocus();
 }
@@ -127,6 +146,7 @@ void CameraAreasPage::select_area(int row) {
     }
     const camera::CameraArea& a = areas_[static_cast<size_t>(row)];
     name_edit_->setText(QString::fromStdString(a.name));
+    zone_edit_->setValue(a.zone.value_or(0));
     canvas_->set_polygon(a.points);
 }
 

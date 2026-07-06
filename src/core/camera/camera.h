@@ -59,6 +59,7 @@ struct CameraArea {
     int64_t id = 0;
     int64_t camera_id = 0;  // FK → camera.id
     std::string name;
+    std::optional<int> zone;  // 1..12 reporting zone, or nullopt (ROI-only)
     std::vector<Point> points;
 };
 
