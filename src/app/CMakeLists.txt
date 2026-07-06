@@ -43,6 +43,7 @@ add_executable(denso WIN32
     # camera — live-view grid internals
     ui/camera/grid/camera_grid.cpp
     ui/camera/grid/camera_stream.cpp
+    ui/camera/grid/stream_pacing.cpp
     ui/camera/grid/camera_tile.cpp
     ui/camera/grid/frame_processor.cpp
     ui/camera/grid/fps_meter.cpp
