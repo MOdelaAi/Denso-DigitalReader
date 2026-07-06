@@ -73,7 +73,7 @@ UI grouped by feature: the **app shell** at `ui/` root, plus `ui/common/`,
 
 | Path | Responsibility |
 |---|---|
-| `main.cpp` | Thin orchestrator: open DB → migrate → import legacy → reassert network → load settings → apply startup → run. |
+| `main.cpp` | Thin orchestrator: open DB → migrate → import legacy → sync models → load settings → apply startup → run. Network **reassert** is deferred to the first event-loop tick (`QTimer::singleShot(0, …)`, best-effort/exceptions swallowed) so a slow/stuck CLI can't keep the window from appearing. |
 | `ui/common/` | **Leaf** shared dialog primitives (Qt-only, no feature deps): `dialog_chrome` (`dialog_header`), `async_runner` (`run_on_worker` — **returns the `QThread*`** so an owner can track/`wait()` it on teardown — + `post_to_gui`), `form_widgets` (`eyebrow`/`dim_label`/`spec_row`/`hline`). Both dialogs build on these instead of re-copying chrome. |
 | `ui/theme.{h,cpp}` | Palette + theme-driven app stylesheet. |
 | `ui/mainwindow.{h,cpp}` | Root window (top bar + content); hosts settings-persistence handlers; opens the settings + camera modals. |
