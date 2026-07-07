@@ -51,15 +51,15 @@ A thin orchestrator:
    by the backend's `QProcess` timeout) can no longer keep startup from painting.
 6. `settings::load` seeds an in-memory `std::shared_ptr<Settings>`.
 7. `main` hands off to `ui::launch(app, conn, state)` (`src/app/ui/startup.cpp`),
-   which builds the shared `EngineRegistry` + a `WarmupState` (owns the warm-up
-   worker thread), then **immediately** builds `MainWindow` (injecting the
-   registry + `WarmupState`), calls `MainWindow::apply_startup` + `show()`, and
-   enters `QApplication::exec()`. Warm-up runs in the **background**: once the
-   window is built (so `CameraGrid` has subscribed), `WarmupState::start()` warms
-   every `models/*.onnx` on the worker, emitting `model_ready(file)` per model and
-   `finished()` at the end. `CameraGrid` starts model-less/ready cameras at once
-   and each pending detection camera as its models come ready — no blocking
-   splash. (The old `StartupScreen` splash is retired.)
+   which builds the shared `EngineRegistry`, then picks the launch UX via
+   `ui/startup_mode`'s `cold_start_needs_splash`. **Cold** (models present, no
+   cached `*.engine`): show the `StartupScreen` splash, warm every `models/*.onnx`
+   on the worker while it animates, and on `finished` build + show `MainWindow`
+   (with `warmup = nullptr`, so `CameraGrid` starts every camera immediately on
+   cache-hits). **Warm** (engine cached): build + show `MainWindow` immediately
+   with a `WarmupState`, then `WarmupState::start()` warms in the background and
+   `CameraGrid` starts model-less/ready cameras at once and each pending detection
+   camera as its models come ready — no splash.
 
 `Db` (an `optional<Db>` in `main`) outlives the window, so the connection it
 hands the UI stays valid for the whole run.
@@ -463,13 +463,14 @@ object (it does not rely on transitive `QNetworkAccessManager`/reply ownership).
   in the pipeline (`videoscale`), not `VideoCapture::set`.
 - **The TensorRT EP's first-run engine build is minutes-long and
   non-interruptible.** It must be triggered from `EngineRegistry::warm_up()` on
-  the warm-up worker thread (driven by `ui/warmup_state`, in the background while
-  the window is already shown) — never lazily on a capture thread, which froze the
-  UI and blocked stream `join()` on teardown (the reason TensorRT was dropped once
-  before it was re-added behind the warm-up). Startup is UI-first: a detection
-  camera's capture thread is created only after its models finish warming, so
-  `get()` on that path is a cache-hit, never a build. Later runs load the cached
-  engine from `models/trt_cache/`.
+  the warm-up worker thread — never lazily on a capture thread, which froze the UI
+  and blocked stream `join()` on teardown (the reason TensorRT was dropped once
+  before it was re-added behind the warm-up). Startup splits by whether that build
+  is needed (`ui/startup_mode`): a **cold** start warms behind the blocking
+  `StartupScreen` splash before the window (and any capture thread) exists; a
+  **warm** restart is UI-first, creating each detection capture thread only after
+  its models finish warming so `get()` there is a cache-hit. Later runs load the
+  cached engine from `models/trt_cache/`.
 - **IP-camera latency depends on the GStreamer decode plugins being installed.**
   Without them `cv::CAP_GSTREAMER` fails to open and `CameraStream` silently
   falls back to the buffering FFMPEG backend, and RTSP lag returns — install the
