@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <mutex>
 
 namespace denso::ui {
 
 InferenceEngine* EngineRegistry::get(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = engines_.find(filename);
     if (it == engines_.end()) {
         auto eng = std::make_unique<OrtEngine>(models_dir_ + "/" + filename,
@@ -21,7 +23,8 @@ InferenceEngine* EngineRegistry::get(const std::string& filename) {
     return (e && e->ok()) ? e : nullptr;
 }
 
-void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model) {
+void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model,
+                             std::function<void(const std::string&)> on_ready) {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::is_directory(models_dir_, ec)) {
@@ -58,6 +61,9 @@ void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model) {
         if (InferenceEngine* e = get(filename)) {
             e->infer(blank);  // build/load the engine + warm kernels; result discarded
             qInfo().noquote() << "[warmup] ready" << name;
+            if (on_ready) {
+                on_ready(filename);
+            }
         } else {
             qWarning().noquote() << "[warmup] failed to load" << name;
         }
