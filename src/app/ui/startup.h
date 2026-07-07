@@ -1,6 +1,7 @@
-// Startup orchestration: show the StartupScreen, warm the detection engines on
-// a background thread, then build and show MainWindow with the pre-warmed,
-// shared EngineRegistry injected. Keeps main.cpp a thin orchestrator.
+// Startup orchestration: build + show MainWindow immediately with the shared
+// EngineRegistry injected, then start warming the detection engines on a
+// background thread (WarmupState). CameraGrid starts each camera as its models
+// come ready. Keeps main.cpp a thin orchestrator.
 #pragma once
 
 #include "settings/settings.h"
