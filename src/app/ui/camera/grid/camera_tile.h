@@ -34,6 +34,10 @@ public:
     /// consumed. Optional — a tile without one just never decrements.
     void set_frame_counter(std::shared_ptr<std::atomic<int>> counter);
 
+    /// Show a "Preparing model…" placeholder while this camera's detection model
+    /// warms in the background. Cleared once the stream is attached (set_status).
+    void set_preparing(bool on);
+
 public slots:
     void set_frame(const QImage& frame);
     void set_status(int status);  // CameraStream::Status as int
@@ -47,6 +51,7 @@ private:
     QString name_;
     QImage frame_;
     int status_ = 0;  // Connecting
+    bool preparing_ = false;  // true = model still warming, no stream yet
     std::vector<camera::CameraArea> areas_;
     FpsMeter meter_;  // real live fps from frame arrivals
     std::shared_ptr<std::atomic<int>> frame_counter_;  // null = no backpressure

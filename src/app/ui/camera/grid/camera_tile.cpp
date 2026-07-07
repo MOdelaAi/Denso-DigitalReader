@@ -57,7 +57,13 @@ void CameraTile::set_frame(const QImage& frame) {
     update();
 }
 
+void CameraTile::set_preparing(bool on) {
+    preparing_ = on;
+    update();
+}
+
 void CameraTile::set_status(int status) {
+    preparing_ = false;  // a real stream is now driving this tile
     status_ = status;
     if (static_cast<CameraStream::Status>(status) != CameraStream::Status::Live) {
         meter_.reset();  // don't carry a stale rate across an offline gap
@@ -84,6 +90,13 @@ void CameraTile::paintEvent(QPaintEvent*) {
         const QRectF img(rect());
         p.drawImage(img, frame_);
         draw_areas(p, img);
+    } else if (preparing_) {
+        // Model still warming on the background worker — no stream yet.
+        p.setPen(kFaint);
+        QFont mf = p.font();
+        mf.setPointSize(16);
+        p.setFont(mf);
+        p.drawText(rect(), Qt::AlignCenter, QStringLiteral("Preparing model…"));
     } else {
         p.setPen(kFaint);
         QFont gf = p.font();
@@ -92,8 +105,12 @@ void CameraTile::paintEvent(QPaintEvent*) {
         p.drawText(rect(), Qt::AlignCenter, QStringLiteral("📷"));
     }
 
-    // Overlays: name (top-left) + status dot & label (top-right).
-    const StatusLook look = look_for(status_);
+    // Overlays: name (top-left) + status dot & label (top-right). While preparing
+    // there is no stream, so show a matching "Preparing…" label instead of the
+    // default (Connecting) status word.
+    const StatusLook look = preparing_
+        ? StatusLook{QColor(250, 204, 21), QStringLiteral("Preparing…")}
+        : look_for(status_);
     p.setPen(kName);
     p.drawText(rect().adjusted(10, 8, -10, 0), Qt::AlignTop | Qt::AlignLeft, name_);
 
