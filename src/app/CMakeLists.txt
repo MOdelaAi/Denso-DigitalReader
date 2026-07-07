@@ -14,6 +14,7 @@ add_executable(denso WIN32
     ui/mainwindow.cpp
     ui/startup_screen.cpp
     ui/warmup_worker.cpp
+    ui/warmup_state.cpp
     ui/startup.cpp
     # common dialog primitives (leaf — used by every dialog)
     ui/common/form_widgets.cpp
