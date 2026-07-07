@@ -86,7 +86,7 @@ void CameraGrid::reload() {
     // Brazing zone reporting: when enabled, a single machine-wide ZoneReporter
     // collects every camera's assembled zones and POSTs the combined snapshot on
     // change. The reporter is called from capture threads; its callback hops to
-    // the GUI thread (post_to_gui) where the BrazingClient lives.
+    // the GUI thread (post_to_gui) where the BrazingReporter lives.
     const brazing::BrazingConfig bcfg = brazing::load(db_);
     if (bcfg.enabled && !bcfg.base_url.empty()) {
         brazing_reporter_ = std::make_unique<BrazingReporter>(

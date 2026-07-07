@@ -1,5 +1,6 @@
 #include "ui/camera/grid/brazing_reporter.h"
 
+#include <QPointer>
 #include <QTimer>
 
 #include <utility>
@@ -25,13 +26,17 @@ void BrazingReporter::apply(const RetryAction& action) {
     switch (action.kind) {
         case RetryAction::Kind::None:
             return;
-        case RetryAction::Kind::Send:
-            transport_->post(action.snapshot, [this](bool ok) {
-                // Back on the GUI thread (BrazingClient invokes done from the
-                // reply handler, which runs on the GUI thread).
-                apply(policy_.on_result(ok));
+        case RetryAction::Kind::Send: {
+            // done() runs later on the GUI thread (BrazingClient invokes it from
+            // the reply handler). Guard with a QPointer so a POST completing after
+            // this reporter is torn down can't call into a destroyed object —
+            // don't rely on transitive QNAM/reply ownership for lifetime safety.
+            QPointer<BrazingReporter> self(this);
+            transport_->post(action.snapshot, [self](bool ok) {
+                if (self) self->apply(self->policy_.on_result(ok));
             });
             return;
+        }
         case RetryAction::Kind::ArmRetry:
             retry_timer_->start(action.delay_ms);
             return;
