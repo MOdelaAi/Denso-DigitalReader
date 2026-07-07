@@ -42,8 +42,9 @@ queue of distinct payloads.
   GUI process; on app restart it is dropped and live detection repopulates the
   current values within seconds. No DB, no migration.
 - **Retry cadence:** exponential backoff with a cap — 1s → ×2 → … → 30s, reset
-  to the fast start on success **or** when a new snapshot arrives. Reuses the
-  existing pure `next_backoff_ms` from `stream_pacing`.
+  to the fast start on success **or** when a new snapshot arrives. Same shape as
+  `stream_pacing`'s `next_backoff_ms`, but that helper caps at 10s; the 30s cap
+  is computed inside the pure retry policy (see below) rather than reusing it.
 - **UI:** silent background. No new widget; one throttled `qWarning` per failed
   attempt (as today). Delivery is observable on the `test-server` console.
 - **Failure classification:** any network error, timeout, **or** non-2xx is
@@ -81,10 +82,24 @@ or pending state. Empty `base_url` → `done(false)` immediately (or the coordin
 skips it — decided at plan time; a disabled reporter is not wired at all, as
 today).
 
-### 3. `BrazingReporter` (new, GUI-thread `QObject`) — `brazing_reporter.{h,cpp}`
+### 3a. `BrazingRetryPolicy` (pure, unit-tested) — `brazing_retry_policy.{h,cpp}`
 
-The **retry coordinator**. Owns the pending snapshot, a single-shot `QTimer`,
-and the backoff counter; drives a `BrazingTransport`.
+The retry **state machine**, extracted as pure std (no Qt) so it unit-tests like
+`ZoneAggregator`. Holds `pending_` / `delivered_` / in-flight snapshot + a bool,
+and the backoff counter (1s start, ×2, 30s cap, computed here). Three event
+methods each return a `RetryAction{ Kind{None,Send,ArmRetry}, snapshot, delay_ms }`
+telling the shell what to do: `submit(snapshot)`, `on_result(bool ok)`,
+`on_retry_tick()`. The **single-flight + latest-wins** invariant lives here (a
+`maybe_send()` helper only yields `Send` when nothing is in flight and
+`pending_ != delivered_`).
+
+### 3b. `BrazingReporter` (new, GUI-thread `QObject` shell) — `brazing_reporter.{h,cpp}`
+
+The thin **coordinator shell** (like `ZoneReporter`: no unit test, covered by the
+integration smoke). Owns a `BrazingRetryPolicy`, a single-shot `QTimer`, and a
+`BrazingTransport`; it just executes the policy's `RetryAction`s (Send → call the
+transport; ArmRetry → start the timer for `delay_ms`) and feeds transport results
++ timer ticks back into the policy.
 
 State:
 - `pending_` — the latest snapshot we want the server to have (`std::map<int,int>`).
@@ -150,19 +165,19 @@ capture threads → ZoneReporter (mutex + ZoneAggregator)   [unchanged]
 
 ## Testing & verification
 
-- **Unit (Catch2 + `QCoreApplication`):** `BrazingReporter` driven by a fake
-  `BrazingTransport` whose `done` is called synchronously with a scripted
-  ok/fail sequence:
+- **Unit (Catch2, pure — no Qt event loop):** `BrazingRetryPolicy` driven by a
+  scripted `submit` / `on_result(ok)` / `on_retry_tick` sequence, asserting the
+  returned `RetryAction`s:
   - fail → pending retained; retry re-sends the same snapshot.
   - `submit` of a new snapshot while failing → next send carries the merged
     latest (the `note.txt` 3-step example, asserted end to end).
   - success → `last_delivered_` advances; no further send when idle.
-  - new `submit` mid-flight → after the in-flight `done(ok)`, the newer snapshot
-    is sent (stale success does not mark it delivered).
-  - backoff sequence via the pure `next_backoff_ms` (already unit-tested) — assert
-    reset on success / new value.
-  - The retry timer path exercised with a short interval + a brief event-loop
-    spin (or a `retry_now()` test seam) — decided at plan time.
+  - new `submit` mid-flight → after the in-flight `on_result(ok)`, the newer
+    snapshot is sent (stale success does not mark it delivered).
+  - backoff sequence: `on_result(false)` returns `ArmRetry` with 1s, 2s, 4s … 30s
+    (cap); reset to 1s on the next success or `submit`.
+  - `on_retry_tick()` re-sends the current `pending_` when not in flight, else
+    `None` — tested directly (pure, no timer/event loop).
 - **Build gate:** MSYS2 UCRT64 — `cmake --build build` clean, `ctest` green.
 - **Integration smoke:** point `base_url` at `test-server`
   (`d:\workspace\test-server`, `python server.py`); change a zone; stop the
