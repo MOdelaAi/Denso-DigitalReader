@@ -8,6 +8,10 @@ BrazingRetryPolicy::BrazingRetryPolicy(int start_ms, int cap_ms)
     : start_ms_(start_ms), cap_ms_(cap_ms) {}
 
 RetryAction BrazingRetryPolicy::maybe_send() {
+    // pending_ == delivered_ means "the server already has the latest" — nothing
+    // to send. The initial state (both empty) is therefore idle, and a genuinely
+    // empty snapshot is a no-op; ZoneAggregator only emits a non-empty snapshot
+    // on a real change, so the empty case never arises in practice.
     if (in_flight_ || pending_ == delivered_) {
         return {};  // Kind::None
     }

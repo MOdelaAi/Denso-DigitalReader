@@ -100,3 +100,12 @@ TEST_CASE("retry tick with nothing pending is a no-op") {
     p.on_result(true);                    // delivered, idle
     REQUIRE(p.on_retry_tick().kind == Kind::None);
 }
+
+TEST_CASE("retry tick while a send is in flight is a no-op") {
+    BrazingRetryPolicy p;
+    REQUIRE(p.submit(Snap{{1, 1}}).kind == Kind::Send);  // in flight
+    // A stale retry timer fires after a fresh send already started -> no second
+    // concurrent POST (single-flight).
+    REQUIRE(p.on_retry_tick().kind == Kind::None);
+    REQUIRE(p.on_result(true).kind == Kind::None);       // delivered, idle
+}
