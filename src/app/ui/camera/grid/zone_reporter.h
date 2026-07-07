@@ -2,7 +2,7 @@
 // zones here (from capture threads), so it locks a mutex around a ZoneAggregator.
 // When a zone's stable value changes, it invokes on_snapshot with the full
 // {zone_no -> value} map — the wiring passes a callback that marshals to the GUI
-// thread's BrazingClient (post_to_gui), so capture threads never touch the
+// thread's BrazingReporter (post_to_gui), so capture threads never touch the
 // network.
 #pragma once
 

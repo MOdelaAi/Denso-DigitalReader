@@ -1,15 +1,15 @@
-// Pushes the combined zone snapshot to the brazing backend. Lives on the GUI
-// thread; send() fires an async POST to {base_url}/api/brazing/update via
-// QNetworkAccessManager with a bounded timeout. Best-effort: a failed/slow/
-// unreachable POST is logged and dropped — no queue, no retry (the next zone
-// change re-sends the full snapshot). send() only runs on a stable zone change,
-// so failures are inherently infrequent and can't spin the log. The ZoneReporter
-// marshals snapshots here with common::post_to_gui.
+// Transport for the brazing backend: one async POST of the combined zone
+// snapshot to {base_url}/api/brazing/update via QNetworkAccessManager, with a
+// bounded timeout. Reports the outcome via the `done` callback — it holds NO
+// retry/pending state (the BrazingReporter owns that). Lives on the GUI thread.
 #pragma once
+
+#include "ui/camera/grid/brazing_transport.h"
 
 #include <QObject>
 #include <QString>
 
+#include <functional>
 #include <map>
 #include <string>
 
@@ -17,14 +17,16 @@ class QNetworkAccessManager;
 
 namespace denso::ui {
 
-class BrazingClient : public QObject {
+class BrazingClient : public QObject, public BrazingTransport {
     Q_OBJECT
 
 public:
     explicit BrazingClient(std::string base_url, QObject* parent = nullptr);
 
-    /// POST {"zone<n>": value, ...}. No-op if base_url is empty.
-    void send(const std::map<int, int>& zones);
+    /// POST {"zone<n>": value, ...}. Calls done(false) immediately if base_url
+    /// is empty. done(ok): ok == HTTP 2xx.
+    void post(const std::map<int, int>& zones,
+              std::function<void(bool)> done) override;
 
 private:
     QString base_url_;

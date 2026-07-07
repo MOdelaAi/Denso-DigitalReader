@@ -19,7 +19,7 @@ namespace denso::ui {
 
 class CameraStream;
 class CameraTile;
-class BrazingClient;
+class BrazingReporter;
 class ZoneReporter;
 
 class CameraGrid : public QWidget {
@@ -47,8 +47,8 @@ private:
     std::vector<CameraStream*> streams_;
     std::vector<CameraTile*> tiles_;
     std::shared_ptr<EngineRegistry> engines_;
-    std::unique_ptr<BrazingClient> brazing_client_;  // GUI-thread HTTP sender
-    std::unique_ptr<ZoneReporter> reporter_;         // shared ZoneSink (machine)
+    std::unique_ptr<BrazingReporter> brazing_reporter_;  // GUI-thread reliable sender
+    std::unique_ptr<ZoneReporter> reporter_;             // shared ZoneSink (machine)
     int rows_ = 0;  // current grid dims (0 = empty); drives the letterbox aspect
     int cols_ = 0;
 };

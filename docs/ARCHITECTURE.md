@@ -384,21 +384,28 @@ capture thread (per camera)
                                              digits left-to-right → int, per zone]
     → ZoneReporter::on_zones(cam_id, zones) [mutex] → ZoneAggregator::observe
          per-zone debounce (kStableFrames=5) + change detection      [pure]
-         if a stable value changed: post_to_gui(client, send(snapshot)) ──┐ queued
-GUI thread                                                                ▼
-  BrazingClient::send  → POST {base}/api/brazing/update  (async, 5 s timeout,
-                          best-effort: log-and-drop, no queue/retry)
+         if a stable value changed: post_to_gui(reporter, submit(snapshot)) ─┐ queued
+GUI thread                                                                  ▼
+  BrazingReporter::submit → BrazingRetryPolicy decides →
+     Send  → BrazingClient::post → POST {base}/api/brazing/update (async, 5 s timeout)
+              → done(ok): 2xx → delivered; else arm retry QTimer (1s→×2→30s cap)
+     ArmRetry → retry timer → re-send the latest pending snapshot
 ```
 
-The three pure units (`zone_assembly`, `zone_aggregator`, `brazing_payload`) are
-unit-tested; the structural pieces (reporter/client/wiring) are build + suite +
-on-device verified. **Delivery is best-effort, latest-value-wins**: every POST
-carries the full `{zone_no→value}` snapshot, so a lost POST is superseded by the
-next change — no outbox, no idempotency (unlike the DeepStream sibling). Lifetime
-is safe by teardown order: `CameraGrid::clear()` stops/joins every capture thread
-(so none can still call the reporter) **before** resetting `reporter_` then
-`brazing_client_`; the `post_to_gui` callback targets the client `QObject`, so Qt
-drops any queued POST for a destroyed client.
+The four pure units (`zone_assembly`, `zone_aggregator`, `brazing_payload`,
+`brazing_retry_policy`) are unit-tested; the structural pieces
+(reporter/client/wiring) are build + suite + on-device verified. **Delivery is
+reliable, latest-value-wins**: every POST carries the full `{zone_no→value}`
+snapshot, and `BrazingReporter` keeps retrying the newest snapshot (single-flight,
+exponential backoff) until the server 2xx-acks it — so a downed server no longer
+drops the last value. New readings coalesce into the pending snapshot in real
+time; retry state is in-memory only (no outbox, no idempotency, no persistence —
+unlike the DeepStream sibling). Lifetime is safe by teardown order:
+`CameraGrid::clear()` stops/joins every capture thread (so none can still call the
+reporter) **before** resetting `reporter_` then `brazing_reporter_`; and each
+in-flight POST's completion callback is `QPointer`-guarded, so a POST that finishes
+after the reporter is torn down is dropped rather than calling into a destroyed
+object (it does not rely on transitive `QNetworkAccessManager`/reply ownership).
 
 ## Gotchas
 
