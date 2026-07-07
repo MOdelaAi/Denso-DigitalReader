@@ -13,8 +13,9 @@
 namespace denso::ui {
 
 CameraView::CameraView(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
-                       QWidget* parent)
-    : QWidget(parent), db_(std::move(db)), engines_(std::move(engines)) {
+                       WarmupState* warmup, QWidget* parent)
+    : QWidget(parent), db_(std::move(db)), engines_(std::move(engines)),
+      warmup_(warmup) {
     setObjectName(QStringLiteral("mainContent"));  // content-panel background
 
     auto* root = new QVBoxLayout(this);
@@ -69,7 +70,7 @@ CameraView::CameraView(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
     stack_->addWidget(empty);  // index 0
 
     // ── Page 1: live grid ──────────────────────────────────────────────────
-    grid_ = new CameraGrid(db_, engines_);
+    grid_ = new CameraGrid(db_, engines_, warmup_);
     stack_->addWidget(grid_);  // index 1
 
     reload();

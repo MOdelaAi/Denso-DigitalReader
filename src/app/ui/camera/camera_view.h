@@ -17,13 +17,14 @@ class QStackedWidget;
 namespace denso::ui {
 
 class CameraGrid;
+class WarmupState;
 
 class CameraView : public QWidget {
     Q_OBJECT
 
 public:
     explicit CameraView(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
-                        QWidget* parent = nullptr);
+                        WarmupState* warmup, QWidget* parent = nullptr);
 
     /// Re-read the camera list, switch empty-state vs grid, and (re)start streams.
     void reload();
@@ -39,6 +40,7 @@ private:
     QStackedWidget* stack_ = nullptr;
     CameraGrid* grid_ = nullptr;
     std::shared_ptr<EngineRegistry> engines_;
+    WarmupState* warmup_ = nullptr;
 };
 
 } // namespace denso::ui

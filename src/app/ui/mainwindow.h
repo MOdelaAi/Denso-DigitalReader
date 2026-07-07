@@ -19,13 +19,15 @@ class SettingsDialog;
 class CameraDialog;
 class CameraView;
 class EngineRegistry;
+class WarmupState;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
     MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> state,
-               std::shared_ptr<EngineRegistry> engines, QWidget* parent = nullptr);
+               std::shared_ptr<EngineRegistry> engines, WarmupState* warmup,
+               QWidget* parent = nullptr);
 
     /// Populate read-only fields (version, hardware), seed the persisted
     /// settings into the window + dialog, and apply the theme — the Qt port of
@@ -60,6 +62,7 @@ private:
     SettingsDialog* settings_ = nullptr;
     CameraDialog* camera_ = nullptr;
     CameraView* camera_view_ = nullptr;
+    WarmupState* warmup_ = nullptr;
     bool fitted_ = false;  // first-show re-fit has run
 };
 
