@@ -1,10 +1,11 @@
 // One shared inference engine per distinct model file. Cameras that attach the
 // same model reuse a single Ort::Session (loaded lazily on first request), so
 // N cameras on the same model pay for one load, not N. Owns the engines; hand
-// out non-owning pointers. Not internally synchronized: warm_up() builds the
-// engines on the startup worker thread (see ui/startup), which is joined before
-// anything queries them; get() is then called only from the UI thread
-// (CameraGrid::reload), before the capture threads start.
+// out non-owning pointers (never erased, so the pointers stay valid). get() is
+// mutex-guarded: it is called from both the warm-up worker (during warm_up) and
+// the GUI thread (starting a camera whose models are ready), so the map must be
+// synchronized. infer() holds the raw engine pointer and never touches the
+// registry, so there is no per-frame locking.
 #pragma once
 
 #include "ui/camera/shared/detection/inference_engine.h"
@@ -12,6 +13,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <functional>
 
@@ -26,18 +28,19 @@ public:
     /// failed to load. Cached across calls.
     InferenceEngine* get(const std::string& filename);
 
-    /// Load AND warm (one blank inference) every *.onnx in models_dir. Call once
-    /// at startup, before the capture threads run, so the first real frame
-    /// doesn't stall on CUDA kernel init / allocation. Engines are cached, so
-    /// cameras reuse the already-warm sessions. Blocking; logs per model.
-    /// `on_model`, if set, is called with each model's filename just before it is
-    /// prepared — used to drive a startup progress display.
-    void warm_up(std::function<void(const std::string&)> on_model = {});
+    /// Load AND warm (one blank inference) every *.onnx in models_dir, on the
+    /// warm-up worker thread. `on_model(filename)` fires just before each model is
+    /// prepared (progress display); `on_ready(filename)` fires just after it is
+    /// successfully loaded + warmed (so the UI can start cameras that use it). A
+    /// model that fails to load fires neither on_ready nor a start. Blocking.
+    void warm_up(std::function<void(const std::string&)> on_model = {},
+                 std::function<void(const std::string&)> on_ready = {});
 
 private:
     std::string models_dir_;
     std::string cache_dir_;
     std::map<std::string, std::unique_ptr<OrtEngine>> engines_;
+    std::mutex mutex_;
 };
 
 } // namespace denso::ui

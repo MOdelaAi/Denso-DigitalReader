@@ -29,8 +29,10 @@
 namespace denso::ui {
 
 MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> state,
-                       std::shared_ptr<EngineRegistry> engines, QWidget* parent)
-    : QMainWindow(parent), db_(std::move(db)), state_(std::move(state)) {
+                       std::shared_ptr<EngineRegistry> engines, WarmupState* warmup,
+                       QWidget* parent)
+    : QMainWindow(parent), db_(std::move(db)), state_(std::move(state)),
+      warmup_(warmup) {
     setWindowTitle(QStringLiteral("Denso Digital Reader"));
     setWindowIcon(QIcon(QStringLiteral(":/icon.png")));  // title bar + taskbar
 
@@ -74,7 +76,7 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     });
 
     // Main content area: the camera view (empty state / configured count).
-    camera_view_ = new CameraView(db_, engines);
+    camera_view_ = new CameraView(db_, engines, warmup_);
     connect(camera_view_, &CameraView::add_camera_requested, this, &MainWindow::open_camera);
     col->addWidget(camera_view_, 1);
 

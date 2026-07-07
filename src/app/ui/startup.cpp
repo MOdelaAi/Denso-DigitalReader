@@ -2,12 +2,10 @@
 
 #include "ui/camera/shared/detection/engine_registry.h"
 #include "ui/mainwindow.h"
-#include "ui/startup_screen.h"
-#include "ui/warmup_worker.h"
+#include "ui/warmup_state.h"
 
 #include <QApplication>
 #include <QCoreApplication>
-#include <QThread>
 
 #include <memory>
 #include <string>
@@ -20,43 +18,21 @@ int launch(QApplication& app, QSqlDatabase db,
     auto engines = std::make_shared<EngineRegistry>(dir + "/models",
                                                     dir + "/models/trt_cache");
 
-    auto splash = std::make_unique<StartupScreen>(state->dark);
-    splash->show();
-    splash->raise();
-    splash->activateWindow();  // claim the foreground at launch
+    // Warm-up runs in the background; the window shows immediately. WarmupState
+    // owns the worker thread and outlives app.exec() (it lives in this scope).
+    WarmupState warmup(engines);
 
-    auto* thread = new QThread;
-    auto* worker = new WarmupWorker(engines);
-    worker->moveToThread(thread);
+    // Build the window first (it subscribes CameraGrid to warmup signals in its
+    // ctor), THEN start warming — so any model_ready/finished the worker queues
+    // is delivered after the grid has connected (and is_ready() covers anything
+    // that raced ahead).
+    MainWindow window(db, state, engines, &warmup);
+    window.apply_startup();
+    window.show();
+    window.raise();
+    window.activateWindow();  // claim the foreground at launch
 
-    // Built on the main thread once warm-up finishes; must outlive app.exec(),
-    // so it lives in this scope and is populated by the finished handler.
-    std::unique_ptr<MainWindow> window;
-
-    QObject::connect(thread, &QThread::started, worker, &WarmupWorker::run);
-    QObject::connect(worker, &WarmupWorker::progress, splash.get(),
-                     &StartupScreen::set_status);
-    QObject::connect(worker, &WarmupWorker::finished, &app,
-                     [&window, &splash, thread, worker, db, state, engines]() {
-                         thread->quit();
-                         thread->wait();  // warm-up done before we build the grid
-                         delete worker;
-                         delete thread;
-
-                         window = std::make_unique<MainWindow>(db, state, engines);
-                         window->apply_startup();
-                         window->show();
-                         // The window is created after the event loop is already
-                         // running (via this queued handler), so an unraised
-                         // show() can land behind other apps — pull it to front
-                         // and hand over the foreground the splash was holding.
-                         window->raise();
-                         window->activateWindow();
-                         splash->close();
-                         splash.reset();
-                     });
-
-    thread->start();
+    warmup.start();
     return app.exec();
 }
 

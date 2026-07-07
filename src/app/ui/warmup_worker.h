@@ -1,7 +1,7 @@
 // Runs EngineRegistry::warm_up() off the main thread (moveToThread'd onto a
-// QThread by ui/startup) so the StartupScreen keeps animating during the
-// minutes-long TensorRT build. Emits progress per model and finished() at the
-// end; both cross to the main thread via queued connections.
+// QThread by ui/warmup_state) so the already-shown UI stays responsive during
+// the minutes-long TensorRT build. Emits progress + model_ready per model and
+// finished() at the end; all cross to the main thread via queued connections.
 #pragma once
 
 #include "ui/camera/shared/detection/engine_registry.h"
@@ -25,6 +25,7 @@ public slots:
 
 signals:
     void progress(const QString& model);
+    void model_ready(const QString& filename);
     void finished();
 
 private:

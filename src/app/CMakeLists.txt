@@ -12,8 +12,8 @@ add_executable(denso WIN32
     # app shell
     ui/theme.cpp
     ui/mainwindow.cpp
-    ui/startup_screen.cpp
     ui/warmup_worker.cpp
+    ui/warmup_state.cpp
     ui/startup.cpp
     # common dialog primitives (leaf — used by every dialog)
     ui/common/form_widgets.cpp
@@ -42,6 +42,7 @@ add_executable(denso WIN32
     ui/camera/shared/detection/model_sync.cpp
     # camera — live-view grid internals
     ui/camera/grid/camera_grid.cpp
+    ui/camera/grid/warmup_gate.cpp
     ui/camera/grid/camera_stream.cpp
     ui/camera/grid/stream_pacing.cpp
     ui/camera/grid/zone_assembly.cpp

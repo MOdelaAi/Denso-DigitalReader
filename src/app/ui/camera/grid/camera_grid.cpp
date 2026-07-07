@@ -12,6 +12,7 @@
 #include "ui/camera/grid/zone_reporter.h"
 #include "ui/camera/shared/detection/engine_registry.h"
 #include "ui/common/async_runner.h"  // post_to_gui
+#include "ui/warmup_state.h"
 
 #include <QCoreApplication>
 #include <QColor>
@@ -35,16 +36,25 @@ constexpr double kTileAspect = 16.0 / 9.0;  // each cell is 16:9 (camera native)
 }
 
 CameraGrid::CameraGrid(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
-                       QWidget* parent)
-    : QWidget(parent), db_(std::move(db)), engines_(std::move(engines)) {
+                       WarmupState* warmup, QWidget* parent)
+    : QWidget(parent), db_(std::move(db)), engines_(std::move(engines)),
+      warmup_(warmup) {
     grid_ = new QGridLayout(this);
     grid_->setContentsMargins(0, 0, 0, 0);
     grid_->setSpacing(0);  // flush tiles — no gap between feeds (CCTV wall)
+    if (warmup_) {
+        connect(warmup_, &WarmupState::model_ready, this, &CameraGrid::on_model_ready);
+        connect(warmup_, &WarmupState::finished, this, &CameraGrid::on_warmup_finished);
+    }
 }
 
 CameraGrid::~CameraGrid() { clear(); }
 
 void CameraGrid::clear() {
+    // Drop any deferred-start bookkeeping; the tiles it references are deleted
+    // just below, so the dangling pointers must not outlive this call.
+    pending_ = PendingStart{};
+    pending_cams_.clear();
     // Stop (join) every worker before deleting anything so no frame can land on
     // a destroyed tile; Qt then drops any queued events for the deleted objects.
     for (CameraStream* s : streams_) {
@@ -107,44 +117,93 @@ void CameraGrid::reload() {
         std::vector<camera::CameraArea> areas = camera::areas_for(db_, cam.id);
         tile->set_areas(areas);  // ROI overlay (if any)
 
-        const detection::CameraDetection det = detection::detection_for(db_, cam.id);
-        std::unique_ptr<FrameProcessor> proc;
-        if (det.models.empty()) {
-            proc = std::make_unique<OrientationProcessor>(
-                static_cast<int>(cam.rotation), cam.pitch, cam.roll);
-        } else {
-            std::vector<DetectionProcessor::ModelRun> runs;
-            for (const detection::ResolvedModel& rm : det.models) {
-                InferenceEngine* eng = engines_->get(rm.filename);
-                if (!eng) continue;  // model failed to load — skip it
-                runs.push_back({eng, rm.class_names, rm.classes});
-            }
-            if (runs.empty()) {
-                proc = std::make_unique<OrientationProcessor>(
-                    static_cast<int>(cam.rotation), cam.pitch, cam.roll);
-            } else {
-                proc = std::make_unique<DetectionProcessor>(
-                    static_cast<int>(cam.rotation), cam.pitch, cam.roll,
-                    std::move(runs), std::move(areas), cam.id,
-                    /*ReadingSink*/ nullptr, /*ZoneSink*/ reporter_.get());
-            }
-        }
-        auto* stream = new CameraStream(cam, std::move(proc));
-        connect(stream, &CameraStream::frame_ready, tile, &CameraTile::set_frame);
-        connect(stream, &CameraStream::status_changed, tile, &CameraTile::set_status);
-        tile->set_frame_counter(stream->frame_counter());
-
         grid_->addWidget(tile, i / dims.cols, i % dims.cols);
         tiles_.push_back(tile);
-        streams_.push_back(stream);
+
+        const detection::CameraDetection det = detection::detection_for(db_, cam.id);
+        if (det.models.empty() || warmup_ == nullptr) {
+            // No detection (or no warm-up coordinator): start immediately, exactly
+            // as before. start_one handles the orientation/detection selection.
+            start_one(cam, tile);
+            continue;
+        }
+        // Which of this camera's models are not yet warm?
+        std::vector<std::string> waiting;
+        for (const detection::ResolvedModel& rm : det.models) {
+            if (!warmup_->is_ready(rm.filename)) {
+                waiting.push_back(rm.filename);
+            }
+        }
+        if (waiting.empty()) {
+            start_one(cam, tile);  // all models already warm → cache-hit get()
+        } else {
+            tile->set_preparing(true);
+            pending_cams_[cam.id] = PendingCam{cam, tile};
+            pending_.add(cam.id, std::move(waiting));
+        }
     }
     for (int r = 0; r < dims.rows; ++r) grid_->setRowStretch(r, 1);
     for (int c = 0; c < dims.cols; ++c) grid_->setColumnStretch(c, 1);
     rows_ = dims.rows;
     cols_ = dims.cols;
     relayout_letterbox();
+    // Streams are created + started per camera in start_one (now or as models
+    // warm), so there is no batch start here.
+}
 
-    start_streams();
+void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
+    std::vector<camera::CameraArea> areas = camera::areas_for(db_, cam.id);
+    const detection::CameraDetection det = detection::detection_for(db_, cam.id);
+
+    std::unique_ptr<FrameProcessor> proc;
+    if (det.models.empty()) {
+        proc = std::make_unique<OrientationProcessor>(
+            static_cast<int>(cam.rotation), cam.pitch, cam.roll);
+    } else {
+        std::vector<DetectionProcessor::ModelRun> runs;
+        for (const detection::ResolvedModel& rm : det.models) {
+            InferenceEngine* eng = engines_->get(rm.filename);  // cache-hit here
+            if (!eng) continue;  // model failed to load — skip it
+            runs.push_back({eng, rm.class_names, rm.classes});
+        }
+        if (runs.empty()) {
+            proc = std::make_unique<OrientationProcessor>(
+                static_cast<int>(cam.rotation), cam.pitch, cam.roll);
+        } else {
+            proc = std::make_unique<DetectionProcessor>(
+                static_cast<int>(cam.rotation), cam.pitch, cam.roll,
+                std::move(runs), std::move(areas), cam.id,
+                /*ReadingSink*/ nullptr, /*ZoneSink*/ reporter_.get());
+        }
+    }
+    tile->set_preparing(false);
+    auto* stream = new CameraStream(cam, std::move(proc));
+    connect(stream, &CameraStream::frame_ready, tile, &CameraTile::set_frame);
+    connect(stream, &CameraStream::status_changed, tile, &CameraTile::set_status);
+    tile->set_frame_counter(stream->frame_counter());
+    streams_.push_back(stream);
+    stream->start();
+}
+
+void CameraGrid::on_model_ready(const QString& filename) {
+    const std::vector<int64_t> ids = pending_.ready(filename.toStdString());
+    for (int64_t id : ids) {
+        auto it = pending_cams_.find(id);
+        if (it == pending_cams_.end()) continue;
+        start_one(it->second.cam, it->second.tile);
+        pending_cams_.erase(it);
+    }
+}
+
+void CameraGrid::on_warmup_finished() {
+    // Any camera still waiting has a model that never loaded → start with whatever
+    // resolved (start_one falls back to OrientationProcessor when no model loads).
+    for (int64_t id : pending_.drain()) {
+        auto it = pending_cams_.find(id);
+        if (it == pending_cams_.end()) continue;
+        start_one(it->second.cam, it->second.tile);
+        pending_cams_.erase(it);
+    }
 }
 
 void CameraGrid::release_streams() {

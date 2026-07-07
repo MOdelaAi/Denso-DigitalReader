@@ -8,10 +8,14 @@ WarmupWorker::WarmupWorker(std::shared_ptr<EngineRegistry> engines,
 
 void WarmupWorker::run() {
     if (engines_) {
-        engines_->warm_up([this](const std::string& name) {
-            emit progress(QStringLiteral("Preparing model %1…")
-                              .arg(QString::fromStdString(name)));
-        });
+        engines_->warm_up(
+            [this](const std::string& name) {
+                emit progress(QStringLiteral("Preparing model %1…")
+                                  .arg(QString::fromStdString(name)));
+            },
+            [this](const std::string& name) {
+                emit model_ready(QString::fromStdString(name));
+            });
     }
     emit finished();
 }

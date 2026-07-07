@@ -86,6 +86,9 @@ add_executable(denso_tests
     # brazing_retry_policy is GUI-target code but pure std (no Qt/OpenCV), so
     # compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/brazing_retry_policy.cpp
+    test_warmup_gate.cpp
+    # warmup_gate is GUI-target code but pure std (no Qt/OpenCV), so compile it in.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/warmup_gate.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
