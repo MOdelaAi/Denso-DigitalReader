@@ -38,9 +38,13 @@ Content-Type: application/json
 { "zone1": 500, "zone2": 200 }
 ```
 
-Delivery is **best-effort, latest-value-wins**: there is no queue or retry — if a
-POST is lost, the next change re-sends the full snapshot. A stuck/unreachable
-server can't hang the app (bounded 5 s timeout; failures are logged and dropped).
+Delivery is **reliable, latest-value-wins**: if the server is unreachable, the app
+keeps retrying the latest zone values (exponential backoff, up to 30 s between
+tries) and delivers them once the server returns — the newest reading always wins,
+and new readings merge into the pending snapshot while it waits. Only one POST is
+in flight at a time; retry state is in-memory (nothing is queued or persisted, so
+a restart starts fresh from live detection). A stuck/unreachable server can't hang
+the app (bounded 5 s per-request timeout).
 
 **Enable it:** Settings → **Server** → tick *Send zone readings to server* and set
 the base URL (e.g. `http://192.168.1.50:8098`). Then, in the Camera wizard →
