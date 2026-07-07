@@ -1,7 +1,8 @@
-// Startup orchestration: build + show MainWindow immediately with the shared
-// EngineRegistry injected, then start warming the detection engines on a
-// background thread (WarmupState). CameraGrid starts each camera as its models
-// come ready. Keeps main.cpp a thin orchestrator.
+// Startup orchestration: pick the launch UX. A cold start (no cached TensorRT
+// engine → the minutes-long build) shows the blocking StartupScreen splash and
+// warms behind it, then builds MainWindow. A warm restart builds + shows
+// MainWindow immediately and warms in the background (WarmupState). The pure
+// ui/startup_mode probe decides. Keeps main.cpp a thin orchestrator.
 #pragma once
 
 #include "settings/settings.h"

@@ -128,11 +128,14 @@ Per-camera YOLO detection is an **app-only** feature — the domain config lives
   on the warm-up worker thread (`EngineRegistry::warm_up()`, driven by
   `ui/warmup_state`), never lazily on a capture thread where it froze the UI and
   blocked stream teardown — the reason TensorRT was dropped once before. Startup
-  is **UI-first**: the window shows immediately and warm-up runs in the
-  background; each detection camera's capture thread (`CameraStream`) is created
-  only **after its model(s) finish warming**, so `EngineRegistry::get()` for it is
-  a cache-hit lookup on the GUI thread — the build never lands on a capture
-  thread. Orientation-only cameras stream at once.
+  is **conditional** (`ui/startup_mode` `cold_start_needs_splash`): a **cold**
+  start (models present but no cached `*.engine` → the minutes-long build) shows
+  the blocking `StartupScreen` splash and warms behind it, then builds the window;
+  a **warm** restart is **UI-first** — the window shows immediately and warm-up
+  runs in the background, each detection camera's capture thread (`CameraStream`)
+  created only **after its model(s) finish warming** so `EngineRegistry::get()` is
+  a cache-hit on the GUI thread. Either way the build never lands on a capture
+  thread; orientation-only cameras stream at once on the warm path.
   `tools/build_trt_engine.sh` builds standalone `trtexec` engines offline;
   `models/*.engine` and `models/trt_cache/` are git-ignored.
 - `models/*.onnx` are synced into the `model` catalog at startup (`model_sync`),
