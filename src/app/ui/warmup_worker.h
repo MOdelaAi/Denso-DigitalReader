@@ -25,6 +25,7 @@ public slots:
 
 signals:
     void progress(const QString& model);
+    void model_ready(const QString& filename);
     void finished();
 
 private:
