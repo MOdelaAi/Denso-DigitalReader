@@ -4,6 +4,7 @@
 #include "camera/repo.h"
 #include "detection/repo.h"
 #include "ui/camera/grid/brazing_client.h"
+#include "ui/camera/grid/brazing_reporter.h"
 #include "ui/camera/grid/camera_stream.h"
 #include "ui/camera/grid/camera_tile.h"
 #include "ui/camera/grid/frame_processor.h"
@@ -60,7 +61,7 @@ void CameraGrid::clear() {
     // stopped/joined above, so no capture thread can still call the reporter —
     // safe to tear it down, then the client it posts to.
     reporter_.reset();
-    brazing_client_.reset();
+    brazing_reporter_.reset();
     rows_ = 0;
     cols_ = 0;
     grid_->setContentsMargins(0, 0, 0, 0);
@@ -88,11 +89,13 @@ void CameraGrid::reload() {
     // the GUI thread (post_to_gui) where the BrazingClient lives.
     const brazing::BrazingConfig bcfg = brazing::load(db_);
     if (bcfg.enabled && !bcfg.base_url.empty()) {
-        brazing_client_ = std::make_unique<BrazingClient>(bcfg.base_url);
-        BrazingClient* client = brazing_client_.get();
+        brazing_reporter_ = std::make_unique<BrazingReporter>(
+            std::make_unique<BrazingClient>(bcfg.base_url));
+        BrazingReporter* reporter = brazing_reporter_.get();
         reporter_ = std::make_unique<ZoneReporter>(
-            [client](const std::map<int, int>& snap) {
-                common::post_to_gui(client, [client, snap] { client->send(snap); });
+            [reporter](const std::map<int, int>& snap) {
+                common::post_to_gui(reporter,
+                                    [reporter, snap] { reporter->submit(snap); });
             });
     }
 
