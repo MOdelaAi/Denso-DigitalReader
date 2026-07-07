@@ -51,13 +51,15 @@ A thin orchestrator:
    by the backend's `QProcess` timeout) can no longer keep startup from painting.
 6. `settings::load` seeds an in-memory `std::shared_ptr<Settings>`.
 7. `main` hands off to `ui::launch(app, conn, state)` (`src/app/ui/startup.cpp`),
-   which shows the `StartupScreen` splash immediately, builds the shared
-   `EngineRegistry`, and runs `EngineRegistry::warm_up()` on a dedicated startup
-   worker thread (`WarmupWorker` on a `QThread`) while the splash animates and
-   the main thread keeps pumping events. When warm-up finishes (`thread->quit();
-   thread->wait();`, so it's guaranteed done first), `launch` builds `MainWindow`
-   with the pre-warmed registry injected, calls `MainWindow::apply_startup` +
-   `show()`, closes the splash, and enters `QApplication::exec()`.
+   which builds the shared `EngineRegistry` + a `WarmupState` (owns the warm-up
+   worker thread), then **immediately** builds `MainWindow` (injecting the
+   registry + `WarmupState`), calls `MainWindow::apply_startup` + `show()`, and
+   enters `QApplication::exec()`. Warm-up runs in the **background**: once the
+   window is built (so `CameraGrid` has subscribed), `WarmupState::start()` warms
+   every `models/*.onnx` on the worker, emitting `model_ready(file)` per model and
+   `finished()` at the end. `CameraGrid` starts model-less/ready cameras at once
+   and each pending detection camera as its models come ready — no blocking
+   splash. (The old `StartupScreen` splash is retired.)
 
 `Db` (an `optional<Db>` in `main`) outlives the window, so the connection it
 hands the UI stays valid for the whole run.
@@ -319,10 +321,11 @@ interface, implemented by `OrtEngine` (one ORT session with a **TensorRT → CUD
 CPU** execution-provider fallback). The TensorRT tier runs FP16 with a serialized
 engine cache (`models/trt_cache/`); its first-run build is minutes-long and
 non-interruptible, so `EngineRegistry::warm_up()` loads **and** runs one blank
-inference over every `models/*.onnx` at startup — on a dedicated startup worker
-thread (driven by `ui/startup`, while the `StartupScreen` splash animates),
-completing before the window shows and before any capture thread exists — to
-absorb that build and CUDA kernel init off the hot path.
+inference over every `models/*.onnx` — on the warm-up worker thread (driven by
+`ui/warmup_state`, in the background while the window is already shown) — to
+absorb that build and CUDA kernel init off the hot path. Each detection camera's
+capture thread is created only after its models finish warming, so the build
+never lands on a capture thread.
 `EngineRegistry` keeps one shared engine per model filename (lazy, failed loads
 cached as `nullptr` so a bad model isn't retried per frame). `model_sync` runs at
 boot to keep the catalog in step with `models/*.onnx`.
@@ -335,10 +338,12 @@ GStreamer backend, falling back to FFMPEG when GStreamer can't open.
 `CameraGrid` chooses per camera: it resolves `detection_for`, asks the registry
 for each attached model, and constructs a `DetectionProcessor` (orient → infer →
 per-class conf filter → ROI confinement → draw labelled boxes) when ≥1 model
-loads, else a plain `OrientationProcessor`. `EngineRegistry::warm_up()` runs once
-on the startup worker thread before the window shows; every subsequent `get()`
-is called only from the UI thread (`CameraGrid::reload`), and the engines
-outlive the capture streams. ORT +
+loads, else a plain `OrientationProcessor`. `EngineRegistry::warm_up()` runs on
+the warm-up worker thread in the background; `get()` is **mutex-guarded** because
+it is now called from both that worker and the UI thread (`CameraGrid` starting a
+camera whose models are ready — a cache-hit, never a build). Detection cameras are
+gated on readiness (pure `warmup_gate` `PendingStart` + `WarmupState`), so the
+engines outlive the capture streams and the build stays off them. ORT +
 provider DLLs and every `models/*.onnx` are copied beside the exe by a
 `POST_BUILD` step; the GPU provider DLLs come from the git-ignored
 `third_party/gpu_ep/` (see `docs/GPU_SETUP.md`), and a missing GPU stack silently
@@ -457,13 +462,14 @@ object (it does not rely on transitive `QNetworkAccessManager`/reply ownership).
   an RTSP camera dictates its own resolution, and any IP-side reframing belongs
   in the pipeline (`videoscale`), not `VideoCapture::set`.
 - **The TensorRT EP's first-run engine build is minutes-long and
-  non-interruptible.** It must be triggered from `EngineRegistry::warm_up()` on a
-  dedicated startup worker thread (driven by `ui/startup`, with the
-  `StartupScreen` splash animating throughout), completing before the window
-  shows and before any capture thread exists — never lazily on a capture thread,
-  which froze the UI and blocked stream `join()` on teardown (the reason
-  TensorRT was dropped once before it was re-added behind the warm-up). Later
-  runs load the cached engine from `models/trt_cache/`.
+  non-interruptible.** It must be triggered from `EngineRegistry::warm_up()` on
+  the warm-up worker thread (driven by `ui/warmup_state`, in the background while
+  the window is already shown) — never lazily on a capture thread, which froze the
+  UI and blocked stream `join()` on teardown (the reason TensorRT was dropped once
+  before it was re-added behind the warm-up). Startup is UI-first: a detection
+  camera's capture thread is created only after its models finish warming, so
+  `get()` on that path is a cache-hit, never a build. Later runs load the cached
+  engine from `models/trt_cache/`.
 - **IP-camera latency depends on the GStreamer decode plugins being installed.**
   Without them `cv::CAP_GSTREAMER` fails to open and `CameraStream` silently
   falls back to the buffering FFMPEG backend, and RTSP lag returns — install the
