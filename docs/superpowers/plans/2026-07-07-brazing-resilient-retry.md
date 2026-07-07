@@ -180,20 +180,19 @@ TEST_CASE("backoff doubles to the cap and resets on success") {
     REQUIRE(p.on_result(false).delay_ms == 1000);
 }
 
-TEST_CASE("submit reset backoff to fast start") {
+TEST_CASE("submit resets backoff to fast start") {
     BrazingRetryPolicy p;
     p.submit(Snap{{1, 1}});
     REQUIRE(p.on_result(false).delay_ms == 1000);
     p.on_retry_tick();
     REQUIRE(p.on_result(false).delay_ms == 2000);
-    // a new value arrives -> backoff resets
+    // a new value arrives while idle (no POST in flight) -> sends immediately,
+    // and the backoff is reset.
     RetryAction s = p.submit(Snap{{1, 9}});
-    REQUIRE(s.kind == Kind::None);  // a POST is already in flight
-    // the in-flight one completes (fail) -> next send is the new value, delay back to 1s
+    REQUIRE(s.kind == Kind::Send);
+    REQUIRE(s.snapshot == Snap{{1, 9}});
+    // if that send now fails, the delay is back to the fast start (proves reset).
     REQUIRE(p.on_result(false).delay_ms == 1000);
-    RetryAction t = p.on_retry_tick();
-    REQUIRE(t.kind == Kind::Send);
-    REQUIRE(t.snapshot == Snap{{1, 9}});
 }
 
 TEST_CASE("single-flight: submit mid-flight defers; newest wins on completion") {
