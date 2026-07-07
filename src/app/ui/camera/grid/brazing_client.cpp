@@ -8,6 +8,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QUrl>
+#include <QVariant>
 
 namespace denso::ui {
 
@@ -25,13 +26,16 @@ BrazingClient::BrazingClient(std::string base_url, QObject* parent)
     }
 }
 
-void BrazingClient::send(const std::map<int, int>& zones) {
+void BrazingClient::post(const std::map<int, int>& zones,
+                         std::function<void(bool)> done) {
     if (base_url_.isEmpty()) {
+        if (done) done(false);
         return;
     }
     const QUrl url(base_url_ + QStringLiteral("/api/brazing/update"));
     if (!url.isValid()) {
         qWarning().noquote() << "[brazing] invalid base URL:" << base_url_;
+        if (done) done(false);
         return;
     }
     QNetworkRequest req(url);
@@ -42,12 +46,17 @@ void BrazingClient::send(const std::map<int, int>& zones) {
     const QByteArray body =
         QByteArray::fromStdString(build_brazing_payload(zones));
     QNetworkReply* reply = nam_->post(req, body);
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply] {
-        if (reply->error() != QNetworkReply::NoError) {
-            // Best-effort: log and drop. Next change re-sends the full snapshot.
-            qWarning().noquote() << "[brazing] POST failed:" << reply->errorString();
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, done] {
+        const int status =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = reply->error() == QNetworkReply::NoError && status >= 200 &&
+                        status < 300;
+        if (!ok) {
+            qWarning().noquote()
+                << "[brazing] POST failed (will retry):" << reply->errorString();
         }
         reply->deleteLater();
+        if (done) done(ok);
     });
 }
 
