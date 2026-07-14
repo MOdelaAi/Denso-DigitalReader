@@ -144,11 +144,12 @@ all three.
   reconnect loop**: a failed open or a mid-stream read drop no longer ends the
   thread — it emits Offline, backs off (`next_backoff_ms`: 1s→×2→10s cap, reset
   on a live frame) via a stop-responsive `wait_or_stop`, and reopens, so a camera
-  that blinks out recovers on its own without an app restart. USB cameras open by
-  device index; IP
-  cameras open through a low-latency `rtsp_gst_pipeline` on the **GStreamer**
-  backend (`cv::CAP_GSTREAMER`) with an **FFMPEG fallback** if GStreamer can't
-  open — GStreamer drops stale frames so glass-to-glass lag stays bounded. The
+  that blinks out recovers on its own without an app restart. Each source opens
+  via a **capture-backend ladder** — the first candidate that opens AND reads a
+  frame wins (remembered for reconnects): RTSP through hardware **NVDEC**
+  `rtsp_gst_pipeline` (H.264 → H.265) then FFMPEG; USB MJPEG → YUYV → `CAP_ANY`.
+  Mixed-codec fleets auto-discover; GStreamer drops stale frames so
+  glass-to-glass lag stays bounded. The
   display cap is paced by a high-resolution waitable timer (`precise_sleep`),
   because MinGW's `std::this_thread::sleep_for` is pinned to the ~15.6 ms OS
   tick and would undershoot the target rate (~9 fps for a 15 fps cap). The
@@ -170,9 +171,11 @@ all three.
   an area polygon (empty areas = whole frame).
 - `frame_processor.{h,cpp}` — the per-camera processing seam. `FrameProcessor`
   is the interface; `OrientationProcessor` (applies rotation/pitch/roll) is the
-  orientation-only impl, and `DetectionProcessor` layers ONNX inference on top
-  (orient → infer → per-class confidence filter → ROI confinement → draw
-  labelled boxes). The ROI step keeps only boxes whose normalized centre lands
+  orientation-only impl, and `DetectionProcessor` layers detection on top,
+  **decoupled from display**: it orients on the display path but runs the platform
+  inference backend (ORT or native TensorRT) on a worker thread over a drop-oldest
+  latest-frame slot, overlaying the newest boxes (per-class confidence filter →
+  ROI confinement → labelled boxes). The ROI step keeps only boxes whose normalized centre lands
   inside one of the camera's area polygons (`camera::inside_any_area`); a camera
   with no areas detects the whole frame.
   `camera_grid` picks per camera: `DetectionProcessor` when the camera has
@@ -309,7 +312,8 @@ camera domain: `camera/area_geometry` (`point_in_polygon` / `inside_any_area`,
 Qt/OpenCV-free, unit-tested) tests a detection's normalized box centre against a
 camera's area polygons.
 
-**Runtime** (`src/app/ui/camera/shared/detection/`, OpenCV + ONNX Runtime, app
+**Runtime** (`src/app/ui/camera/shared/detection/`, OpenCV + a platform-split
+inference backend — ONNX Runtime on Windows, native TensorRT on Jetson; app
 target only): pure unit-tested helpers `letterbox` (aspect-preserving resize +
 gray pad to 640, plus the inverse box map), `yolo_decode` (two decoders chosen by
 output shape — `decode_yolo` for the raw transposed `[1, 4+nc, na]` head via
@@ -317,23 +321,35 @@ per-anchor argmax + confidence floor + class-agnostic `cv::dnn::NMSBoxes`, and
 `decode_yolo_end2end` for an NMS-free `[1, N, 6]` output where the model already
 did NMS so only a confidence floor + inverse box map remain), and
 `names_metadata` (parse the ONNX `names` dict). These feed the `InferenceEngine`
-interface, implemented by `OrtEngine` (one ORT session with a **TensorRT → CUDA →
-CPU** execution-provider fallback). The TensorRT tier runs FP16 with a serialized
-engine cache (`models/trt_cache/`); its first-run build is minutes-long and
-non-interruptible, so `EngineRegistry::warm_up()` loads **and** runs one blank
-inference over every `models/*.onnx` — on the warm-up worker thread (driven by
-`ui/warmup_state`, in the background while the window is already shown) — to
-absorb that build and CUDA kernel init off the hot path. Each detection camera's
-capture thread is created only after its models finish warming, so the build
-never lands on a capture thread.
-`EngineRegistry` keeps one shared engine per model filename (lazy, failed loads
-cached as `nullptr` so a bad model isn't retried per frame). `model_sync` runs at
-boot to keep the catalog in step with `models/*.onnx`.
+interface, implemented **per platform** (selected via the `BackendEngine` alias in
+`engine_registry.h`):
 
-Streaming feeds these: IP cameras capture through `rtsp_gst_pipeline` (a pure
-string builder for an explicit depay/parse/`avdec` GStreamer chain with a
-drop-on-latency `rtspsrc`, leaky queue, and shallow dropping appsink) on the
-GStreamer backend, falling back to FFMPEG when GStreamer can't open.
+- **Windows / dev — `OrtEngine`:** one ORT session with a **TensorRT → CUDA →
+  CPU** provider fallback. The TensorRT tier runs FP16 with a serialized engine
+  cache (`models/trt_cache/`); its first-run build is minutes-long and
+  non-interruptible, so `EngineRegistry::warm_up()` runs one blank inference over
+  every `models/*.onnx` on the warm-up worker to absorb it off the hot path.
+- **Jetson Orin Nano (real target) — `TrtEngine`:** native TensorRT (`nvinfer` +
+  `cudart`) that **deserializes a prebuilt `.engine` only** (built on-device with
+  `trtexec` for TRT 10.3 / `sm_87`) — never built at runtime, **no fallback**. A
+  missing/incompatible engine **fails loud** (throwing ctor → `WarmupWorker` →
+  `app.exit(1)`). Class names come from a `<engine>.names.json` sidecar; inference
+  is mutex-guarded across cameras. `warm_up()` scans `models/*.engine`.
+
+Each detection camera starts only after its models finish warming, so warm-up
+never lands on a capture thread. `EngineRegistry` keeps one shared engine per
+model filename (lazy; failed loads cached as `nullptr`). `model_sync` catalogs
+`models/*.onnx` (Windows, names from ONNX metadata) or `models/*.engine` (Jetson,
+names from the sidecar) at boot.
+
+Streaming feeds these through a **capture-backend ladder** (`camera_stream.cpp`):
+each source tries candidates and keeps the first that opens AND reads a frame —
+RTSP via hardware **NVDEC** (`rtsp_gst_pipeline`: `nvv4l2decoder → nvvidconv →
+BGR`, per-codec depay/parse) H.264 → H.265 → FFMPEG; USB MJPEG → YUYV → `CAP_ANY`.
+Mixed-codec fleets auto-discover per camera; the leaky queue sits after the
+decoder only. Inference is **decoupled from display** — `DetectionProcessor` runs
+the model on a worker thread over a drop-oldest latest-frame slot and overlays the
+newest detections snapshot, so video stays smooth regardless of model speed.
 
 `CameraGrid` chooses per camera: it resolves `detection_for`, asks the registry
 for each attached model, and constructs a `DetectionProcessor` (orient → infer →
