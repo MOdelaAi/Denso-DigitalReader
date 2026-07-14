@@ -12,6 +12,7 @@
 #include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
+#include <QPalette>
 #include <QPixmap>
 #include <QPushButton>
 #include <QScreen>
@@ -217,7 +218,15 @@ void MainWindow::on_reset_defaults() {
 void MainWindow::apply_theme(bool dark) {
     // Qualify: unqualified `palette` would resolve to the inherited
     // QWidget::palette() member, hiding the free theme function.
-    qApp->setStyleSheet(style_sheet(denso::ui::palette(dark)));
+    const Palette p = denso::ui::palette(dark);
+    qApp->setStyleSheet(style_sheet(p));
+
+    // Placeholder ("ghost") text is NOT a stylesheet property — it's the
+    // PlaceholderText palette role, which otherwise falls back to a near-white
+    // platform default (unreadable). Set it to a dim-but-legible colour.
+    QPalette pal = qApp->palette();
+    pal.setColor(QPalette::PlaceholderText, p.txt_faint);
+    qApp->setPalette(pal);
 }
 
 } // namespace denso::ui
