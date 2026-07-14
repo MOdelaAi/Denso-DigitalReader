@@ -1,6 +1,7 @@
 #include "ui/camera/shared/snapshot.h"
 
 #include "ui/camera/shared/frame_convert.h"
+#include "ui/camera/shared/gst_pipeline.h"  // rtsp_gst_pipeline (NVDEC)
 
 #include <QTransform>
 
@@ -69,7 +70,17 @@ Snapshot grab_snapshot(std::optional<int> index, const QString& url,
     if (index.has_value()) {
         cap.open(*index, cv::CAP_ANY, params);
     } else {
-        cap.open(url.toStdString(), cv::CAP_ANY, params);
+        // Match the live stream's capture path (which CAP_ANY does not on the
+        // Jetson): hardware NVDEC via GStreamer, H.264 then H.265, then a plain
+        // CAP_ANY fallback for non-Jetson hosts. `url` already carries creds.
+        const std::string u = url.toStdString();
+        cap.open(rtsp_gst_pipeline(u, Codec::H264), cv::CAP_GSTREAMER);
+        if (!cap.isOpened()) {
+            cap.open(rtsp_gst_pipeline(u, Codec::H265), cv::CAP_GSTREAMER);
+        }
+        if (!cap.isOpened()) {
+            cap.open(u, cv::CAP_ANY, params);
+        }
     }
     if (!cap.isOpened()) {
         return {QImage(), QStringLiteral("Could not open the camera.")};
