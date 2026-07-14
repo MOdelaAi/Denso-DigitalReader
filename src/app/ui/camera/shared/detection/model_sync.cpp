@@ -2,7 +2,9 @@
 
 #include "detection/detection.h"
 #include "detection/repo.h"
+#ifdef _WIN32
 #include "ui/camera/shared/detection/ort_engine.h"
+#endif
 
 #include <QDebug>
 #include <QDir>
@@ -11,6 +13,9 @@
 namespace denso::ui {
 
 void sync_models(const QSqlDatabase& db, const QString& models_dir) {
+#ifdef _WIN32
+    // Windows/ORT: catalog every *.onnx, sourcing class names from the model's
+    // embedded metadata.
     QDir dir(models_dir);
     const QStringList files = dir.entryList({QStringLiteral("*.onnx")}, QDir::Files);
     for (const QString& f : files) {
@@ -28,6 +33,13 @@ void sync_models(const QSqlDatabase& db, const QString& models_dir) {
             qWarning().noquote() << "[model_sync] upsert failed for" << f;
         }
     }
+#else
+    // Linux/Jetson: native-TRT catalog sync (class names from a
+    // <engine>.names.json sidecar) is wired in Task B4. Phase A is a no-op so
+    // the app builds and launches with the stub engine.
+    (void)db;
+    (void)models_dir;
+#endif
 }
 
 } // namespace denso::ui
