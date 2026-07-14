@@ -10,21 +10,29 @@ Ported 1:1 from a Rust + Slint original; the port history lives on branch
 ## Commands
 
 Out-of-source build with CMake (needs Qt6: Core, Gui, Sql, Widgets, Multimedia,
-Network; OpenCV; and ONNX Runtime for detection). Builds and runs on the MSYS2
-UCRT64 toolchain (`pacman -S mingw-w64-ucrt-x86_64-qt6-base
-mingw-w64-ucrt-x86_64-qt6-multimedia mingw-w64-ucrt-x86_64-opencv
-mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja`). ONNX Runtime is
-provisioned into `third_party/onnxruntime/` (git-ignored — see
-`docs/GPU_SETUP.md`).
+Network; OpenCV; and a detection backend). The inference backend is
+**platform-split** (see *Detection / inference backend* below): Windows/MSYS2 dev
+uses ONNX Runtime; the Jetson Orin Nano deployment target uses native TensorRT.
+The dev build runs on the MSYS2 UCRT64 toolchain (`pacman -S
+mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-multimedia
+mingw-w64-ucrt-x86_64-opencv mingw-w64-ucrt-x86_64-cmake
+mingw-w64-ucrt-x86_64-ninja`); ONNX Runtime is provisioned into
+`third_party/onnxruntime/` (git-ignored — see `docs/GPU_SETUP.md`). For the Jetson
+build/deps see `AGENTS.md`.
 
-IP-camera streaming uses OpenCV's **GStreamer** backend (low latency — it drops
-stale frames, unlike the buffering FFMPEG backend). That needs the decode
-plugins present or the app silently falls back to FFMPEG and lag returns:
-`pacman -S mingw-w64-ucrt-x86_64-gst-plugins-base
-mingw-w64-ucrt-x86_64-gst-plugins-good mingw-w64-ucrt-x86_64-gst-plugins-bad
-mingw-w64-ucrt-x86_64-gst-libav` (bad = h264parse/h265parse + d3d12 HW decoder,
-libav = avdec software fallback). On the Jetson target these ship with the
-NVIDIA GStreamer stack.
+Camera capture uses OpenCV's **GStreamer** backend via a capture-backend LADDER
+(`gst_pipeline.cpp` + `camera_stream.cpp`): it tries hardware **NVDEC** pipelines
+and keeps the first that opens AND reads a frame — RTSP: NVDEC **H.264 → H.265**
+→ FFMPEG; USB: MJPEG (`nvv4l2decoder mjpeg=1`) → YUYV → `CAP_ANY`. So mixed
+H.264/H.265 fleets auto-discover per camera, and the leaky queue sits **after**
+the decoder only (dropping compressed access units would corrupt the stream). On
+the Jetson the `nv*` elements ship with JetPack (plus `gstreamer1.0-libav` for
+the FFMPEG/avdec fallback). On Windows the `nv*` elements are absent, so the
+NVDEC candidates fail to build and the ladder falls through to FFMPEG — install
+`pacman -S mingw-w64-ucrt-x86_64-gst-plugins-{base,good,bad}
+mingw-w64-ucrt-x86_64-gst-libav`. Inference is decoupled from display (a worker
+thread + latest-frame slot; boxes overlaid from a snapshot), so video stays
+smooth regardless of model speed.
 
 | Action | Command |
 |---|---|
@@ -105,42 +113,47 @@ UI grouped by feature: the **app shell** at `ui/` root, plus `ui/common/`,
 | `ui/camera/dialog/ip_scan.{h,cpp}` | Subnet RTSP-port scan (Qt Network, threaded). |
 | `ui/camera/shared/snapshot.{h,cpp}`, `shared/frame_convert.h` | Grab one preview frame (OpenCV, off-thread) + orient it: `apply_orientation` composes rotation + roll + pitch (perspective warp) for the live Configure preview. |
 | `ui/camera/shared/rtsp_templates.{h,cpp}` | Manufacturer → RTSP URL templates (Dahua) + `with_credentials`. |
-| `ui/camera/shared/gst_pipeline.{h,cpp}` | Pure (unit-tested) string builder for a low-latency RTSP GStreamer pipeline (explicit depay/parse/`avdec` chain, drop-on-latency `rtspsrc`, leaky queue, shallow dropping appsink) for `cv::CAP_GSTREAMER`. |
+| `ui/camera/shared/gst_pipeline.{h,cpp}` | Pure (unit-tested) string builders for low-latency GStreamer pipelines (`cv::CAP_GSTREAMER`): RTSP via hardware **NVDEC** (`nvv4l2decoder → nvvidconv → BGR`, per-codec depay/parse, drop-on-latency `rtspsrc`, leaky queue after the decoder), plus USB MJPEG/YUYV builders. `camera_stream.cpp` tries them as a ladder (first that opens+reads wins). |
 | `ui/camera/shared/roi_geometry.{h,cpp}` | Pure (unit-tested) widget↔normalized point mapping + aspect-fit rect for the canvas. |
 | `ui/camera/shared/detection/` | Per-camera ONNX detection runtime (app-only: OpenCV + ONNX Runtime). Pure, unit-tested helpers `letterbox` (resize+pad to 640 + inverse box map), `yolo_decode` (`decode_yolo`: raw `[1,4+nc,anchors]` → argmax + conf floor + NMS; `decode_yolo_end2end`: NMS-free `[1,N,6]` → conf floor only — `ort_engine` picks by output shape), `names_metadata` (parse the ONNX `names` dict) feed `inference_engine` (interface) → `ort_engine` (session + TensorRT(FP16, cached)→CUDA→CPU EP fallback) → `engine_registry` (one shared engine per model file; `get()` is **mutex-guarded** — called from both the warm-up worker and the GUI thread; `warm_up()` loads + runs one blank inference on every model on the background worker and fires an `on_ready(filename)` per warmed model that drives the UI-first per-camera start, so the first real frame — and the minutes-long TensorRT build — never stalls a capture thread). `model_sync` scans `models/*.onnx` into the `model` catalog at startup. |
 
-## Detection / ONNX Runtime
+## Detection / inference backend (platform-split)
 
 Per-camera YOLO detection is an **app-only** feature — the domain config lives in
-`src/core/detection/` (Qt/OpenCV-free, unit-tested), the inference runtime in
-`src/app/ui/camera/shared/detection/` (OpenCV + ORT). Key facts:
+`src/core/detection/` (Qt/OpenCV-free, unit-tested); the inference runtime in
+`src/app/ui/camera/shared/detection/`. The backend is **platform-split** behind
+the `InferenceEngine` interface (selected via the `BackendEngine` alias in
+`engine_registry.h`); OpenCV letterbox + `decode_yolo`/`decode_yolo_end2end` are
+shared and identical across backends.
 
-- The ORT GPU build lives in `third_party/onnxruntime/` (git-ignored; provision
-  per platform — the Jetson build drops in its own aarch64 ORT). See
-  `docs/GPU_SETUP.md`.
-- ORT + provider DLLs and `models/denso.onnx` are copied **beside the exe** by a
-  `POST_BUILD` step (the app resolves both relative to the executable dir).
-- Execution-provider fallback is **TensorRT → CUDA → CPU**; a missing GPU stack
-  degrades to CPU, never a hard failure. GPU provider DLLs are staged into
-  `third_party/gpu_ep/` (git-ignored) and glob-copied beside the exe when present.
-- The TensorRT EP builds an optimized engine on first run (FP16, cached under
-  `models/trt_cache/`) — a **minutes-long, non-interruptible** build. It must run
-  on the warm-up worker thread (`EngineRegistry::warm_up()`, driven by
-  `ui/warmup_state`), never lazily on a capture thread where it froze the UI and
-  blocked stream teardown — the reason TensorRT was dropped once before. Startup
-  is **conditional** (`ui/startup_mode` `cold_start_needs_splash`): a **cold**
-  start (models present but no cached `*.engine` → the minutes-long build) shows
-  the blocking `StartupScreen` splash and warms behind it, then builds the window;
-  a **warm** restart is **UI-first** — the window shows immediately and warm-up
-  runs in the background, each detection camera's capture thread (`CameraStream`)
-  created only **after its model(s) finish warming** so `EngineRegistry::get()` is
-  a cache-hit on the GUI thread. Either way the build never lands on a capture
-  thread; orientation-only cameras stream at once on the warm path.
-  `tools/build_trt_engine.sh` builds standalone `trtexec` engines offline;
-  `models/*.engine` and `models/trt_cache/` are git-ignored.
-- `models/*.onnx` are synced into the `model` catalog at startup (`model_sync`),
-  so dropping a new `.onnx` in `models/` makes it selectable next launch.
-- `denso_core` **never** links OpenCV/ORT — only `Qt6::Core`/`Sql`.
+**Windows / MSYS2 (dev) — ONNX Runtime (`OrtEngine`):** the ORT GPU build lives
+in `third_party/onnxruntime/` (git-ignored; see `docs/GPU_SETUP.md`). ORT +
+provider DLLs and `models/*.onnx` are copied beside the exe by a `POST_BUILD`
+step. Provider fallback is **TensorRT → CUDA → CPU** (missing GPU stack → CPU,
+never a hard fail); provider DLLs are staged in `third_party/gpu_ep/`. The
+TensorRT EP builds an optimized engine on first run (FP16, cached under
+`models/trt_cache/`) — a minutes-long, non-interruptible build that runs on the
+warm-up worker (`EngineRegistry::warm_up()`), never a capture thread. `model_sync`
+catalogs `models/*.onnx` (class names from ONNX metadata).
+
+**Linux / Jetson Orin Nano (real target) — native TensorRT (`TrtEngine`, links
+`nvinfer` + `CUDA::cudart`):** loads a **prebuilt `.engine` ONLY** — the operator
+builds it on-device with `trtexec` for TRT 10.3 / `sm_87`. The app **never builds
+one at runtime and has NO fallback**: a missing/incompatible/invalid engine
+**fails loud** at startup (throwing `TrtEngine` ctor → `WarmupWorker` catches →
+`app.exit(1)`). Class names come from a `<engine>.names.json` **sidecar**
+(TRT engines carry no name metadata); `model_sync` catalogs `models/*.engine` via
+those sidecars. Serialized-frame inference is mutex-guarded across cameras.
+
+**Startup** (`ui/startup_mode` `cold_start_needs_splash`): a **cold** start shows
+the blocking `StartupScreen` splash and warms behind it (Windows: the ORT build;
+Jetson: deserialize + warm each prebuilt engine), then builds the window; a
+**warm** restart (Windows, cached engine) is **UI-first** — the window shows
+immediately and each detection `CameraStream` starts only **after its model(s)
+finish warming**. Warm-up never lands on a capture thread.
+
+`denso_core` **never** links OpenCV/ORT/TensorRT — only `Qt6::Core`/`Sql`.
+`models/*.engine`, `models/*.names.json`, and `models/trt_cache/` are git-ignored.
 
 ## Hard rules
 

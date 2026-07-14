@@ -29,6 +29,8 @@ void WarmupState::start() {
     connect(thread_, &QThread::started, worker_, &WarmupWorker::run);
     connect(worker_, &WarmupWorker::model_ready, this, &WarmupState::on_model_ready);
     connect(worker_, &WarmupWorker::finished, this, &WarmupState::on_finished);
+    // Re-emit a fatal warm-up failure on the GUI thread (queued across threads).
+    connect(worker_, &WarmupWorker::failed, this, &WarmupState::failed);
     // Clean up the worker when the thread finishes; the thread is a child of this.
     connect(thread_, &QThread::finished, worker_, &QObject::deleteLater);
 

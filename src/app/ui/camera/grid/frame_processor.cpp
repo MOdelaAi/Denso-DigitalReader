@@ -29,7 +29,21 @@ DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
                                        ZoneSink* zone_sink)
     : degrees_(degrees), pitch_(pitch), roll_(roll),
       models_(std::move(models)), areas_(std::move(areas)),
-      camera_id_(camera_id), sink_(sink), zone_sink_(zone_sink) {}
+      camera_id_(camera_id), sink_(sink), zone_sink_(zone_sink) {
+    // Start the inference worker LAST, once every member is initialized.
+    worker_ = std::thread([this] { infer_loop(); });
+}
+
+DetectionProcessor::~DetectionProcessor() {
+    {
+        std::lock_guard<std::mutex> lk(slot_mtx_);
+        stop_ = true;
+    }
+    slot_cv_.notify_all();
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+}
 
 namespace {
 // Min confidence a camera keeps for class_id, or nullopt if not selected.
@@ -41,28 +55,68 @@ std::optional<float> selected_conf(
     return std::nullopt;
 }
 constexpr float kMergeIoU = 0.5f;  // cross-model boxes of a class over this merge
+
+void draw_detections(cv::Mat& bgr, const std::vector<NamedDetection>& kept) {
+    for (const NamedDetection& d : kept) {
+        cv::rectangle(bgr, d.box, cv::Scalar(0, 215, 255), 2);
+        std::string label = d.name;
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), " %.0f%%", d.conf * 100.0f);
+        label += buf;
+        cv::putText(bgr, label, cv::Point(d.box.x, std::max(0, d.box.y - 4)),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 215, 255), 1);
+    }
+}
 } // namespace
 
+// Display path (capture thread): orient, hand the newest frame to the inference
+// worker (dropping any older un-processed one), and draw the most-recent
+// detections. No inference here — the video stays smooth regardless of model
+// speed.
 QImage DetectionProcessor::process(const QImage& frame) {
     const QImage oriented = apply_orientation(frame, degrees_, pitch_, roll_);
     cv::Mat bgr = qimage_to_mat(oriented);
     if (bgr.empty()) {
         return oriented;
     }
+
+    // Submit a private copy so the worker can read it while we draw on `bgr`.
+    {
+        std::lock_guard<std::mutex> lk(slot_mtx_);
+        bgr.copyTo(pending_);
+        has_pending_ = true;
+    }
+    slot_cv_.notify_one();
+
+    // Overlay the latest detections (computed asynchronously). Only when the
+    // snapshot's frame size matches this frame do the boxes align.
+    std::vector<NamedDetection> boxes;
+    int dw = 0;
+    int dh = 0;
+    {
+        std::lock_guard<std::mutex> lk(det_mtx_);
+        boxes = latest_;
+        dw = det_w_;
+        dh = det_h_;
+    }
+    if (dw == bgr.cols && dh == bgr.rows && !boxes.empty()) {
+        draw_detections(bgr, boxes);
+    }
+    return mat_to_qimage(bgr);
+}
+
+// Pool every model's kept detections, tagged by class *name* so the same class
+// from different models can merge despite differing ids, then cross-model NMS.
+std::vector<NamedDetection> DetectionProcessor::run_inference(const cv::Mat& bgr) {
     const float w = static_cast<float>(bgr.cols);
     const float h = static_cast<float>(bgr.rows);
 
-    // Pool every model's kept detections, each tagged with its class *name*, so
-    // the same class from different models can merge despite differing ids.
     std::vector<NamedDetection> pool;
     for (const ModelRun& run : models_) {
         if (!run.engine) continue;
         for (const Detection& d : run.engine->infer(bgr)) {
             const auto conf = selected_conf(run.classes, d.class_id);
             if (!conf || d.conf < *conf) continue;  // not selected / below thr
-            // Confine to ROI: keep only boxes whose center is inside an area.
-            // Areas are normalized [0,1] to this oriented frame. Empty → no
-            // confinement.
             if (!areas_.empty() && w > 0.0f && h > 0.0f) {
                 const denso::camera::Point center{
                     (d.box.x + d.box.width * 0.5f) / w,
@@ -76,37 +130,53 @@ QImage DetectionProcessor::process(const QImage& frame) {
             pool.push_back({d.box, d.conf, std::move(name)});
         }
     }
+    return merge_detections(std::move(pool), kMergeIoU);
+}
 
-    // Cross-model NMS: within each class name, keep the highest-confidence box.
-    const std::vector<NamedDetection> kept =
-        merge_detections(std::move(pool), kMergeIoU);
+// Inference worker: consume the newest submitted frame, run the model(s), publish
+// the detections snapshot, and feed the reading/zone sinks — all off the display
+// path.
+void DetectionProcessor::infer_loop() {
+    for (;;) {
+        cv::Mat frame;
+        {
+            std::unique_lock<std::mutex> lk(slot_mtx_);
+            slot_cv_.wait(lk, [this] { return has_pending_ || stop_; });
+            if (stop_) {
+                return;
+            }
+            frame = std::move(pending_);
+            has_pending_ = false;
+        }
+        if (frame.empty()) {
+            continue;
+        }
 
-    // Reading-capture seam (dormant until a sink is wired by the logging
-    // feature). Timestamp is only computed when a sink exists, so a camera with
-    // no sink pays nothing.
-    if (sink_) {
-        const int64_t ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::system_clock::now().time_since_epoch())
-                                  .count();
-        sink_->on_reading(camera_id_, ts_ms, kept);
+        const std::vector<NamedDetection> kept = run_inference(frame);
+
+        {
+            std::lock_guard<std::mutex> lk(det_mtx_);
+            latest_ = kept;
+            det_w_ = frame.cols;
+            det_h_ = frame.rows;
+        }
+
+        // Reading-capture seam (dormant until a sink is wired). Timestamp only
+        // when a sink exists.
+        if (sink_) {
+            const int64_t ts_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+            sink_->on_reading(camera_id_, ts_ms, kept);
+        }
+        // Zone-reporting seam (brazing): assemble kept digits per zone.
+        if (zone_sink_) {
+            const float w = static_cast<float>(frame.cols);
+            const float h = static_cast<float>(frame.rows);
+            zone_sink_->on_zones(camera_id_, group_into_zones(kept, areas_, w, h));
+        }
     }
-
-    // Zone-reporting seam (brazing): assemble the kept digits into per-zone
-    // numbers and hand them to the reporter. Costs nothing without a sink.
-    if (zone_sink_) {
-        zone_sink_->on_zones(camera_id_, group_into_zones(kept, areas_, w, h));
-    }
-
-    for (const NamedDetection& d : kept) {
-        cv::rectangle(bgr, d.box, cv::Scalar(0, 215, 255), 2);
-        std::string label = d.name;
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), " %.0f%%", d.conf * 100.0f);
-        label += buf;
-        cv::putText(bgr, label, cv::Point(d.box.x, std::max(0, d.box.y - 4)),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 215, 255), 1);
-    }
-    return mat_to_qimage(bgr);
 }
 
 } // namespace denso::ui

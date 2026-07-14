@@ -9,6 +9,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDebug>
 #include <QThread>
 
 #include <memory>
@@ -41,6 +42,12 @@ int launch_cold_with_splash(QApplication& app, QSqlDatabase db,
     QObject::connect(thread, &QThread::started, worker, &WarmupWorker::run);
     QObject::connect(worker, &WarmupWorker::progress, splash.get(),
                      &StartupScreen::set_status);
+    // Engine-only, no fallback: a fatal warm-up failure aborts startup cleanly
+    // (clear message, non-zero exit) instead of std::terminate on the worker.
+    QObject::connect(worker, &WarmupWorker::failed, &app, [&app](const QString& err) {
+        qCritical().noquote() << "[fatal] model warm-up failed:" << err;
+        app.exit(1);
+    });
     QObject::connect(worker, &WarmupWorker::finished, &app,
                      [&window, &splash, thread, worker, db, state, engines]() {
                          thread->quit();
@@ -84,6 +91,12 @@ int launch_warm_ui_first(QApplication& app, QSqlDatabase db,
     window.show();
     window.raise();
     window.activateWindow();  // claim the foreground at launch
+
+    // Engine-only, no fallback: a fatal warm-up failure aborts startup cleanly.
+    QObject::connect(&warmup, &WarmupState::failed, &app, [&app](const QString& err) {
+        qCritical().noquote() << "[fatal] model warm-up failed:" << err;
+        app.exit(1);
+    });
 
     warmup.start();
     return app.exec();

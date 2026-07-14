@@ -9,7 +9,11 @@
 #pragma once
 
 #include "ui/camera/shared/detection/inference_engine.h"
+#ifdef _WIN32
 #include "ui/camera/shared/detection/ort_engine.h"
+#else
+#include "ui/camera/shared/detection/trt_engine.h"
+#endif
 
 #include <map>
 #include <memory>
@@ -18,6 +22,14 @@
 #include <functional>
 
 namespace denso::ui {
+
+// The concrete backend engine per platform. Both expose ok() and a
+// (path, cache_dir) constructor, so EngineRegistry builds either uniformly.
+#ifdef _WIN32
+using BackendEngine = OrtEngine;
+#else
+using BackendEngine = TrtEngine;
+#endif
 
 class EngineRegistry {
 public:
@@ -39,7 +51,7 @@ public:
 private:
     std::string models_dir_;
     std::string cache_dir_;
-    std::map<std::string, std::unique_ptr<OrtEngine>> engines_;
+    std::map<std::string, std::unique_ptr<BackendEngine>> engines_;
     std::mutex mutex_;
 };
 

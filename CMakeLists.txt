@@ -15,15 +15,29 @@ add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Sql Widgets Multimedia Network)
 find_package(OpenCV REQUIRED)
 
-# ONNX Runtime (GPU build, provisioned into third_party/). MinGW links the C
-# API directly against the MSVC-built DLL (clean C ABI — verified). The GPU
-# provider DLLs (CUDA/TensorRT) are loaded by ORT at runtime, not linked.
-set(ORT_DIR ${CMAKE_SOURCE_DIR}/third_party/onnxruntime)
-add_library(onnxruntime SHARED IMPORTED GLOBAL)
-set_target_properties(onnxruntime PROPERTIES
-    IMPORTED_LOCATION ${ORT_DIR}/lib/onnxruntime.dll
-    IMPORTED_IMPLIB   ${ORT_DIR}/lib/onnxruntime.dll
-    INTERFACE_INCLUDE_DIRECTORIES ${ORT_DIR}/include)
+# Inference backend is platform-split:
+#   Windows → ONNX Runtime (GPU build, provisioned into third_party/). MinGW
+#     links the C API directly against the MSVC-built DLL (clean C ABI). The GPU
+#     provider DLLs (CUDA/TensorRT) are loaded by ORT at runtime, not linked.
+#   Linux (Jetson) → native TensorRT + CUDA. Engines are PREBUILT with trtexec
+#     on-device (never at runtime); we link only the runtime (no nvonnxparser).
+if(WIN32)
+    set(ORT_DIR ${CMAKE_SOURCE_DIR}/third_party/onnxruntime)
+    add_library(onnxruntime SHARED IMPORTED GLOBAL)
+    set_target_properties(onnxruntime PROPERTIES
+        IMPORTED_LOCATION ${ORT_DIR}/lib/onnxruntime.dll
+        IMPORTED_IMPLIB   ${ORT_DIR}/lib/onnxruntime.dll
+        INTERFACE_INCLUDE_DIRECTORIES ${ORT_DIR}/include)
+else()
+    find_package(CUDAToolkit REQUIRED)              # provides the CUDA::cudart target
+    find_library(TRT_NVINFER nvinfer REQUIRED)
+    find_path(TRT_INCLUDE_DIR NvInfer.h
+        PATHS /usr/include/aarch64-linux-gnu /usr/include)
+    if(NOT TRT_INCLUDE_DIR)
+        message(FATAL_ERROR "NvInfer.h not found — install libnvinfer-headers-dev")
+    endif()
+    message(STATUS "TensorRT: ${TRT_NVINFER}  headers: ${TRT_INCLUDE_DIR}")
+endif()
 
 enable_testing()
 

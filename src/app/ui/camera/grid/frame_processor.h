@@ -2,10 +2,12 @@
 // raw frames and runs each through its FrameProcessor before display, so what a
 // tile shows is decoupled from how it's produced.
 //
-// Today the only processor is OrientationProcessor (applies the configured
-// rotation/pitch/roll). When the detection model lands, it becomes another
-// FrameProcessor — selected per camera by a config flag — and nothing in the
-// capture loop or the tile has to change.
+// OrientationProcessor applies the configured rotation/pitch/roll (cheap, on the
+// display path). DetectionProcessor additionally runs the model — but inference
+// runs on its OWN worker thread, off the display path: process() submits the
+// newest frame (drop-oldest) and draws the most-recent cached detections, so the
+// video stays smooth even when inference is slow. Boxes lag by a frame or two,
+// which is the correct real-time-UI trade-off.
 #pragma once
 
 #include "camera/camera.h"  // CameraArea
@@ -16,8 +18,13 @@
 
 #include <QImage>
 
+#include <opencv2/core.hpp>
+
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -50,7 +57,7 @@ private:
 /// DetectionProcessor has a sink, it calls on_reading() with the frame's kept
 /// detections so a consumer can record them (the data-logging feature).
 ///
-/// CONTRACT: on_reading() is invoked on the CAPTURE THREAD, in the hot path. An
+/// CONTRACT: on_reading() is invoked on the INFERENCE WORKER THREAD. An
 /// implementation MUST NOT block or do DB I/O inline — it must hand the data off
 /// to a worker (e.g. a queue or common::post_to_gui) and return immediately.
 struct ReadingSink {
@@ -60,22 +67,22 @@ struct ReadingSink {
 };
 
 /// Optional per-frame hook that receives the camera's assembled zone values (the
-/// brazing reporter). Same capture-thread hot-path contract as ReadingSink: the
-/// implementation MUST hand off (no blocking / no I/O inline) and return.
+/// brazing reporter). Same hand-off hot-path contract as ReadingSink; invoked on
+/// the inference worker thread.
 struct ZoneSink {
     virtual ~ZoneSink() = default;
     virtual void on_zones(int64_t camera_id, const std::vector<ZoneReading>& zones) = 0;
 };
 
-/// Runs one or more detection models on each frame and draws the results. Each
-/// entry pairs a shared engine with the camera's per-class selections (class id
-/// → min confidence). Orientation is applied first (so a detection tile matches
-/// the others), then detection is drawn on the oriented frame.
+/// Runs one or more detection models and draws the results — but decoupled from
+/// display. Orientation is applied on the display path; inference runs on a
+/// dedicated worker over a drop-oldest latest-frame slot, publishing a detections
+/// snapshot that process() overlays on subsequent frames. Each ModelRun pairs a
+/// shared engine with the camera's per-class selections (class id → min conf).
 ///
-/// If the camera has ROI `areas`, detection is confined to them: a box is drawn
+/// If the camera has ROI `areas`, detection is confined to them: a box is kept
 /// only when its center lands inside some area polygon. Empty `areas` means no
-/// confinement — every detection is drawn, as before. The displayed frame is
-/// unchanged either way; only which boxes are drawn differs.
+/// confinement.
 class DetectionProcessor : public FrameProcessor {
 public:
     struct ModelRun {
@@ -89,17 +96,40 @@ public:
                        std::vector<denso::camera::CameraArea> areas = {},
                        int64_t camera_id = 0, ReadingSink* sink = nullptr,
                        ZoneSink* zone_sink = nullptr);
-    QImage process(const QImage& frame) override;
+    ~DetectionProcessor() override;  // stops + joins the inference worker
+
+    DetectionProcessor(const DetectionProcessor&) = delete;
+    DetectionProcessor& operator=(const DetectionProcessor&) = delete;
+
+    QImage process(const QImage& frame) override;  // display path: submit + overlay
 
 private:
+    void infer_loop();                              // worker-thread body
+    std::vector<NamedDetection> run_inference(const cv::Mat& bgr);  // pool + merge
+
     int degrees_;
     double pitch_;
     double roll_;
     std::vector<ModelRun> models_;
     std::vector<denso::camera::CameraArea> areas_;  // empty = whole frame
     int64_t camera_id_ = 0;
-    ReadingSink* sink_ = nullptr;  // non-owning; null = no reading capture
-    ZoneSink* zone_sink_ = nullptr;  // non-owning; null = no zone reporting
+    ReadingSink* sink_ = nullptr;     // non-owning; null = no reading capture
+    ZoneSink* zone_sink_ = nullptr;   // non-owning; null = no zone reporting
+
+    // Latest-frame slot handed to the inference worker (drop-oldest).
+    std::mutex slot_mtx_;
+    std::condition_variable slot_cv_;
+    cv::Mat pending_;
+    bool has_pending_ = false;
+    bool stop_ = false;
+
+    // Detections snapshot published by the worker, drawn on the display path.
+    std::mutex det_mtx_;
+    std::vector<NamedDetection> latest_;
+    int det_w_ = 0;  // frame width the boxes were computed at
+    int det_h_ = 0;
+
+    std::thread worker_;  // started last in the ctor
 };
 
 } // namespace denso::ui

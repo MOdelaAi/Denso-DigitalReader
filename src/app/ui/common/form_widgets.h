@@ -24,4 +24,9 @@ QWidget* spec_row(const QString& label, QLabel** value_out);
 /// A 1px horizontal divider.
 QFrame* hline();
 
+/// Toggle a form field's "invalid" state — a red border via the theme's
+/// `[invalid="true"]` rule (works on QLineEdit / QListWidget). Repolishes the
+/// widget so the change shows immediately. Used for required-field validation.
+void mark_invalid(QWidget* field, bool invalid);
+
 } // namespace denso::ui::common

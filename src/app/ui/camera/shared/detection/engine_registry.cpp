@@ -15,11 +15,11 @@ InferenceEngine* EngineRegistry::get(const std::string& filename) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = engines_.find(filename);
     if (it == engines_.end()) {
-        auto eng = std::make_unique<OrtEngine>(models_dir_ + "/" + filename,
-                                               cache_dir_);
+        auto eng = std::make_unique<BackendEngine>(models_dir_ + "/" + filename,
+                                                   cache_dir_);
         it = engines_.emplace(filename, std::move(eng)).first;
     }
-    OrtEngine* e = it->second.get();
+    BackendEngine* e = it->second.get();
     return (e && e->ok()) ? e : nullptr;
 }
 
@@ -45,7 +45,12 @@ void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model,
         std::string ext = entry.path().extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(),
                        [](unsigned char c) { return std::tolower(c); });
-        if (ext != ".onnx") {
+#ifdef _WIN32
+        constexpr const char* kModelExt = ".onnx";  // ORT loads .onnx
+#else
+        constexpr const char* kModelExt = ".engine";  // native TRT loads prebuilt .engine
+#endif
+        if (ext != kModelExt) {
             continue;
         }
         const std::string filename = entry.path().filename().string();
@@ -53,11 +58,16 @@ void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model,
         if (on_model) {
             on_model(filename);
         }
+#ifdef _WIN32
         // First run per model builds the TensorRT engine — minutes-long — then
         // caches it; later runs just load. Log around it so the freeze isn't
         // mistaken for a hang.
         qInfo().noquote() << "[warmup] preparing" << name
                           << "(first run builds the TensorRT engine — may take minutes)";
+#else
+        // Native TRT: deserialize the prebuilt engine + warm CUDA kernels (fast).
+        qInfo().noquote() << "[warmup] preparing" << name << "(loading prebuilt engine)";
+#endif
         if (InferenceEngine* e = get(filename)) {
             e->infer(blank);  // build/load the engine + warm kernels; result discarded
             qInfo().noquote() << "[warmup] ready" << name;

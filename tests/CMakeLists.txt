@@ -93,6 +93,10 @@ add_executable(denso_tests
     # startup_mode is GUI-target code but pure std::filesystem (no Qt/OpenCV), so
     # compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/startup_mode.cpp
+    test_class_names_sidecar.cpp
+    # class_names_sidecar reads a JSON sidecar via Qt Core (no widgets), so
+    # compile it in for unit coverage.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/class_names_sidecar.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
