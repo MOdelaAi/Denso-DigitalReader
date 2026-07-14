@@ -50,6 +50,7 @@ private:
     std::unique_ptr<FrameProcessor> processor_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    int preferred_source_ = 0;  // last capture backend that worked; tried first on reconnect
     std::shared_ptr<std::atomic<int>> queued_{
         std::make_shared<std::atomic<int>>(0)};
 };

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -79,6 +80,85 @@ bool wait_or_stop(int ms, const std::atomic<bool>& stop) {
     }
     return !stop.load();
 }
+
+// One labelled way to open a cv::VideoCapture for this camera.
+struct SourceCandidate {
+    const char* label;
+    std::function<void(cv::VideoCapture&)> open;
+};
+
+// Ordered capture backends to try for `cam`. RTSP: hardware NVDEC H.264 → H.265
+// → software FFMPEG. USB: hardware MJPEG → raw YUYV → OpenCV's default V4L2. We
+// discover the right one by trying each until one opens AND yields a frame, so
+// the camera's codec/pixel-format need not be known or configured up front. On
+// non-Jetson hosts the nv* GStreamer elements are absent, so those candidates
+// fail to build and the FFMPEG / CAP_ANY fallbacks take over.
+std::vector<SourceCandidate> source_candidates(const camera::Camera& cam) {
+    const std::vector<int> params = {
+        cv::CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+        cv::CAP_PROP_READ_TIMEOUT_MSEC, 5000,
+    };
+    if (cam.camera_type == "usb") {
+        const int index = cam.index ? static_cast<int>(*cam.index) : 0;
+        const std::string dev = "/dev/video" + std::to_string(index);
+        const int w = static_cast<int>(cam.width);
+        const int h = static_cast<int>(cam.height);
+        const int fps = static_cast<int>(cam.fps);
+        return {
+            {"usb-mjpeg-nvdec",
+             [=](cv::VideoCapture& c) {
+                 c.open(usb_mjpeg_gst_pipeline(dev, w, h, fps), cv::CAP_GSTREAMER);
+             }},
+            {"usb-yuyv",
+             [=](cv::VideoCapture& c) {
+                 c.open(usb_yuyv_gst_pipeline(dev, w, h, fps), cv::CAP_GSTREAMER);
+             }},
+            {"usb-any",
+             [=, p = params](cv::VideoCapture& c) { c.open(index, cv::CAP_ANY, p); }},
+        };
+    }
+    const QString rtsp = cam.rtsp ? QString::fromStdString(*cam.rtsp) : QString();
+    const QString user = cam.username ? QString::fromStdString(*cam.username) : QString();
+    const QString pass = cam.password ? QString::fromStdString(*cam.password) : QString();
+    const std::string url = with_credentials(rtsp, user, pass).toStdString();
+    return {
+        {"rtsp-h264-nvdec",
+         [=](cv::VideoCapture& c) {
+             c.open(rtsp_gst_pipeline(url, Codec::H264), cv::CAP_GSTREAMER);
+         }},
+        {"rtsp-h265-nvdec",
+         [=](cv::VideoCapture& c) {
+             c.open(rtsp_gst_pipeline(url, Codec::H265), cv::CAP_GSTREAMER);
+         }},
+        {"rtsp-ffmpeg",
+         [=, p = params](cv::VideoCapture& c) { c.open(url, cv::CAP_FFMPEG, p); }},
+    };
+}
+
+// Try candidates (last-good first) until one opens AND reads a non-empty frame —
+// opening alone can succeed just before a codec/format negotiation failure, so
+// a real read is the accept test. Remembers the winner in `preferred` so
+// reconnects skip the dead backends. The probe frame is discarded; the read loop
+// fetches fresh.
+bool open_source(const camera::Camera& cam, int& preferred, cv::VideoCapture& cap,
+                 const std::atomic<bool>& stop) {
+    const auto cands = source_candidates(cam);
+    const int n = static_cast<int>(cands.size());
+    for (int i = 0; i < n && !stop.load(); ++i) {
+        const int idx = (preferred + i) % n;  // last-good backend first
+        cv::VideoCapture c;
+        cands[idx].open(c);
+        cv::Mat probe;
+        if (c.isOpened() && c.read(probe) && !probe.empty()) {
+            cap = std::move(c);
+            preferred = idx;
+            qInfo().noquote() << "[stream]" << QString::fromStdString(cam.name)
+                              << "opened via" << cands[idx].label;
+            return true;
+        }
+    }
+    return false;
+}
 }
 
 CameraStream::CameraStream(camera::Camera cam,
@@ -113,32 +193,13 @@ void CameraStream::run() {
         emit status_changed(static_cast<int>(Status::Connecting));
 
         cv::VideoCapture cap;
-        // Fail fast instead of hanging on an unreachable camera (mirrors snapshot).
-        const std::vector<int> params = {
-            cv::CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
-            cv::CAP_PROP_READ_TIMEOUT_MSEC, 5000,
-        };
-        if (cam_.camera_type == "usb") {
-            const int index = cam_.index ? static_cast<int>(*cam_.index) : 0;
-            cap.open(index, cv::CAP_ANY, params);
-        } else {
-            const QString rtsp = cam_.rtsp ? QString::fromStdString(*cam_.rtsp) : QString();
-            const QString user = cam_.username ? QString::fromStdString(*cam_.username) : QString();
-            const QString pass = cam_.password ? QString::fromStdString(*cam_.password) : QString();
-            const std::string url = with_credentials(rtsp, user, pass).toStdString();
-            // Prefer GStreamer (drops stale frames, low latency); fall back to
-            // FFMPEG if gst can't open (no plugins on the host).
-            cap.open(rtsp_gst_pipeline(url), cv::CAP_GSTREAMER);
-            if (!cap.isOpened()) {
-                qWarning().noquote() << "[stream]" << QString::fromStdString(cam_.name)
-                                     << "GStreamer open failed — falling back to FFMPEG";
-                cap.open(url, cv::CAP_FFMPEG, params);
-            }
-        }
-
-        if (!cap.isOpened()) {
+        // Discover the working capture backend (NVDEC H264/H265/FFMPEG for RTSP,
+        // MJPEG/YUYV/V4L2 for USB) by trying each until one opens and delivers a
+        // frame; the winner is remembered for fast reconnects.
+        if (!open_source(cam_, preferred_source_, cap, stop_)) {
+            if (stop_.load()) break;
             qWarning().noquote() << "[stream]" << QString::fromStdString(cam_.name)
-                                 << "failed to open — retrying";
+                                 << "failed to open (all backends) — retrying";
             emit status_changed(static_cast<int>(Status::Offline));
             backoff_ms = next_backoff_ms(backoff_ms);
             if (!wait_or_stop(backoff_ms, stop_)) break;
