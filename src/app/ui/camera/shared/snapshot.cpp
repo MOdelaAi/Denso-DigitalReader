@@ -41,12 +41,19 @@ QImage apply_orientation(const QImage& src, int degrees, double pitch,
     const double h = src.height();
     // Viewer distance scaled to the frame so the tilt reads naturally at any
     // resolution (a larger frame is treated as proportionally farther away).
-    const double dist = std::max(w, h);
+    [[maybe_unused]] const double dist = std::max(w, h);
 
     QTransform t;
     t.translate(w / 2.0, h / 2.0);              // pivot about the image centre
     t.rotate(roll + degrees, Qt::ZAxis);        // in-plane: preset + roll
-    t.rotate(pitch, Qt::XAxis, dist);           // out-of-plane tilt ⇒ perspective
+    // Out-of-plane tilt ⇒ perspective. The frame-proportional viewer distance
+    // overload landed in Qt 6.5; on older Qt (e.g. Jetson's 6.2) fall back to the
+    // 2-arg form (fixed built-in distance) — the tilt still renders.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    t.rotate(pitch, Qt::XAxis, dist);
+#else
+    t.rotate(pitch, Qt::XAxis);
+#endif
     t.translate(-w / 2.0, -h / 2.0);
     return src.transformed(t, Qt::SmoothTransformation);
 }
