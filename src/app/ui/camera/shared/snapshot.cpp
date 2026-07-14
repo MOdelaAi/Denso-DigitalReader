@@ -5,6 +5,8 @@
 
 #include <QTransform>
 
+#include <functional>
+
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 
@@ -61,39 +63,57 @@ QImage apply_orientation(const QImage& src, int degrees, double pitch,
 
 Snapshot grab_snapshot(std::optional<int> index, const QString& url,
                        int width, int height) {
-    cv::VideoCapture cap;
-    // Fail fast instead of hanging on an unreachable RTSP host.
+    // Fail fast instead of hanging on an unreachable host.
     const std::vector<int> params = {
         cv::CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
         cv::CAP_PROP_READ_TIMEOUT_MSEC, 5000,
     };
+
     if (index.has_value()) {
+        // USB: OpenCV's default V4L2 backend. cap.set(FRAME_WIDTH/HEIGHT) is safe
+        // here (not a live GStreamer pipeline) so honour the requested resolution.
+        cv::VideoCapture cap;
         cap.open(*index, cv::CAP_ANY, params);
-    } else {
-        // Match the live stream's capture path (which CAP_ANY does not on the
-        // Jetson): hardware NVDEC via GStreamer, H.264 then H.265, then a plain
-        // CAP_ANY fallback for non-Jetson hosts. `url` already carries creds.
-        const std::string u = url.toStdString();
-        cap.open(rtsp_gst_pipeline(u, Codec::H264), cv::CAP_GSTREAMER);
         if (!cap.isOpened()) {
-            cap.open(rtsp_gst_pipeline(u, Codec::H265), cv::CAP_GSTREAMER);
+            return {QImage(), QStringLiteral("Could not open the camera.")};
         }
-        if (!cap.isOpened()) {
-            cap.open(u, cv::CAP_ANY, params);
+        if (width > 0 && height > 0) {
+            cap.set(cv::CAP_PROP_FRAME_WIDTH, width);
+            cap.set(cv::CAP_PROP_FRAME_HEIGHT, height);
+        }
+        cv::Mat frame;
+        if (!cap.read(frame) || frame.empty()) {
+            return {QImage(), QStringLiteral("No frame received from the camera.")};
+        }
+        return {mat_to_qimage(frame), QString()};
+    }
+
+    // IP/RTSP: match the live stream — hardware NVDEC via GStreamer (H.264 then
+    // H.265), then a plain CAP_ANY fallback. Accept the first backend that opens
+    // AND reads a frame (the wrong-codec NVDEC pipeline reports isOpened()==false
+    // OR fails the read, so it's skipped). CRUCIAL: do NOT call cap.set(FRAME_*)
+    // on a GStreamer capture — it breaks the pipeline and the read returns empty
+    // (the reason the earlier preview failed); RTSP arrives at the camera's res.
+    // `url` already carries credentials.
+    const std::string u = url.toStdString();
+    const std::vector<std::function<void(cv::VideoCapture&)>> candidates = {
+        [&](cv::VideoCapture& c) {
+            c.open(rtsp_gst_pipeline(u, Codec::H264), cv::CAP_GSTREAMER);
+        },
+        [&](cv::VideoCapture& c) {
+            c.open(rtsp_gst_pipeline(u, Codec::H265), cv::CAP_GSTREAMER);
+        },
+        [&, params](cv::VideoCapture& c) { c.open(u, cv::CAP_ANY, params); },
+    };
+    for (const auto& open : candidates) {
+        cv::VideoCapture cap;
+        open(cap);
+        cv::Mat frame;
+        if (cap.isOpened() && cap.read(frame) && !frame.empty()) {
+            return {mat_to_qimage(frame), QString()};
         }
     }
-    if (!cap.isOpened()) {
-        return {QImage(), QStringLiteral("Could not open the camera.")};
-    }
-    if (width > 0 && height > 0) {
-        cap.set(cv::CAP_PROP_FRAME_WIDTH, width);
-        cap.set(cv::CAP_PROP_FRAME_HEIGHT, height);
-    }
-    cv::Mat frame;
-    if (!cap.read(frame) || frame.empty()) {
-        return {QImage(), QStringLiteral("No frame received from the camera.")};
-    }
-    return {mat_to_qimage(frame), QString()};
+    return {QImage(), QStringLiteral("Could not open the camera.")};
 }
 
 } // namespace denso::ui
