@@ -116,7 +116,9 @@ if(WIN32)
 else()
     # Linux/Jetson: native TensorRT. Engines are PREBUILT on-device with trtexec
     # and placed in <exe-dir>/models by the operator (not copied at build time).
-    target_sources(denso PRIVATE ui/camera/shared/detection/trt_engine.cpp)
+    target_sources(denso PRIVATE
+        ui/camera/shared/detection/trt_engine.cpp
+        ui/camera/shared/detection/class_names_sidecar.cpp)
     target_link_libraries(denso PRIVATE ${TRT_NVINFER} CUDA::cudart)
     target_include_directories(denso PRIVATE ${TRT_INCLUDE_DIR})
 endif()
