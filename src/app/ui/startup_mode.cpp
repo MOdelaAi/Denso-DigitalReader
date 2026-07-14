@@ -33,9 +33,20 @@ bool dir_has_ext(const std::string& dir, const std::string& want_ext) {
 
 bool cold_start_needs_splash(const std::string& models_dir,
                              const std::string& cache_dir) {
+#ifdef _WIN32
+    // Windows/ORT builds + caches the TensorRT engine on first run (minutes), so
+    // splash only when we have models but no cached engine yet.
     const bool has_models = dir_has_ext(models_dir, ".onnx");
     const bool has_engine = dir_has_ext(cache_dir, ".engine");
     return has_models && !has_engine;
+#else
+    // Linux/Jetson: engines are PREBUILT (no multi-minute build), but
+    // deserialize + warm-up still takes a few seconds per model, so show the
+    // splash whenever there is an engine to prepare. The ORT-cache notion of
+    // "already warm" does not apply.
+    (void)cache_dir;
+    return dir_has_ext(models_dir, ".engine");
+#endif
 }
 
 }  // namespace denso::ui
