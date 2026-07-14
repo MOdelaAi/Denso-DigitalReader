@@ -4,6 +4,7 @@
 #include "ui/camera/dialog/page_util.h"
 #include "ui/camera/dialog/ip_scan.h"
 #include "ui/camera/shared/rtsp_templates.h"
+#include "ui/common/form_widgets.h"  // mark_invalid
 
 #include <QComboBox>
 #include <QHBoxLayout>
@@ -136,6 +137,18 @@ CameraAddPage::CameraAddPage(QWidget* parent) : QWidget(parent) {
     connect(ip_edit_, &QLineEdit::textChanged, this,
             &CameraAddPage::update_rtsp_preview);
 
+    // Clear a field's required-error highlight as soon as the user edits it.
+    const auto clear_on_edit = [this](QLineEdit* e) {
+        connect(e, &QLineEdit::textChanged, this,
+                [this, e] { common::mark_invalid(e, false); });
+    };
+    clear_on_edit(name_edit_);
+    clear_on_edit(ip_edit_);
+    clear_on_edit(user_edit_);
+    clear_on_edit(pass_edit_);
+    connect(usb_list_, &QListWidget::itemSelectionChanged, this,
+            [this] { common::mark_invalid(usb_list_, false); });
+
     v->addWidget(ip_box_);
 
     add_error_ = new QLabel;
@@ -167,7 +180,7 @@ void CameraAddPage::reset() {
     channel_spin_->setValue(1);
     ip_list_->clear();  // IP scan is on-demand (slow); not run on open
     update_rtsp_preview();
-    add_error_->setVisible(false);
+    clear_errors();
     scan_usb();
     update_source_fields();
 }
@@ -234,51 +247,76 @@ void CameraAddPage::update_source_fields() {
     const bool usb = usb_radio_->isChecked();
     usb_box_->setVisible(usb);
     ip_box_->setVisible(!usb);
+    clear_errors();  // switching type changes which fields are required
+}
+
+void CameraAddPage::clear_errors() {
+    add_error_->setVisible(false);
+    common::mark_invalid(name_edit_, false);
+    common::mark_invalid(usb_list_, false);
+    common::mark_invalid(ip_edit_, false);
+    common::mark_invalid(user_edit_, false);
+    common::mark_invalid(pass_edit_, false);
 }
 
 void CameraAddPage::validate_and_emit() {
-    const auto fail = [this](const QString& msg) {
-        add_error_->setText(msg);
-        add_error_->setVisible(true);
+    clear_errors();
+
+    // Validate every required field in one pass: highlight each blank one, then
+    // block advancement (focusing the first) so the user sees exactly what's
+    // missing. Requiring username + password stops the silent 401 that an
+    // IP camera saved without credentials produced.
+    QWidget* first_invalid = nullptr;
+    const auto require = [&](bool ok, QWidget* field) {
+        if (!ok) {
+            common::mark_invalid(field, true);
+            if (!first_invalid) first_invalid = field;
+        }
+        return ok;
     };
 
     camera::Camera c;
     c.active = true;
     c.name = name_edit_->text().trimmed().toStdString();
+    bool ok = require(!c.name.empty(), name_edit_);
 
     if (usb_radio_->isChecked()) {
-        QListWidgetItem* item = usb_list_->currentItem();
-        if (!item || !(item->flags() & Qt::ItemIsSelectable)) {
-            fail(QStringLiteral("Select a camera, or click Scan."));
-            return;
-        }
         c.camera_type = "usb";
-        c.index = static_cast<uint32_t>(item->data(Qt::UserRole).toInt());
-        if (c.name.empty()) c.name = item->text().toStdString();
-    } else {
-        const QString ip = ip_edit_->text().trimmed();
-        if (ip.isEmpty()) {
-            fail(QStringLiteral("An IP address is required."));
-            return;
+        QListWidgetItem* item = usb_list_->currentItem();
+        const bool has_device = item && (item->flags() & Qt::ItemIsSelectable);
+        ok = require(has_device, usb_list_) && ok;
+        if (has_device) {
+            c.index = static_cast<uint32_t>(item->data(Qt::UserRole).toInt());
         }
-        const RtspManufacturer& m =
-            rtsp_manufacturers()[static_cast<size_t>(mfr_combo_->currentData().toInt())];
+    } else {
         c.camera_type = "ip";
-        c.ip = ip.toStdString();
-        c.manufacturer = m.name.toStdString();
-        c.stream = static_cast<uint32_t>(stream_combo_->currentIndex());
-        c.channel = static_cast<uint32_t>(channel_spin_->value());
-        c.rtsp = build_rtsp(m, ip, channel_spin_->value(),
-                            stream_combo_->currentIndex() == 1)
-                     .toStdString();
+        const QString ip = ip_edit_->text().trimmed();
         const QString user = user_edit_->text();
         const QString pass = pass_edit_->text();
+        ok = require(!ip.isEmpty(), ip_edit_) && ok;
+        ok = require(!user.isEmpty(), user_edit_) && ok;
+        ok = require(!pass.isEmpty(), pass_edit_) && ok;
+        if (!ip.isEmpty()) {
+            const RtspManufacturer& m = rtsp_manufacturers()[static_cast<size_t>(
+                mfr_combo_->currentData().toInt())];
+            c.ip = ip.toStdString();
+            c.manufacturer = m.name.toStdString();
+            c.stream = static_cast<uint32_t>(stream_combo_->currentIndex());
+            c.channel = static_cast<uint32_t>(channel_spin_->value());
+            c.rtsp = build_rtsp(m, ip, channel_spin_->value(),
+                                stream_combo_->currentIndex() == 1)
+                         .toStdString();
+        }
         if (!user.isEmpty()) c.username = user.toStdString();
         if (!pass.isEmpty()) c.password = pass.toStdString();
-        if (c.name.empty()) c.name = ip.toStdString();
     }
 
-    add_error_->setVisible(false);
+    if (!ok) {
+        add_error_->setText(QStringLiteral("Please fill in the highlighted fields."));
+        add_error_->setVisible(true);
+        if (first_invalid) first_invalid->setFocus();
+        return;
+    }
     emit next_requested(c);
 }
 

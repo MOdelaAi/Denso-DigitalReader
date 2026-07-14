@@ -4,6 +4,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QStyle>
 #include <QWidget>
 
 namespace denso::ui::common {
@@ -41,6 +42,19 @@ QFrame* hline() {
     line->setFrameShape(QFrame::HLine);
     line->setFixedHeight(1);
     return line;
+}
+
+void mark_invalid(QWidget* field, bool invalid) {
+    if (!field) {
+        return;
+    }
+    field->setProperty("invalid", invalid);
+    // A dynamic-property change doesn't restyle a widget on its own — re-polish.
+    if (QStyle* s = field->style()) {
+        s->unpolish(field);
+        s->polish(field);
+    }
+    field->update();
 }
 
 } // namespace denso::ui::common

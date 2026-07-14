@@ -138,6 +138,9 @@ QString style_sheet(const Palette& p) {
         QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled {
             background: %(panel2); color: %(txtFaint); border: 1px solid %(panel2);
         }
+        QLineEdit[invalid="true"], QListWidget[invalid="true"] {
+            border: 1px solid #ef4444;
+        }
         QCheckBox { color: %(txt); background: transparent; }
 
         #navList { background: transparent; border: none; }

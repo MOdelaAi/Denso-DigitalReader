@@ -37,6 +37,7 @@ private:
     void update_rtsp_preview();
     void update_source_fields();  // show USB vs IP inputs
     void validate_and_emit();     // build a draft from the form or show an error
+    void clear_errors();          // hide the message + clear all field highlights
 
     QRadioButton* usb_radio_ = nullptr;
     QRadioButton* ip_radio_ = nullptr;
