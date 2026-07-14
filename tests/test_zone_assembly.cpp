@@ -32,6 +32,37 @@ TEST_CASE("assemble_zone_value on empty or non-digit is nullopt", "[zone_assembl
     CHECK_FALSE(assemble_zone_value({digit(10, "x")}).has_value());
 }
 
+TEST_CASE("assemble_zone_value rejects four digits", "[zone_assembly]") {
+    std::vector<NamedDetection> d = {
+        digit(10, "5"),
+        digit(25, "0"),
+        digit(40, "0"),
+        digit(55, "0"),
+    };
+
+    CHECK_FALSE(assemble_zone_value(d).has_value());
+}
+
+TEST_CASE("assemble_zone_value accepts the maximum supported value", "[zone_assembly]") {
+    std::vector<NamedDetection> d = {
+        digit(10, "9"),
+        digit(25, "9"),
+        digit(40, "9"),
+    };
+
+    CHECK(assemble_zone_value(d) == 999);
+}
+
+TEST_CASE("assemble_zone_value rejects many digits without throwing", "[zone_assembly]") {
+    std::vector<NamedDetection> d;
+    for (int i = 0; i < 10; ++i) {
+        d.push_back(digit(10 + i * 15, "9"));
+    }
+
+    CHECK_NOTHROW(assemble_zone_value(d));
+    CHECK_FALSE(assemble_zone_value(d).has_value());
+}
+
 TEST_CASE("group_into_zones assigns digits to their area and skips zoneless", "[zone_assembly]") {
     // Two rectangular zones side by side in a 100x100 frame (normalized).
     CameraArea left;

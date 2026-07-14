@@ -272,3 +272,81 @@ TEST_CASE("replace_areas round-trips the zone number", "[camera_repo]") {
     CHECK(got[0].zone == 3);
     CHECK_FALSE(got[1].zone.has_value());
 }
+
+TEST_CASE("replace_areas rejects a zone already used by another camera", "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    const auto b = insert(d.handle(), ip_cam());
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+
+    CameraArea za;
+    za.name = "A-zone1";
+    za.zone = 1;
+    za.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    REQUIRE(replace_areas(d.handle(), *a, {za}));
+
+    // Camera B tries to claim the same machine-wide zone number.
+    CameraArea zb;
+    zb.name = "B-zone1";
+    zb.zone = 1;
+    zb.points = {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.5f, 0.8f}};
+    CHECK_FALSE(replace_areas(d.handle(), *b, {zb}));
+
+    // The rejected save left B with no areas and A's zone intact.
+    CHECK(areas_for(d.handle(), *b).empty());
+    const auto ga = areas_for(d.handle(), *a);
+    REQUIRE(ga.size() == 1);
+    CHECK(ga[0].zone == 1);
+}
+
+TEST_CASE("replace_areas lets a camera keep its own zone on re-save", "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    REQUIRE(a.has_value());
+
+    CameraArea za;
+    za.name = "A-zone2";
+    za.zone = 2;
+    za.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    REQUIRE(replace_areas(d.handle(), *a, {za}));
+    // Editing the same camera and re-saving the same zone must not self-conflict.
+    CHECK(replace_areas(d.handle(), *a, {za}));
+    CHECK(areas_for(d.handle(), *a).size() == 1);
+}
+
+TEST_CASE("replace_areas treats zone 0 as ROI-only, not a unique zone", "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    REQUIRE(a.has_value());
+
+    // Zone 0 means "ROI-only, not reported" (mirrors the UI's 0 = none). Multiple
+    // such areas must coexist without tripping the machine-wide uniqueness guard.
+    CameraArea r1;
+    r1.name = "roi-a";
+    r1.zone = 0;
+    r1.points = {{0.1f, 0.1f}, {0.4f, 0.1f}, {0.25f, 0.4f}};
+    CameraArea r2;
+    r2.name = "roi-b";
+    r2.zone = 0;
+    r2.points = {{0.6f, 0.6f}, {0.9f, 0.6f}, {0.75f, 0.9f}};
+    CHECK(replace_areas(d.handle(), *a, {r1, r2}));
+    CHECK(areas_for(d.handle(), *a).size() == 2);
+}
+
+TEST_CASE("replace_areas rejects duplicate zone numbers within one camera", "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    REQUIRE(a.has_value());
+
+    CameraArea z1;
+    z1.name = "one";
+    z1.zone = 5;
+    z1.points = {{0.1f, 0.1f}, {0.4f, 0.1f}, {0.25f, 0.4f}};
+    CameraArea z2;
+    z2.name = "two";
+    z2.zone = 5;  // same zone number in the same save
+    z2.points = {{0.6f, 0.6f}, {0.9f, 0.6f}, {0.75f, 0.9f}};
+    CHECK_FALSE(replace_areas(d.handle(), *a, {z1, z2}));
+    CHECK(areas_for(d.handle(), *a).empty());
+}
