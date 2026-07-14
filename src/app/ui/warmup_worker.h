@@ -27,6 +27,9 @@ signals:
     void progress(const QString& model);
     void model_ready(const QString& filename);
     void finished();
+    /// A model failed to load/warm (engine-only: no fallback). Fatal — the app
+    /// should surface this and abort rather than start cameras as if warm.
+    void failed(const QString& error);
 
 private:
     std::shared_ptr<EngineRegistry> engines_;

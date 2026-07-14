@@ -39,6 +39,9 @@ public:
 signals:
     void model_ready(const QString& filename);
     void finished();
+    /// Re-emitted from the worker: a fatal warm-up failure (engine-only, no
+    /// fallback). The app connects this to a clean abort.
+    void failed(const QString& error);
 
 private slots:
     void on_model_ready(const QString& filename);
