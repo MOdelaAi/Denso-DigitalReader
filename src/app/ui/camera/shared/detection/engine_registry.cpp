@@ -1,5 +1,7 @@
 #include "ui/camera/shared/detection/engine_registry.h"
 
+#include "ui/camera/shared/detection/engine_requirements.h"
+
 #include <QDebug>
 #include <QString>
 
@@ -8,6 +10,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <mutex>
+#include <set>
+#include <stdexcept>
+#include <string>
 
 namespace denso::ui {
 
@@ -27,9 +32,11 @@ void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model,
                              std::function<void(const std::string&)> on_ready) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    if (!fs::is_directory(models_dir_, ec)) {
-        return;
-    }
+    std::set<std::string> warmed;  // model files successfully loaded + warmed
+    // A missing models dir isn't fatal on its own — it's only a problem if a
+    // configured camera needs a model (checked against `required_` below). So we
+    // guard the scan rather than early-return, letting the fail-loud check run.
+    if (fs::is_directory(models_dir_, ec)) {
     // The TensorRT EP writes/reads its prebuilt engines here — create it up front
     // so the first-run build has somewhere to cache to.
     fs::create_directories(cache_dir_, ec);
@@ -71,12 +78,30 @@ void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model,
         if (InferenceEngine* e = get(filename)) {
             e->infer(blank);  // build/load the engine + warm kernels; result discarded
             qInfo().noquote() << "[warmup] ready" << name;
+            warmed.insert(filename);
             if (on_ready) {
                 on_ready(filename);
             }
         } else {
             qWarning().noquote() << "[warmup] failed to load" << name;
         }
+    }
+    }  // end if (is_directory)
+
+    // Fail loud, honoring the engine-only/no-fallback contract: every model a
+    // configured camera needs must have loaded + warmed. A missing models dir or
+    // an absent/failed engine file would otherwise silently demote that camera to
+    // no-detection (Windows) or throw from get() on the GUI thread later (Jetson).
+    // Throwing here routes to WarmupWorker → app.exit(1), the intended abort.
+    const std::vector<std::string> missing =
+        missing_required_models(required_, warmed);
+    if (!missing.empty()) {
+        std::string joined;
+        for (const std::string& m : missing) {
+            joined += (joined.empty() ? "" : ", ") + m;
+        }
+        throw std::runtime_error(
+            "required detection model(s) missing or failed to load: " + joined);
     }
 }
 

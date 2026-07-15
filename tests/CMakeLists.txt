@@ -72,6 +72,12 @@ add_executable(denso_tests
     # compile it in.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/stream_pacing.cpp
     test_safe_process.cpp
+    test_frame_processor.cpp
+    # frame_processor is GUI-target code but its link deps (snapshot,
+    # frame_convert, zone_assembly, merge_detections, area_geometry) are all
+    # already compiled/linked here and inference is behind the InferenceEngine
+    # interface (fake-injectable), so compile it in for the worker-firewall test.
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/frame_processor.cpp
     test_zone_assembly.cpp
     # zone_assembly is GUI-target code but pure (OpenCV value types + core
     # geometry, no widgets/Qt-net), so compile it in.
@@ -97,6 +103,9 @@ add_executable(denso_tests
     # class_names_sidecar reads a JSON sidecar via Qt Core (no widgets), so
     # compile it in for unit coverage.
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/class_names_sidecar.cpp
+    test_engine_requirements.cpp
+    # engine_requirements is a header-only pure helper (no backend), so the test
+    # needs no extra source.
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)

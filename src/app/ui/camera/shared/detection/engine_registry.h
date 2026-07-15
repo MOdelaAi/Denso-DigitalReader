@@ -20,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <functional>
+#include <vector>
 
 namespace denso::ui {
 
@@ -33,8 +34,15 @@ using BackendEngine = TrtEngine;
 
 class EngineRegistry {
 public:
-    EngineRegistry(std::string models_dir, std::string cache_dir)
-        : models_dir_(std::move(models_dir)), cache_dir_(std::move(cache_dir)) {}
+    /// `required` is the set of model filenames that configured cameras need
+    /// (see detection::attached_model_filenames). warm_up() fails loud if any of
+    /// them is missing or fails to load, honoring the engine-only/no-fallback
+    /// contract instead of silently demoting a camera to no-detection.
+    EngineRegistry(std::string models_dir, std::string cache_dir,
+                   std::vector<std::string> required = {})
+        : models_dir_(std::move(models_dir)),
+          cache_dir_(std::move(cache_dir)),
+          required_(std::move(required)) {}
 
     /// Engine for `filename` (resolved under models_dir), or nullptr if it
     /// failed to load. Cached across calls.
@@ -51,6 +59,7 @@ public:
 private:
     std::string models_dir_;
     std::string cache_dir_;
+    std::vector<std::string> required_;  // model files configured cameras need
     std::map<std::string, std::unique_ptr<BackendEngine>> engines_;
     std::mutex mutex_;
 };

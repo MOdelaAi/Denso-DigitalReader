@@ -156,3 +156,23 @@ TEST_CASE("detection_for is empty for a camera with no models") {
     const int64_t cam = seed_camera(d.handle());
     REQUIRE(detection_for(d.handle(), cam).models.empty());
 }
+
+TEST_CASE("attached_model_filenames returns distinct filenames across cameras") {
+    using denso::detection::attached_model_filenames;
+    auto d = mem();
+
+    // No attachments → empty (the "no detection configured" case).
+    REQUIRE(attached_model_filenames(d.handle()).empty());
+
+    const int64_t model = seed_model(d.handle());  // denso.onnx
+    const int64_t cam1 = seed_camera(d.handle());
+    const int64_t cam2 = seed_camera(d.handle());
+    CameraModel a; a.camera_id = cam1; a.model_id = model;
+    CameraModel b; b.camera_id = cam2; b.model_id = model;  // same model, 2 cams
+    REQUIRE(set_camera_models(d.handle(), cam1, {a}));
+    REQUIRE(set_camera_models(d.handle(), cam2, {b}));
+
+    const auto files = attached_model_filenames(d.handle());
+    REQUIRE(files.size() == 1);  // distinct: one filename, not two rows
+    REQUIRE(files[0] == "denso.onnx");
+}

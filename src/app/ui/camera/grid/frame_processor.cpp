@@ -6,6 +6,8 @@
 #include "ui/camera/shared/snapshot.h"       // apply_orientation
 #include "ui/camera/shared/detection/merge_detections.h"  // merge_detections
 
+#include <QDebug>
+
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
@@ -152,7 +154,25 @@ void DetectionProcessor::infer_loop() {
             continue;
         }
 
-        const std::vector<NamedDetection> kept = run_inference(frame);
+        // Exception firewall for the inference worker. TrtEngine::infer() (and
+        // the ORT path) THROWS on a CUDA copy / enqueue / sync failure; this is
+        // a bare std::thread body, so an escaping exception would std::terminate
+        // the whole app — the field device would die on a transient GPU hiccup.
+        // Skip the failed frame (don't publish stale/empty boxes, don't feed the
+        // zone sink a phantom reading) and stay alive; the next frame retries.
+        // Log is throttled so a persistent failure surfaces without spamming.
+        std::vector<NamedDetection> kept;
+        try {
+            kept = run_inference(frame);
+        } catch (const std::exception& e) {
+            if (infer_fail_streak_++ % kInferFailLogEvery == 0) {
+                qWarning().noquote()
+                    << "[infer] camera" << camera_id_ << "inference failed ("
+                    << infer_fail_streak_ << " in a row):" << e.what();
+            }
+            continue;
+        }
+        infer_fail_streak_ = 0;  // recovered
 
         {
             std::lock_guard<std::mutex> lk(det_mtx_);
