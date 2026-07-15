@@ -8,6 +8,10 @@
 
 #include <QWidget>
 
+#include <cstdint>
+#include <set>
+#include <string>
+
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -31,6 +35,11 @@ public:
     /// A configured USB index that isn't currently detected is shown as a
     /// placeholder so it survives Next.
     void populate(const camera::Camera& cam);
+
+    /// The IPs / USB indices already used by existing cameras (excluding the one
+    /// being edited). Scan results matching these are tagged "(in use)" so the
+    /// operator can see which discovered devices are already added.
+    void set_used_sources(std::set<std::string> ips, std::set<uint32_t> usb);
 
 signals:
     void cancel_requested();
@@ -60,6 +69,9 @@ private:
     QLineEdit* pass_edit_ = nullptr;
     QLabel* rtsp_preview_ = nullptr;
     QLabel* add_error_ = nullptr;
+
+    std::set<std::string> used_ips_;    // IPs already owned by other cameras
+    std::set<uint32_t> used_usb_;       // USB indices already owned by other cameras
 };
 
 } // namespace denso::ui

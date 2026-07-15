@@ -66,6 +66,7 @@ public slots:
     void areas_back();             // Areas Back: direct→list, wizard→Models step
 
 private:
+    void push_used_sources();      // tag scan results already owned by other cams
     void open_configure(const QString& preview_text);  // seed Configure from draft_
     void enter_models();           // load catalog + attachments → Models page
     void enter_areas(bool direct); // load areas + frame → Areas page

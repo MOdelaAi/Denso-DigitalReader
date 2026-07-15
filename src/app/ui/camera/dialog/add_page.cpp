@@ -6,6 +6,7 @@
 #include "ui/camera/shared/rtsp_templates.h"
 #include "ui/common/form_widgets.h"  // mark_invalid
 
+#include <QColor>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -185,6 +186,12 @@ void CameraAddPage::reset() {
     update_source_fields();
 }
 
+void CameraAddPage::set_used_sources(std::set<std::string> ips,
+                                     std::set<uint32_t> usb) {
+    used_ips_ = std::move(ips);
+    used_usb_ = std::move(usb);
+}
+
 void CameraAddPage::populate(const camera::Camera& cam) {
     clear_errors();
     name_edit_->setText(QString::fromStdString(cam.name));
@@ -235,8 +242,12 @@ void CameraAddPage::scan_usb() {
     usb_list_->clear();
     const std::vector<UsbCamera> cams = list_usb_cameras();
     for (const UsbCamera& cam : cams) {
-        auto* item = new QListWidgetItem(cam.name, usb_list_);
+        const bool in_use = used_usb_.count(static_cast<uint32_t>(cam.index)) != 0;
+        auto* item = new QListWidgetItem(
+            in_use ? QStringLiteral("%1  (in use)").arg(cam.name) : cam.name,
+            usb_list_);
         item->setData(Qt::UserRole, cam.index);
+        if (in_use) item->setForeground(palette().color(QPalette::PlaceholderText));  // theme dim
     }
     if (cams.empty()) {
         auto* none = new QListWidgetItem(QStringLiteral("No USB cameras found"), usb_list_);
@@ -260,9 +271,14 @@ void CameraAddPage::scan_ip() {
             [this, hosts] {
                 ip_list_->clear();
                 for (const QString& ip : hosts) {
+                    const bool in_use =
+                        used_ips_.count(ip.toStdString()) != 0;
                     auto* item = new QListWidgetItem(
-                        QStringLiteral("%1 : 554 open").arg(ip), ip_list_);
+                        in_use ? QStringLiteral("%1 : 554 open  (in use)").arg(ip)
+                               : QStringLiteral("%1 : 554 open").arg(ip),
+                        ip_list_);
                     item->setData(Qt::UserRole, ip);
+                    if (in_use) item->setForeground(palette().color(QPalette::PlaceholderText));  // theme dim
                 }
                 if (hosts.empty()) {
                     auto* none = new QListWidgetItem(

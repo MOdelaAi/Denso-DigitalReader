@@ -16,6 +16,8 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -27,10 +29,24 @@ CameraWizardController::CameraWizardController(QSqlDatabase db, Pages pages,
     : QObject(parent), db_(std::move(db)), pages_(pages),
       show_page_(std::move(show_page)) {}
 
+void CameraWizardController::push_used_sources() {
+    // Sources already owned by OTHER cameras, so the Source-page scan can tag them
+    // "(in use)". Exclude the camera being edited (its own IP isn't a conflict).
+    std::set<std::string> ips;
+    std::set<uint32_t> usb;
+    for (const camera::Camera& c : camera::all(db_)) {
+        if (editing_id_.has_value() && c.id == *editing_id_) continue;
+        if (c.ip) ips.insert(*c.ip);
+        if (c.index) usb.insert(*c.index);
+    }
+    pages_.add->set_used_sources(std::move(ips), std::move(usb));
+}
+
 void CameraWizardController::begin_add() {
     editing_id_ = std::nullopt;
     original_ = camera::Camera{};
     draft_ = camera::Camera{};
+    push_used_sources();  // before reset() — scan_usb() reads the used set
     pages_.add->reset();
     show_page_(1);
 }
@@ -39,6 +55,7 @@ void CameraWizardController::begin_edit(const camera::Camera& cam) {
     editing_id_ = cam.id;
     original_ = cam;
     draft_ = cam;
+    push_used_sources();  // before populate() — scan_usb() reads the used set
     pages_.add->populate(cam);
     show_page_(1);
 }
