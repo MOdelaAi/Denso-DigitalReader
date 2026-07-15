@@ -22,6 +22,19 @@ target_include_directories(denso_detection PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(denso_detection PUBLIC denso_core Qt6::Core ${OpenCV_LIBS})
 
+# ── denso_brazing: the pure, testable reporting logic (combined-zone payload
+#    builder, single-flight retry policy, machine-wide zone aggregator) with NO
+#    Qt-Network dependency. Both `denso` and `denso_tests` LINK it. The Qt-Network
+#    transport (brazing_client/reporter) + the ZoneSink impl (zone_reporter) stay
+#    in `denso`.
+add_library(denso_brazing STATIC
+    brazing/brazing_payload.cpp
+    brazing/brazing_retry_policy.cpp
+    brazing/zone_aggregator.cpp
+)
+target_include_directories(denso_brazing PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(denso_brazing PUBLIC denso_core Qt6::Core)
+
 add_executable(denso WIN32
     main.cpp
     resources.qrc
@@ -66,12 +79,11 @@ add_executable(denso WIN32
     ui/camera/grid/camera_stream.cpp
     ui/camera/grid/stream_pacing.cpp
     ui/camera/grid/zone_assembly.cpp
-    ui/camera/grid/zone_aggregator.cpp
-    ui/camera/grid/brazing_payload.cpp
-    ui/camera/grid/brazing_retry_policy.cpp
-    ui/camera/grid/brazing_client.cpp
-    ui/camera/grid/brazing_reporter.cpp
-    ui/camera/grid/zone_reporter.cpp
+    # brazing/reporting: the Qt-Network transport + ZoneSink impl (pure logic —
+    # payload/retry_policy/aggregator — is in the denso_brazing lib below)
+    brazing/brazing_client.cpp
+    brazing/brazing_reporter.cpp
+    brazing/zone_reporter.cpp
     ui/camera/grid/camera_tile.cpp
     ui/camera/grid/frame_processor.cpp
     ui/camera/grid/fps_meter.cpp
@@ -89,7 +101,7 @@ add_executable(denso WIN32
     ui/camera/dialog/ip_scan.cpp
 )
 target_include_directories(denso PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(denso PRIVATE denso_core denso_detection Qt6::Widgets Qt6::Multimedia Qt6::Network)
+target_link_libraries(denso PRIVATE denso_core denso_detection denso_brazing Qt6::Widgets Qt6::Multimedia Qt6::Network)
 target_include_directories(denso PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(denso PRIVATE ${OpenCV_LIBS})
 target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")

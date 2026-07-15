@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/grid/brazing_payload.h"
+#include "brazing/brazing_payload.h"
 
 using denso::ui::build_brazing_payload;
 

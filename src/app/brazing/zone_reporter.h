@@ -6,8 +6,8 @@
 // network.
 #pragma once
 
-#include "ui/camera/grid/zone_sink.h"   // ZoneSink (no dep on frame_processor)
-#include "ui/camera/grid/zone_aggregator.h"
+#include "brazing/zone_sink.h"   // ZoneSink (no dep on frame_processor)
+#include "brazing/zone_aggregator.h"
 
 #include <functional>
 #include <map>

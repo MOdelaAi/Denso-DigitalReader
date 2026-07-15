@@ -1,4 +1,4 @@
-#include "ui/camera/grid/brazing_reporter.h"
+#include "brazing/brazing_reporter.h"
 
 #include <QPointer>
 #include <QTimer>

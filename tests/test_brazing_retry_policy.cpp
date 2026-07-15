@@ -1,4 +1,4 @@
-#include "ui/camera/grid/brazing_retry_policy.h"
+#include "brazing/brazing_retry_policy.h"
 
 #include <catch2/catch_test_macros.hpp>
 

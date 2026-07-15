@@ -12,7 +12,7 @@
 
 #include "camera/camera.h"  // CameraArea
 #include "detection/detection.h"
-#include "ui/camera/grid/zone_sink.h"  // ZoneSink (+ ZoneReading)
+#include "brazing/zone_sink.h"  // ZoneSink (+ ZoneReading)
 #include "detection/inference_engine.h"
 #include "detection/merge_detections.h"  // NamedDetection
 

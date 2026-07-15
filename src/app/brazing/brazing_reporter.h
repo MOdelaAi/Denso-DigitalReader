@@ -6,7 +6,7 @@
 // covered by the integration smoke). Retry state is in-memory only.
 #pragma once
 
-#include "ui/camera/grid/brazing_retry_policy.h"
+#include "brazing/brazing_retry_policy.h"
 #include "ui/camera/grid/brazing_transport.h"
 
 #include <QObject>

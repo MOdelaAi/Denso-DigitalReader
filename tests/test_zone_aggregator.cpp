@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/grid/zone_aggregator.h"
+#include "brazing/zone_aggregator.h"
 
 using denso::ui::ZoneAggregator;
 using denso::ui::ZoneReading;

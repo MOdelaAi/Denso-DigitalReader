@@ -7,7 +7,7 @@
 // only) — the ZoneReporter wraps it with a mutex and the network marshal.
 #pragma once
 
-#include "ui/camera/grid/zone_reading.h"
+#include "brazing/zone_reading.h"
 
 #include <cstdint>
 #include <map>

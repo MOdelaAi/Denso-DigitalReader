@@ -6,7 +6,7 @@
 // zone_reading.h. (Both move to app/brazing/ when the reporting subsystem does.)
 #pragma once
 
-#include "ui/camera/grid/zone_reading.h"  // ZoneReading
+#include "brazing/zone_reading.h"  // ZoneReading
 
 #include <cstdint>
 #include <vector>

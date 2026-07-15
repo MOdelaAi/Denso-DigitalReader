@@ -1,4 +1,4 @@
-#include "ui/camera/grid/zone_reporter.h"
+#include "brazing/zone_reporter.h"
 
 #include <chrono>
 #include <utility>

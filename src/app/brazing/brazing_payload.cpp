@@ -1,4 +1,4 @@
-#include "ui/camera/grid/brazing_payload.h"
+#include "brazing/brazing_payload.h"
 
 namespace denso::ui {
 

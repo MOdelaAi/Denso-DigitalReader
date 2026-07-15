@@ -1,8 +1,8 @@
-#include "ui/camera/grid/brazing_client.h"
+#include "brazing/brazing_client.h"
 
 #include "logging/redact.h"
 
-#include "ui/camera/grid/brazing_payload.h"
+#include "brazing/brazing_payload.h"
 
 #include <QByteArray>
 #include <QDebug>
