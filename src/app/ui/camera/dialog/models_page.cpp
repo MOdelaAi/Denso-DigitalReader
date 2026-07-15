@@ -31,10 +31,23 @@ ModelsPage::ModelsPage(QWidget* parent) : QWidget(parent) {
 
     // ── Classes to detect ──
     root->addWidget(new QLabel(QStringLiteral("Classes to detect")));
+    auto* filter_row = new QHBoxLayout;
     search_ = new QLineEdit;
     search_->setPlaceholderText(QStringLiteral("Filter classes…"));
-    root->addWidget(search_);
     connect(search_, &QLineEdit::textChanged, this, [this] { apply_filter(); });
+    filter_row->addWidget(search_, 1);
+    // Select all / Clear act on the rows currently VISIBLE under the filter — so
+    // you can narrow with the filter and select just that subset, or select every
+    // class when the filter is empty (e.g. all 10 digits for the digit reader).
+    auto* select_all = new QPushButton(QStringLiteral("Select all"));
+    select_all->setProperty("flatText", true);
+    connect(select_all, &QPushButton::clicked, this, [this] { set_visible_checked(true); });
+    filter_row->addWidget(select_all, 0);
+    auto* clear_all = new QPushButton(QStringLiteral("Clear"));
+    clear_all->setProperty("flatText", true);
+    connect(clear_all, &QPushButton::clicked, this, [this] { set_visible_checked(false); });
+    filter_row->addWidget(clear_all, 0);
+    root->addLayout(filter_row);
 
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
@@ -170,6 +183,14 @@ void ModelsPage::apply_filter() {
     for (const ClassRow& r : class_rows_) {
         const bool show = q.isEmpty() || r.name.contains(q, Qt::CaseInsensitive);
         r.row->setVisible(show);
+    }
+}
+
+void ModelsPage::set_visible_checked(bool on) {
+    // !isHidden() reflects the filter state set by apply_filter() directly,
+    // independent of whether the page/ancestors are currently shown.
+    for (const ClassRow& r : class_rows_) {
+        if (!r.row->isHidden()) r.on->setChecked(on);
     }
 }
 

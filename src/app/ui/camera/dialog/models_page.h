@@ -42,6 +42,7 @@ signals:
 private:
     void rebuild_class_list();  // union of the checked models' class names
     void apply_filter();        // show/hide class rows by the search text
+    void set_visible_checked(bool on);  // check/uncheck every filtered-visible row
 
     QSqlDatabase db_;
     QVBoxLayout* models_layout_ = nullptr;  // ensemble model checkboxes
