@@ -10,8 +10,9 @@ Orin Nano**. (See `CLAUDE.md` for the full source map and hard rules.)
 | Target | Location | Role / deps |
 |---|---|---|
 | `denso_core` | `src/core/` | Testable logic + SQLite persistence. Qt Core/Sql only — **no** Widgets, OpenCV, or inference runtime. |
-| `denso` | `src/app/` | Qt Widgets GUI, camera capture, inference, orchestration. |
-| `denso_tests` | `tests/` | Catch2 over pure logic + platform-independent helpers. |
+| `denso_detection` / `denso_brazing` / `denso_camera` | `src/app/{detection,brazing,camera}/` | Pure static subsystem libs (inference helpers / reporting logic / non-widget capture infra). **Both `denso` and `denso_tests` LINK these** — tests validate the shipped objects, not a second compile. Graph: `denso_core ← {detection, brazing, camera(→detection)} ← denso`. |
+| `denso` | `src/app/` | Qt Widgets GUI, camera capture, inference backend, orchestration + the subsystem libs. Widgets live under `src/app/ui/camera/`; the subsystems moved out to `src/app/{camera,detection,brazing}/`. |
+| `denso_tests` | `tests/` | Catch2 over pure logic + platform-independent helpers (links `denso_core` + the three subsystem libs). |
 
 Keep `main.cpp` a thin orchestrator. Domain code must not depend on GUI types
 (the domain↔view boundary lives in `src/core/ui/convert.*`). DB changes are new
@@ -84,3 +85,13 @@ Catch2 v3 is fetched at first configure (needs net once).
 - Don't leak Qt Widgets / OpenCV / ORT / CUDA / TensorRT into `denso_core`.
 - Keep platform behavior behind the existing interfaces; the shared
   letterbox/decode must stay identical across backends.
+- **Never `git add -A` in this repo.** Untracked models/scratch (`models/*.onnx`,
+  operator notes) live in the tree; a blanket add sweeps a 38 MB model into a
+  commit and blocks `git pull` on the Jetson. Use explicit `git add <files>` /
+  `git add -u`.
+- The DB migration chain is at **v11** (`camera.areas_need_review`, added for the
+  editable-source / ROI-quarantine feature). Add a new migration — never edit a
+  shipped one.
+- Logging is a bounded rotating file sink (`src/app/logging/`, ~25 MiB cap) meant
+  for 24/7 runs; `qDebug/qWarning/qCritical` route through it. `DENSO_LOG_LEVEL`
+  sets the floor.

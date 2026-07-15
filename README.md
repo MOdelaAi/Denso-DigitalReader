@@ -17,7 +17,8 @@ Built with **C++ / Qt Widgets / CMake**, backed by a single SQLite store
   (reasserted to the OS at boot), and Wi-Fi scan / connect. Windows uses
   `netsh`/`ipconfig`; Linux uses `nmcli`.
 - **Camera** — live 1–4 camera grid with per-camera ONNX digit detection and
-  named ROI polygons.
+  named ROI polygons. Each camera's source is editable; changing it re-verifies
+  the ROIs (reporting pauses until they're re-checked against the new view).
 - **Server** — push each ROI's reading to a backend as one combined JSON POST
   (see *Brazing zone reporting* below).
 
@@ -101,21 +102,31 @@ Two CMake targets, split by concern and tied together by a thin top-level
 ```
 src/
 ├─ core/   → denso_core  (library; Qt Core/Sql + std)
-│  ├─ db/        SQLite base + version-gated migrations
+│  ├─ db/        SQLite base + version-gated migrations (currently v11)
 │  ├─ hardware/  host spec (QSysInfo / QStorageInfo)
 │  ├─ network/   domain + persistence + OS backends
 │  │  ├─ windows/  netsh / parse / wifi + Windows backend
 │  │  └─ linux/    nmcli + Linux backend
 │  ├─ settings/  persisted app settings
 │  ├─ ui/        Qt-free domain↔view boundary (convert + view models)
-│  ├─ camera/    camera domain struct (placeholder)
+│  ├─ camera/    camera + ROI-area domain + source-change (ROI-quarantine) logic
+│  ├─ detection/ per-camera model / class config + persistence
+│  ├─ reading/   append-only reading log
+│  ├─ brazing/   zone-reporter config
 │  └─ util/      shared string helpers
-└─ app/    → denso  (Qt Widgets GUI + entry-point orchestrator)
-   └─ ui/   theme, main window, settings/camera dialogs, network card
+└─ app/    → denso  (Qt Widgets GUI) + 3 static subsystem libs
+   ├─ ui/         theme, main window, settings + camera widgets
+   ├─ camera/     capture + frame-processing runtime      → denso_camera
+   ├─ detection/  inference helpers + backend engines      → denso_detection
+   ├─ brazing/    zone reporting logic + HTTP transport     → denso_brazing
+   └─ logging/    bounded 24/7 rotating file log
 
-tests/     → denso_tests  (Catch2 over denso_core)
+tests/     → denso_tests  (Catch2 over denso_core + the subsystem libs)
 ```
 
 `denso_core` never links `Qt6::Widgets`, so the GUI cannot leak into the
-testable core. See `CLAUDE.md` for the source map and `docs/ARCHITECTURE.md` for
-the boot sequence, threading model, persistence model, and known gotchas.
+testable core. The three `src/app/` subsystem libs (`denso_camera`,
+`denso_detection`, `denso_brazing`) are linked by **both** `denso` and
+`denso_tests`, so the tests exercise the shipped objects rather than a second
+compile. See `CLAUDE.md` for the source map and `docs/ARCHITECTURE.md` for the
+boot sequence, threading model, persistence model, and known gotchas.

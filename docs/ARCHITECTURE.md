@@ -5,14 +5,25 @@ quick map and commands, see the root `CLAUDE.md`.
 
 ## Project layout
 
-Two targets, split by concern, wired by a thin top-level `CMakeLists.txt` via
-`add_subdirectory`:
+Split by concern, wired by a thin top-level `CMakeLists.txt` via
+`add_subdirectory`. The app side is the `denso` exe plus three pure static
+**subsystem libs** that both `denso` and `denso_tests` link:
 
 | Path | Target | Depends on |
 |---|---|---|
 | `src/core/` | `denso_core` (static lib) | `Qt6::Core`, `Qt6::Sql` only |
-| `src/app/` | `denso` (Qt Widgets GUI exe) | `denso_core`, `Qt6::Widgets` |
-| `tests/` | `denso_tests` (Catch2) | `denso_core` |
+| `src/app/detection/` | `denso_detection` (static lib) | `denso_core`, `Qt6::Core`, OpenCV |
+| `src/app/brazing/` | `denso_brazing` (static lib) | `denso_core`, `Qt6::Core` |
+| `src/app/camera/` | `denso_camera` (static lib) | `denso_core`, `denso_detection`, `Qt6::Core`/`Gui`, OpenCV |
+| `src/app/` | `denso` (Qt Widgets GUI exe) | the three libs + `Qt6::Widgets`/`Multimedia`/`Network` |
+| `tests/` | `denso_tests` (Catch2) | `denso_core` + the three subsystem libs |
+
+Final lib graph: `denso_core ← {denso_detection, denso_brazing, denso_camera
+(→denso_detection)} ← denso`. The libs hold the **pure, portable** logic
+(inference helpers, reporting logic, non-widget capture infra); backend-coupled
+engines, Qt-Network transport, and Qt Widgets stay in `denso`. Linking (rather
+than re-compiling the `.cpp`s into `denso_tests`) means the tests validate the
+same objects the app ships.
 
 `denso_core` holds the ported logic + SQLite persistence **and** the Qt-free
 domain↔view boundary (`core/ui/convert` + `viewmodel`). It never links
@@ -24,14 +35,24 @@ directory is its own include root: core headers read `network/model.h` /
 
 `src/core/reading/` is the append-only detection-reading log (migration v9);
 see [Reading log](#reading-log) below. On the app side, `src/app/ui/common/`
-is a new **leaf**: shared dialog chrome (header, async runner, label/row
+is a **leaf**: shared dialog chrome (header, async runner, label/row
 factories) with no feature dependencies, so `settings_dialog` and
 `camera_dialog` build on it instead of each keeping its own copies.
+
+`src/app/ui/camera/` now holds **widgets only**; the non-UI capture, detection,
+and brazing subsystems live in the sibling `src/app/{camera,detection,brazing}/`
+dirs (the subsystem libs). Note two `camera/` dirs coexist — `src/core/camera/`
+(domain) and `src/app/camera/` (runtime) — resolved by filename through the
+separate include roots. Bounded 24/7 file logging lives in `src/app/logging/`
+(see [Logging](#logging)).
 
 ## Boot sequence (`src/app/main.cpp`)
 
 A thin orchestrator:
 
+0. The bounded file-logging handler is installed first (`src/app/logging`, see
+   [Logging](#logging)) so every later step's `qDebug/qWarning` lands in
+   `denso.log` — the Windows GUI subsystem has no console.
 1. `QApplication` is constructed, then `QLocale::setDefault(English/UnitedStates)`
    forces Western Arabic digits in numeric widgets (`QSpinBox`/`QDoubleSpinBox`)
    regardless of the OS regional format — without it a Thai-locale host renders
@@ -114,19 +135,21 @@ the camera dialog's `page_util`. `page_util::dim_label` now delegates to
 - `netcard.{h,cpp}` — one interface's live status + editable IP/DNS config +
   (Wi-Fi) scan list with per-row connect.
 
-**Camera (`ui/camera/`)**
+**Camera (`ui/camera/` widgets + the `src/app/camera/` runtime lib)**
 
-The folder is a clean 3-layer stack under two root entry points. **Root** holds
-the public surfaces (`camera_view`, `camera_dialog`). **`grid/`** is the live-view
-internals (`camera_grid`, `camera_stream`, `camera_tile`, `frame_processor`,
-`fps_meter`, `grid_layout`). **`dialog/`** is the modal internals (the five page
-widgets + `page_util`, plus the dialog-only `wizard_stepper`, `roi_canvas`, and
-the source scanners `camera_devices`, `ip_scan`). **`shared/`** is the
-cross-cutting primitives used by *both* surfaces (`snapshot`, `frame_convert`,
-`rtsp_templates`, `gst_pipeline`, `roi_geometry`). Dependencies flow one way:
-`shared/` is a leaf; `grid/` and
-`dialog/` depend only on it, never on each other; the root entry points compose
-all three.
+`ui/camera/` now holds **widgets only**, under two root entry points
+(`camera_view`, `camera_dialog`) plus the `wizard_controller`. **`grid/`** is the
+live-view widgets (`camera_grid`, `camera_tile`, `grid_layout`). **`dialog/`** is
+the modal internals (the five page widgets + `page_util`, plus the dialog-only
+`wizard_stepper`, `roi_canvas`, and the source scanners `camera_devices`,
+`ip_scan`). **`shared/`** is now just `roi_geometry` (the last cross-cutting UI
+primitive). The **non-widget runtime** — `frame_processor`, `fps_meter`,
+`stream_pacing`, `warmup_gate`, `zone_assembly`, `safe_process.h`, `snapshot`,
+`frame_convert`, `rtsp_templates`, `gst_pipeline` — moved to the sibling
+`src/app/camera/` dir (the `denso_camera` lib); `camera_stream` (a `QObject`)
+also moved there in path but stays compiled into `denso`. Dependencies flow one
+way: the runtime lib + `shared/` are leaves; `grid/` and `dialog/` depend only on
+them, never on each other; the root entry points compose all three.
 
 - `camera_view.{h,cpp}` — the main content area: a switcher between the empty
   "no cameras" state (+ Add) and the live **`CameraGrid`**. `release_streams()`
@@ -210,6 +233,21 @@ all three.
   returns without writing ROIs, Finish saves them). Each list row also has an
   **Areas** button to draw/edit later. `showEvent` reopens the reused dialog on
   the list at compact size. Persists through `camera::repo` + `detection::repo`.
+- **Editable source + ROI quarantine.** The Source page is editable on an
+  existing camera, not just on add. Because moving the lens or swapping the feed
+  invalidates ROIs drawn against the old view, `wizard_controller` diffs the edit
+  with `camera::requires_area_review` (pure `source_change` logic:
+  `same_effective_source` + `view_geometry_changed`) and, when it changed the
+  effective source or capture geometry, sets `camera.areas_need_review`
+  (migration **v11**). While that flag is set the live grid **excludes those ROIs
+  and pauses zone reporting** — the tile shows an "Areas need review" banner
+  (`CameraTile::set_review_paused`). Clearing it requires the operator to save the
+  Areas step against a **valid live preview** of the new source (saving with no
+  preview is refused, so ROIs are never "verified" blind). A cosmetic edit
+  (name / credentials) leaves any existing flag untouched. The Source page also
+  tags devices already owned by another camera **"(in use)"** (the controller
+  pushes the used IP/USB set via `push_used_sources()` before each scan), and the
+  Models page has **Select all / Clear** buttons for a model's class list.
 - `dialog/` — the five page widgets the dialog coordinates, each self-contained
   and DB-light: `page_util` (shared `dim_label` + error colour), `list_page`
   (`CameraListPage`: reads/deletes cameras, emits add/configure/areas requests),
@@ -296,7 +334,7 @@ wait is **bounded** (`waitForFinished(15s)` → `kill()` + 2s grace), never
 `-1` — a stuck OS CLI can't wedge the calling thread; `run` returns empty on
 timeout, `run_checked` throws a timeout error.
 
-## Detection feature (`src/core/detection/` + `src/app/ui/camera/shared/detection/`)
+## Detection feature (`src/core/detection/` + `src/app/detection/`)
 
 Per-camera YOLOv8 detection, split across the same domain/runtime line as the
 rest of the app. **Domain** (`src/core/detection/`, Qt/OpenCV-free, unit-tested):
@@ -312,9 +350,11 @@ camera domain: `camera/area_geometry` (`point_in_polygon` / `inside_any_area`,
 Qt/OpenCV-free, unit-tested) tests a detection's normalized box centre against a
 camera's area polygons.
 
-**Runtime** (`src/app/ui/camera/shared/detection/`, OpenCV + a platform-split
-inference backend — ONNX Runtime on Windows, native TensorRT on Jetson; app
-target only): pure unit-tested helpers `letterbox` (aspect-preserving resize +
+**Runtime** (`src/app/detection/`, OpenCV + a platform-split inference backend —
+ONNX Runtime on Windows, native TensorRT on Jetson; app target only). The pure,
+backend-free helpers form the `denso_detection` lib (linked by both `denso` and
+`denso_tests`); the backend engines + registry + `model_sync` stay in `denso`.
+Pure unit-tested helpers: `letterbox` (aspect-preserving resize +
 gray pad to 640, plus the inverse box map), `yolo_decode` (two decoders chosen by
 output shape — `decode_yolo` for the raw transposed `[1, 4+nc, na]` head via
 per-anchor argmax + confidence floor + class-agnostic `cv::dnn::NMSBoxes`, and
@@ -428,8 +468,37 @@ in-flight POST's completion callback is `QPointer`-guarded, so a POST that finis
 after the reporter is torn down is dropped rather than calling into a destroyed
 object (it does not rely on transitive `QNetworkAccessManager`/reply ownership).
 
+## Logging
+
+`src/app/logging/` is a **bounded, 24/7-safe** file logger installed as a
+`qInstallMessageHandler` at the top of `main` (the Windows GUI subsystem has no
+console, so `qDebug/qWarning/qCritical` would otherwise vanish). Design goal: a
+box that runs for months must never fill the disk or lose the tail.
+
+- `RotatingLogSink` (`log_sink`) writes to `denso.log` beside the exe and rolls
+  at a size cap — **5 files × 5 MiB ≈ 25 MiB total**. Roll = close → shift
+  `denso.log.N` → reopen, all under a mutex. Each record is truncated to
+  ≤16 KiB, and `write()` is `noexcept` with a catch-all so a logging failure can
+  never propagate into the caller. On a disk-full / write error it falls back to
+  `stderr`, marks itself degraded, and keeps retrying the reopen.
+- `log_rotation` is the **pure, unit-tested** size/roll policy (which file, when
+  to roll, how to renumber) — no I/O, so it's testable off-device.
+- `log_throttle` (`LogEpisode`) collapses a repeating condition (e.g. a flapping
+  camera reconnecting) to a single "opened" + single "closed" line plus a
+  periodic count, so a stuck fault can't flood the file.
+- `redact` (`sanitize_url`) strips credentials from RTSP URLs before they reach
+  the log.
+- `qSetMessagePattern` bakes local ISO time + the (fixed-at-start) UTC offset +
+  level + category + pid + tid into every line; `DENSO_LOG_LEVEL` sets the
+  severity floor; a `SESSION` banner at startup and a 5-minute `HEARTBEAT` line
+  mark liveness for after-the-fact log reading.
+
 ## Gotchas
 
+- **Never `git add -A` in this repo.** The tree carries untracked operator
+  artifacts (`models/*.onnx`, scratch notes); a blanket add sweeps a ~38 MB model
+  into a commit and then blocks `git pull` on the Jetson (the untracked file
+  conflicts with the incoming one). Use explicit `git add <files>` / `git add -u`.
 - **QSQLITE keeps a read cursor alive until the `QSqlQuery` is finished or
   destroyed.** A live read cursor (e.g. an un-scoped `PRAGMA user_version`
   query) makes a later schema change on the same connection fail with
