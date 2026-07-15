@@ -13,8 +13,8 @@
 #include "camera/camera.h"  // CameraArea
 #include "detection/detection.h"
 #include "ui/camera/grid/zone_reading.h"  // ZoneReading
-#include "ui/camera/shared/detection/inference_engine.h"
-#include "ui/camera/shared/detection/merge_detections.h"  // NamedDetection
+#include "detection/inference_engine.h"
+#include "detection/merge_detections.h"  // NamedDetection
 
 #include <QImage>
 

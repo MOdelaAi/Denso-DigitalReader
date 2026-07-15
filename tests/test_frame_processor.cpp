@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "ui/camera/grid/frame_processor.h"
-#include "ui/camera/shared/detection/inference_engine.h"
+#include "detection/inference_engine.h"
 
 #include <QImage>
 

@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/shared/detection/engine_requirements.h"
+#include "detection/engine_requirements.h"
 
 #include <set>
 #include <string>

@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/shared/detection/letterbox.h"
-#include "ui/camera/shared/detection/yolo_decode.h"
+#include "detection/letterbox.h"
+#include "detection/yolo_decode.h"
 
 #include <vector>
 

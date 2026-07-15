@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/shared/detection/class_names_sidecar.h"
+#include "detection/class_names_sidecar.h"
 
 #include <filesystem>
 #include <fstream>

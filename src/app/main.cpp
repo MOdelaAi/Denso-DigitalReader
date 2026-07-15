@@ -9,7 +9,7 @@
 #include "network/backend.h"
 #include "settings/repo.h"
 #include "settings/settings.h"
-#include "ui/camera/shared/detection/model_sync.h"
+#include "detection/model_sync.h"
 #include "ui/startup.h"
 
 #include <QApplication>

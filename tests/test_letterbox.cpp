@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/shared/detection/letterbox.h"
+#include "detection/letterbox.h"
 
 #include <opencv2/core.hpp>
 

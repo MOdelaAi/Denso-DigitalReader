@@ -53,17 +53,13 @@ add_executable(denso_tests
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/fps_meter.cpp
     test_letterbox.cpp
     # letterbox is GUI-target code but pure OpenCV (no Qt), so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/letterbox.cpp
     test_yolo_decode.cpp
     # yolo_decode is GUI-target code but pure OpenCV (no Qt), so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/yolo_decode.cpp
     test_merge_detections.cpp
     # merge_detections is GUI-target code but pure OpenCV (no Qt), so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/merge_detections.cpp
     test_names_metadata.cpp
     # names_metadata is GUI-target code but OpenCV/ORT-free pure string parsing,
     # so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/names_metadata.cpp
     test_frame_convert.cpp
     # frame_convert (qimage_to_mat) is GUI-target code but pure OpenCV/QImage
     # conversion (no widgets), so compile it in.
@@ -103,7 +99,6 @@ add_executable(denso_tests
     test_class_names_sidecar.cpp
     # class_names_sidecar reads a JSON sidecar via Qt Core (no widgets), so
     # compile it in for unit coverage.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/detection/class_names_sidecar.cpp
     test_engine_requirements.cpp
     # engine_requirements is a header-only pure helper (no backend), so the test
     # needs no extra source.
@@ -118,7 +113,7 @@ add_executable(denso_tests
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_throttle.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
-target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)
+target_link_libraries(denso_tests PRIVATE denso_core denso_detection Catch2::Catch2)
 target_include_directories(denso_tests PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(denso_tests PRIVATE ${OpenCV_LIBS} Qt6::Gui)
 

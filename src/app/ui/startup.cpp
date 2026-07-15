@@ -1,7 +1,7 @@
 #include "ui/startup.h"
 
 #include "detection/repo.h"
-#include "ui/camera/shared/detection/engine_registry.h"
+#include "detection/engine_registry.h"
 #include "ui/mainwindow.h"
 #include "ui/startup_mode.h"
 #include "ui/startup_screen.h"

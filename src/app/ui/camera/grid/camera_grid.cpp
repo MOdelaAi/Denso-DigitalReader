@@ -10,7 +10,7 @@
 #include "ui/camera/grid/frame_processor.h"
 #include "ui/camera/grid/grid_layout.h"
 #include "ui/camera/grid/zone_reporter.h"
-#include "ui/camera/shared/detection/engine_registry.h"
+#include "detection/engine_registry.h"
 #include "ui/common/async_runner.h"  // post_to_gui
 #include "ui/warmup_state.h"
 

@@ -1,4 +1,4 @@
-#include "ui/camera/shared/detection/merge_detections.h"
+#include "detection/merge_detections.h"
 
 #include <catch2/catch_test_macros.hpp>
 

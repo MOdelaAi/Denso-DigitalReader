@@ -5,7 +5,7 @@
 // open, so it can grab the same USB device); the next reload() restarts.
 #pragma once
 
-#include "ui/camera/shared/detection/engine_registry.h"
+#include "detection/engine_registry.h"
 
 #include <QSqlDatabase>
 #include <QWidget>

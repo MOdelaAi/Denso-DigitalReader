@@ -6,7 +6,7 @@
 // model that finishes before a subscriber connects is not missed.
 #pragma once
 
-#include "ui/camera/shared/detection/engine_registry.h"
+#include "detection/engine_registry.h"
 
 #include <QObject>
 #include <QString>

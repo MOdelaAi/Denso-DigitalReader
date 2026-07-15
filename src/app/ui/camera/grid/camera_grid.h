@@ -7,7 +7,7 @@
 
 #include "camera/camera.h"
 #include "ui/camera/grid/warmup_gate.h"
-#include "ui/camera/shared/detection/engine_registry.h"
+#include "detection/engine_registry.h"
 
 #include <QSqlDatabase>
 #include <QString>

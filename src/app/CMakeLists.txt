@@ -6,6 +6,22 @@
 # headers come via denso_core. UI is grouped by feature: the app shell at
 # ui/ root, plus ui/settings/ and ui/camera/.
 # ─────────────────────────────────────────────────────────────────────────────
+# ── denso_detection: the pure inference helpers (letterbox / YOLO decode / NMS
+#    merge / ONNX-names metadata / class-names sidecar) with NO inference-backend
+#    dependency. Both `denso` and `denso_tests` LINK this instead of compiling the
+#    same .cpp twice (the old test/build boundary smell). Backend engines
+#    (ort/trt/registry/model_sync) stay in `denso` — they're platform-split.
+add_library(denso_detection STATIC
+    detection/letterbox.cpp
+    detection/yolo_decode.cpp
+    detection/merge_detections.cpp
+    detection/names_metadata.cpp
+    detection/class_names_sidecar.cpp
+)
+target_include_directories(denso_detection PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(denso_detection PUBLIC denso_core Qt6::Core ${OpenCV_LIBS})
+
 add_executable(denso WIN32
     main.cpp
     resources.qrc
@@ -40,12 +56,10 @@ add_executable(denso WIN32
     ui/camera/shared/rtsp_templates.cpp
     ui/camera/shared/gst_pipeline.cpp
     ui/camera/shared/roi_geometry.cpp
-    ui/camera/shared/detection/letterbox.cpp
-    ui/camera/shared/detection/yolo_decode.cpp
-    ui/camera/shared/detection/merge_detections.cpp
-    ui/camera/shared/detection/names_metadata.cpp
-    ui/camera/shared/detection/engine_registry.cpp
-    ui/camera/shared/detection/model_sync.cpp
+    # (detection: pure decode/letterbox/merge/metadata/sidecar are in the
+    #  denso_detection lib below; the backend-coupled registry + sync stay here)
+    detection/engine_registry.cpp
+    detection/model_sync.cpp
     # camera — live-view grid internals
     ui/camera/grid/camera_grid.cpp
     ui/camera/grid/warmup_gate.cpp
@@ -75,7 +89,7 @@ add_executable(denso WIN32
     ui/camera/dialog/ip_scan.cpp
 )
 target_include_directories(denso PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(denso PRIVATE denso_core Qt6::Widgets Qt6::Multimedia Qt6::Network)
+target_link_libraries(denso PRIVATE denso_core denso_detection Qt6::Widgets Qt6::Multimedia Qt6::Network)
 target_include_directories(denso PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(denso PRIVATE ${OpenCV_LIBS})
 target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")
@@ -83,7 +97,7 @@ target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")
 # ── Inference backend, platform-split (see top-level CMakeLists.txt) ──────────
 if(WIN32)
     # Windows: ONNX Runtime engine + its runtime DLLs beside the exe.
-    target_sources(denso PRIVATE ui/camera/shared/detection/ort_engine.cpp)
+    target_sources(denso PRIVATE detection/ort_engine.cpp)
     target_link_libraries(denso PRIVATE onnxruntime)
 
     # ORT runtime DLLs + the models must sit beside the exe (Windows DLL search +
@@ -122,8 +136,7 @@ else()
     # Linux/Jetson: native TensorRT. Engines are PREBUILT on-device with trtexec
     # and placed in <exe-dir>/models by the operator (not copied at build time).
     target_sources(denso PRIVATE
-        ui/camera/shared/detection/trt_engine.cpp
-        ui/camera/shared/detection/class_names_sidecar.cpp)
+        detection/trt_engine.cpp)
     target_link_libraries(denso PRIVATE ${TRT_NVINFER} CUDA::cudart)
     target_include_directories(denso PRIVATE ${TRT_INCLUDE_DIR})
 endif()

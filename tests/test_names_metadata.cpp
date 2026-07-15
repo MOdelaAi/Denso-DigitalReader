@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/shared/detection/names_metadata.h"
+#include "detection/names_metadata.h"
 
 using denso::ui::parse_names_metadata;
 

@@ -4,7 +4,7 @@
 // finished() at the end; all cross to the main thread via queued connections.
 #pragma once
 
-#include "ui/camera/shared/detection/engine_registry.h"
+#include "detection/engine_registry.h"
 
 #include <QObject>
 #include <QString>
