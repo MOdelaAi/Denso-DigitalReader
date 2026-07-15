@@ -20,6 +20,7 @@
 
 namespace denso::ui {
 
+class CameraAddPage;
 class CameraConfigurePage;
 class ModelsPage;
 class CameraAreasPage;
@@ -31,6 +32,7 @@ public:
     // The three interactive wizard pages the controller drives. Owned by the
     // dialog; the controller only reads/populates them.
     struct Pages {
+        CameraAddPage* add = nullptr;
         CameraConfigurePage* configure = nullptr;
         ModelsPage* models = nullptr;
         CameraAreasPage* areas = nullptr;
@@ -45,12 +47,15 @@ signals:
     void request_show_list();   // return to the list page (view owns that switch)
 
 public slots:
+    // Source flow.
+    void begin_add();              // fresh add: reset Source page, clear edit state
+    void begin_edit(const camera::Camera& cam);  // edit: populate Source from cam
+    void accept_source(const camera::Camera& source);  // Source Next → open Configure
+
     // Configure flow.
-    void begin_configure(const camera::Camera& cam, std::optional<int64_t> id,
-                         const QString& preview_text);  // seed draft + open Configure
     void capture_snapshot();       // threaded grab → push frame to the pages
     void save_configured_camera(); // insert/update from draft_, then Models step
-    void configure_back();         // Configure Back: edit→list, add→Source page
+    void configure_back();         // Configure Back → Source step
 
     // Models flow.
     void save_models();            // persist attachments → advance to Areas step
@@ -61,6 +66,7 @@ public slots:
     void areas_back();             // Areas Back: direct→list, wizard→Models step
 
 private:
+    void open_configure(const QString& preview_text);  // seed Configure from draft_
     void enter_models();           // load catalog + attachments → Models page
     void enter_areas(bool direct); // load areas + frame → Areas page
     void update_areas_background(); // push the oriented frame to the Areas canvas
@@ -70,8 +76,10 @@ private:
     std::function<void(int)> show_page_;
 
     std::optional<int64_t> editing_id_;  // set in edit mode; empty when adding
+    camera::Camera original_;            // pre-edit camera (for source-change diff)
     camera::Camera draft_;               // camera being added/edited
     QImage last_frame_;                  // most recent un-rotated snapshot frame
+    uint64_t capture_gen_ = 0;           // newest snapshot request wins (stale-guard)
     bool entered_areas_directly_ = false;  // true: per-row Areas (Back → list)
 };
 

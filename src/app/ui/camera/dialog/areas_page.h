@@ -29,6 +29,9 @@ public:
     void load(std::vector<camera::CameraArea> areas);  // existing set to edit
     void set_background(const QImage& oriented);        // canvas backdrop
     void show_save_error();                             // persistence failed
+    /// Show/hide the "re-verify after a source change" banner. When on, the
+    /// camera's zone reporting is paused until these areas are saved (verified).
+    void set_review_required(bool on);
 
 signals:
     void back_requested();
@@ -45,6 +48,7 @@ private:
     QLineEdit* name_edit_ = nullptr;
     QSpinBox* zone_edit_ = nullptr;  // 0 = ROI-only; 1..12 = reporting zone
     QLabel* hint_ = nullptr;
+    QLabel* review_banner_ = nullptr;  // "re-verify after source change" notice
     std::vector<camera::CameraArea> areas_;
 };
 

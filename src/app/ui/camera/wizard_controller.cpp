@@ -1,7 +1,9 @@
 #include "ui/camera/wizard_controller.h"
 
 #include "camera/repo.h"
+#include "camera/source_change.h"
 #include "detection/repo.h"
+#include "ui/camera/dialog/add_page.h"
 #include "ui/camera/dialog/areas_page.h"
 #include "ui/camera/dialog/configure_page.h"
 #include "ui/camera/dialog/models_page.h"
@@ -25,11 +27,47 @@ CameraWizardController::CameraWizardController(QSqlDatabase db, Pages pages,
     : QObject(parent), db_(std::move(db)), pages_(pages),
       show_page_(std::move(show_page)) {}
 
-void CameraWizardController::begin_configure(const camera::Camera& cam,
-                                             std::optional<int64_t> id,
-                                             const QString& preview_text) {
-    editing_id_ = id;
+void CameraWizardController::begin_add() {
+    editing_id_ = std::nullopt;
+    original_ = camera::Camera{};
+    draft_ = camera::Camera{};
+    pages_.add->reset();
+    show_page_(1);
+}
+
+void CameraWizardController::begin_edit(const camera::Camera& cam) {
+    editing_id_ = cam.id;
+    original_ = cam;
     draft_ = cam;
+    pages_.add->populate(cam);
+    show_page_(1);
+}
+
+void CameraWizardController::accept_source(const camera::Camera& source) {
+    if (editing_id_.has_value()) {
+        // Merge only the SOURCE fields into the existing draft — keep id, active,
+        // capture geometry (width/height/fps/rotation/pitch/roll) and the review
+        // flag, which the Source page does not own. (Replacing the whole object
+        // would reset those.)
+        draft_.name = source.name;
+        draft_.camera_type = source.camera_type;
+        draft_.index = source.index;
+        draft_.ip = source.ip;
+        draft_.rtsp = source.rtsp;
+        draft_.username = source.username;
+        draft_.password = source.password;
+        draft_.channel = source.channel;
+        draft_.stream = source.stream;
+        draft_.manufacturer = source.manufacturer;
+    } else {
+        draft_ = source;  // fresh add
+    }
+    open_configure(editing_id_.has_value()
+                       ? QStringLiteral("Capturing…")
+                       : QStringLiteral("Click Capture to preview"));
+}
+
+void CameraWizardController::open_configure(const QString& preview_text) {
     last_frame_ = QImage();
     pages_.configure->populate(draft_);
     pages_.configure->set_preview_text(preview_text);
@@ -55,9 +93,15 @@ void CameraWizardController::capture_snapshot() {
     }
     const QSize res = pages_.configure->resolution();
 
-    common::run_on_worker([this, index, url, res] {
+    // Generation token: a late completion from a PREVIOUS source must not
+    // overwrite the preview for the current one (which would let the operator
+    // "verify" ROIs against the wrong image). Only the newest capture applies.
+    const uint64_t gen = ++capture_gen_;
+
+    common::run_on_worker([this, index, url, res, gen] {
         const Snapshot snap = grab_snapshot(index, url, res.width(), res.height());
-        common::post_to_gui(this, [this, snap] {
+        common::post_to_gui(this, [this, snap, gen] {
+            if (gen != capture_gen_) return;  // superseded by a newer capture
             pages_.configure->set_capturing(false);
             if (snap.image.isNull()) {
                 pages_.configure->set_preview_text(snap.error);
@@ -75,6 +119,18 @@ void CameraWizardController::save_configured_camera() {
 
     if (editing_id_.has_value()) {
         draft_.id = *editing_id_;
+        // Quarantine the ROIs for re-verification when this edit changed the view
+        // (source or capture geometry). Set UNCONDITIONALLY on a significant
+        // change — not gated on areas_for() being non-empty, which fails open on a
+        // query error (empty is returned for both "no areas" and "query failed").
+        // A camera with no areas simply has nothing to gate, and the next
+        // areas-save clears the flag. Persisted with the update, so the reloaded
+        // grid immediately excludes those areas + pauses zone reporting until the
+        // operator verifies them (Areas save clears it). A cosmetic edit
+        // (credentials/name) leaves any existing flag untouched.
+        if (camera::requires_area_review(original_, draft_)) {
+            draft_.areas_need_review = true;
+        }
         if (!camera::update(db_, draft_)) {
             pages_.configure->show_error(QStringLiteral("Failed to save the camera."));
             return;
@@ -93,11 +149,8 @@ void CameraWizardController::save_configured_camera() {
 }
 
 void CameraWizardController::configure_back() {
-    // Editing an existing camera has no Source step to return to.
-    if (editing_id_.has_value())
-        emit request_show_list();
-    else
-        show_page_(1);
+    // Source is now editable in both add and edit, so Back returns to it.
+    show_page_(1);
 }
 
 void CameraWizardController::enter_models() {
@@ -137,6 +190,10 @@ void CameraWizardController::enter_areas(bool direct) {
     pages_.areas->load(editing_id_.has_value()
                            ? camera::areas_for(db_, *editing_id_)
                            : std::vector<camera::CameraArea>{});
+    // Prompt re-verification when this edit quarantined the ROIs; saving the areas
+    // (replace_areas) clears the flag and resumes reporting.
+    pages_.areas->set_review_required(editing_id_.has_value() &&
+                                      draft_.areas_need_review);
     update_areas_background();
     show_page_(4);
 }
@@ -151,6 +208,18 @@ void CameraWizardController::update_areas_background() {
 }
 
 void CameraWizardController::save_areas(const std::vector<camera::CameraArea>& areas) {
+    // Under quarantine, saving CLEARS the flag and resumes reporting — so require
+    // a valid current-source preview first. Without it the operator would be
+    // "verifying" ROIs against an image they can't see (offline / failed capture),
+    // which could resume reporting on a misaligned view. Staying paused is safe.
+    if (editing_id_.has_value() && draft_.areas_need_review && last_frame_.isNull()) {
+        QMessageBox::warning(
+            pages_.areas, QStringLiteral("Preview needed"),
+            QStringLiteral("Capture a live preview of the new source before "
+                           "verifying the areas — zone reporting stays paused "
+                           "until they are checked against the current view."));
+        return;
+    }
     if (editing_id_.has_value() &&
         !camera::replace_areas(db_, *editing_id_, areas)) {
         pages_.areas->show_save_error();

@@ -38,6 +38,10 @@ public:
     /// warms in the background. Cleared once the stream is attached (set_status).
     void set_preparing(bool on);
 
+    /// Show a persistent "Areas need review — reporting paused" banner over the
+    /// live feed while the camera's ROI areas are quarantined after a source edit.
+    void set_review_paused(bool on);
+
 public slots:
     void set_frame(const QImage& frame);
     void set_status(int status);  // CameraStream::Status as int
@@ -52,6 +56,7 @@ private:
     QImage frame_;
     int status_ = 0;  // Connecting
     bool preparing_ = false;  // true = model still warming, no stream yet
+    bool review_ = false;     // true = ROI areas quarantined; reporting paused
     std::vector<camera::CameraArea> areas_;
     FpsMeter meter_;  // real live fps from frame arrivals
     std::shared_ptr<std::atomic<int>> frame_counter_;  // null = no backpressure

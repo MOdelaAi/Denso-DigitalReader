@@ -185,6 +185,52 @@ void CameraAddPage::reset() {
     update_source_fields();
 }
 
+void CameraAddPage::populate(const camera::Camera& cam) {
+    clear_errors();
+    name_edit_->setText(QString::fromStdString(cam.name));
+    const bool usb = (cam.camera_type == "usb");
+    usb_radio_->setChecked(usb);
+    ip_radio_->setChecked(!usb);
+    if (usb) {
+        scan_usb();
+        const int want = cam.index ? static_cast<int>(*cam.index) : 0;
+        bool found = false;
+        for (int i = 0; i < usb_list_->count(); ++i) {
+            QListWidgetItem* it = usb_list_->item(i);
+            if ((it->flags() & Qt::ItemIsSelectable) &&
+                it->data(Qt::UserRole).toInt() == want) {
+                usb_list_->setCurrentRow(i);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            // Preserve the configured index even when the device isn't plugged in.
+            auto* it = new QListWidgetItem(
+                QStringLiteral("Configured device %1 — not currently detected")
+                    .arg(want),
+                usb_list_);
+            it->setData(Qt::UserRole, want);
+            usb_list_->setCurrentItem(it);
+        }
+    } else {
+        ip_edit_->setText(cam.ip ? QString::fromStdString(*cam.ip) : QString());
+        user_edit_->setText(cam.username ? QString::fromStdString(*cam.username)
+                                         : QString());
+        pass_edit_->setText(cam.password ? QString::fromStdString(*cam.password)
+                                         : QString());
+        if (cam.manufacturer) {
+            const int idx =
+                mfr_combo_->findText(QString::fromStdString(*cam.manufacturer));
+            if (idx >= 0) mfr_combo_->setCurrentIndex(idx);
+        }
+        stream_combo_->setCurrentIndex(cam.stream && *cam.stream == 1 ? 1 : 0);
+        channel_spin_->setValue(cam.channel ? static_cast<int>(*cam.channel) : 1);
+        update_rtsp_preview();
+    }
+    update_source_fields();
+}
+
 void CameraAddPage::scan_usb() {
     usb_list_->clear();
     const std::vector<UsbCamera> cams = list_usb_cameras();

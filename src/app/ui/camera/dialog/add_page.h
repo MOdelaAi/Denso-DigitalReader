@@ -27,6 +27,11 @@ public:
     /// Clear the form and re-run the USB scan, ready for a fresh add.
     void reset();
 
+    /// Fill the form from an existing camera's source fields, ready for an edit.
+    /// A configured USB index that isn't currently detected is shown as a
+    /// placeholder so it survives Next.
+    void populate(const camera::Camera& cam);
+
 signals:
     void cancel_requested();
     void next_requested(const camera::Camera& draft);

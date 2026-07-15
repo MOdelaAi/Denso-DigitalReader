@@ -153,7 +153,19 @@ void CameraGrid::reload() {
 }
 
 void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
-    std::vector<camera::CameraArea> areas = camera::areas_for(db_, cam.id);
+    // ROI quarantine: after a view-significant source/geometry edit the camera's
+    // areas may no longer align with the frame, so they are excluded from ROI
+    // filtering and zone reporting is PAUSED until the operator re-verifies them
+    // (Areas → "Verify & save" clears the flag). Feeding stale geometry could POST
+    // wrong brazing zone numbers — so under review we pass NO areas and NO zone
+    // sink (see below), and flag the tile.
+    const bool review = cam.areas_need_review;
+    std::vector<camera::CameraArea> areas =
+        review ? std::vector<camera::CameraArea>{} : camera::areas_for(db_, cam.id);
+    if (review) {
+        qWarning().noquote() << "[camera] camera" << cam.id
+                             << "— areas need review; zone reporting paused";
+    }
     const detection::CameraDetection det = detection::detection_for(db_, cam.id);
 
     std::unique_ptr<FrameProcessor> proc;
@@ -183,7 +195,8 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
                 proc = std::make_unique<DetectionProcessor>(
                     static_cast<int>(cam.rotation), cam.pitch, cam.roll,
                     std::move(runs), std::move(areas), cam.id,
-                    /*ReadingSink*/ nullptr, /*ZoneSink*/ reporter_.get());
+                    /*ReadingSink*/ nullptr,
+                    /*ZoneSink*/ review ? nullptr : reporter_.get());
             }
         } catch (const std::exception& e) {
             qCritical().noquote()
@@ -195,6 +208,7 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
         }
     }
     tile->set_preparing(false);
+    tile->set_review_paused(review);
     auto* stream = new CameraStream(cam, std::move(proc));
     connect(stream, &CameraStream::frame_ready, tile, &CameraTile::set_frame);
     connect(stream, &CameraStream::status_changed, tile, &CameraTile::set_status);

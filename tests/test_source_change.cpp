@@ -106,6 +106,15 @@ TEST_CASE("resolution change at the SAME aspect ratio is safe", "[source_change]
     CHECK_FALSE(requires_area_review(before, after));
 }
 
+TEST_CASE("legacy unset (0x0) resolution → real preset needs review", "[source_change]") {
+    Camera before = ip_cam();
+    before.width = 0;
+    before.height = 0;  // legacy camera with no stored geometry
+    Camera after = ip_cam();  // Configure resolves it to 1920x1080
+    CHECK(view_geometry_changed(before, after));
+    CHECK(requires_area_review(before, after));
+}
+
 TEST_CASE("aspect-ratio change needs review", "[source_change]") {
     Camera before = ip_cam();  // 16:9
     Camera after = ip_cam();

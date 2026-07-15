@@ -57,6 +57,11 @@ void CameraTile::set_frame(const QImage& frame) {
     update();
 }
 
+void CameraTile::set_review_paused(bool on) {
+    review_ = on;
+    update();
+}
+
 void CameraTile::set_preparing(bool on) {
     preparing_ = on;
     update();
@@ -103,6 +108,17 @@ void CameraTile::paintEvent(QPaintEvent*) {
         gf.setPointSize(28);
         p.setFont(gf);
         p.drawText(rect(), Qt::AlignCenter, QStringLiteral("📷"));
+    }
+
+    // ROI-quarantine banner across the bottom — persistent while areas await
+    // re-verification after a source edit (zone reporting is paused meanwhile).
+    if (review_) {
+        const int bh = 26;
+        const QRectF bar(0, height() - bh, width(), bh);
+        p.fillRect(bar, QColor(180, 83, 9, 220));  // amber
+        p.setPen(QColor(255, 255, 255));
+        p.drawText(bar, Qt::AlignCenter,
+                   QStringLiteral("⚠ Areas need review — reporting paused"));
     }
 
     // Overlays: name (top-left) + status dot & label (top-right). While preparing

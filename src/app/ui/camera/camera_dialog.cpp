@@ -58,7 +58,9 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     // The controller owns flow-state + persistence; the dialog owns widgets +
     // sizing. It drives page switches through this show_page callback.
     controller_ = new CameraWizardController(
-        db_, CameraWizardController::Pages{configure_page_, models_page_, areas_page_},
+        db_,
+        CameraWizardController::Pages{add_page_, configure_page_, models_page_,
+                                      areas_page_},
         [this](int index) { show_page(index); }, this);
     connect(controller_, &CameraWizardController::cameras_changed, this,
             &CameraDialog::cameras_changed);
@@ -68,20 +70,15 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     // ── List page signals ─────────────────────────────────────────────────
     connect(list_page_, &CameraListPage::add_requested, this, &CameraDialog::show_add);
     connect(list_page_, &CameraListPage::configure_requested, this,
-            [this](const camera::Camera& cam) {
-                controller_->begin_configure(cam, cam.id, QStringLiteral("Capturing…"));
-            });
+            [this](const camera::Camera& cam) { controller_->begin_edit(cam); });
     connect(list_page_, &CameraListPage::areas_requested, this,
             [this](const camera::Camera& cam) { controller_->begin_areas_direct(cam); });
     connect(list_page_, &CameraListPage::changed, this, &CameraDialog::cameras_changed);
 
     // ── Add / Source page signals ─────────────────────────────────────────
     connect(add_page_, &CameraAddPage::cancel_requested, this, &CameraDialog::show_list);
-    connect(add_page_, &CameraAddPage::next_requested, this,
-            [this](const camera::Camera& draft) {
-                controller_->begin_configure(draft, std::nullopt,
-                                             QStringLiteral("Click Capture to preview"));
-            });
+    connect(add_page_, &CameraAddPage::next_requested, controller_,
+            &CameraWizardController::accept_source);
 
     // ── Configure page signals ────────────────────────────────────────────
     connect(configure_page_, &CameraConfigurePage::back_requested, controller_,
@@ -157,8 +154,7 @@ void CameraDialog::show_list() {
 }
 
 void CameraDialog::show_add() {
-    add_page_->reset();
-    show_page(1);
+    controller_->begin_add();  // resets the Source page + clears any edit state
 }
 
 } // namespace denso::ui

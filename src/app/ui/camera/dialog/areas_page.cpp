@@ -22,6 +22,15 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(12);
 
+    review_banner_ = new QLabel(QStringLiteral(
+        "⚠ The source changed — re-verify these areas against the preview. "
+        "Zone reporting is paused until you save."));
+    review_banner_->setWordWrap(true);
+    review_banner_->setStyleSheet(QStringLiteral(
+        "background:#b45309; color:#ffffff; border-radius:8px; padding:8px 12px;"));
+    review_banner_->setVisible(false);
+    v->addWidget(review_banner_);
+
     auto* body = new QHBoxLayout;
     body->setSpacing(12);
 
@@ -131,6 +140,10 @@ void CameraAreasPage::set_background(const QImage& oriented) {
 
 void CameraAreasPage::show_save_error() {
     hint_->setText(QStringLiteral("Failed to save areas."));
+}
+
+void CameraAreasPage::set_review_required(bool on) {
+    review_banner_->setVisible(on);
 }
 
 void CameraAreasPage::refresh_list() {
