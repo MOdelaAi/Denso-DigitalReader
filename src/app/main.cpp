@@ -3,7 +3,9 @@
 // reassert saved network config to the OS (non-fatal) → load settings → apply
 // startup state → run. UI callback wiring lives in the window/dialog classes,
 // not here.
+#include "camera/repo.h"
 #include "db/db.h"
+#include "logging/log_sink.h"
 #include "network/backend.h"
 #include "settings/repo.h"
 #include "settings/settings.h"
@@ -11,50 +13,91 @@
 #include "ui/startup.h"
 
 #include <QApplication>
+#include <QDateTime>
 #include <QDebug>
-#include <QFile>
 #include <QFileInfo>
 #include <QLocale>
-#include <QMutex>
+#include <QSqlQuery>
 #include <QString>
+#include <QSysInfo>
 #include <QTimer>
+#include <QUuid>
 #include <QtGlobal>
 
 #include <opencv2/core.hpp>
 
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 
 namespace {
 
-// Route Qt log messages to `denso.log` next to the executable (and stderr).
-// The app is a GUI-subsystem binary on Windows, so qWarning() is otherwise
-// invisible; a file sink also helps field debugging on the Pi/Jetson. Thread-
-// safe — capture workers log from their own threads.
-void file_message_handler(QtMsgType type, const QMessageLogContext& ctx,
-                          const QString& msg) {
-    static QMutex mutex;
-    static QFile file(QCoreApplication::applicationDirPath() +
-                      QStringLiteral("/denso.log"));
-    static const bool opened =
-        file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+// The bounded rotating log sink (installed in main once the app dir is known).
+denso::logging::RotatingLogSink* g_sink = nullptr;
+int g_min_rank = 1;  // default: Info and above
 
-    const QString line = qFormatLogMessage(type, ctx, msg);
-    QMutexLocker lock(&mutex);
-    if (opened) {
-        file.write(line.toUtf8());
-        file.write("\n");
-        file.flush();
+int level_rank(QtMsgType t) {
+    switch (t) {
+        case QtDebugMsg: return 0;
+        case QtInfoMsg: return 1;
+        case QtWarningMsg: return 2;
+        case QtCriticalMsg: return 3;
+        case QtFatalMsg: return 4;
     }
-    std::fprintf(stderr, "%s\n", line.toLocal8Bit().constData());
+    return 1;
+}
+
+// DENSO_LOG_LEVEL = debug|info|warning|critical|off (default info). "off"
+// suppresses everything but fatal.
+int level_from_env() {
+    const char* s = std::getenv("DENSO_LOG_LEVEL");
+    if (!s) return 1;
+    const QString v = QString::fromLatin1(s).trimmed().toLower();
+    if (v == QLatin1String("debug")) return 0;
+    if (v == QLatin1String("info")) return 1;
+    if (v == QLatin1String("warning")) return 2;
+    if (v == QLatin1String("critical")) return 3;
+    if (v == QLatin1String("off")) return 5;
+    std::fprintf(stderr, "[log] unknown DENSO_LOG_LEVEL '%s' — using info\n", s);
+    return 1;
+}
+
+// Level-filter, then route to the bounded rotating file sink (+ stderr inside
+// it). Fatal always passes. Thread-safe — workers log from their own threads.
+void message_handler(QtMsgType type, const QMessageLogContext& ctx,
+                     const QString& msg) {
+    if (type != QtFatalMsg && level_rank(type) < g_min_rank) {
+        return;
+    }
+    const QByteArray line = qFormatLogMessage(type, ctx, msg).toUtf8();
+    if (g_sink) {
+        g_sink->write(line);
+    } else {
+        std::fprintf(stderr, "%.*s\n", static_cast<int>(line.size()), line.constData());
+    }
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
-    qInstallMessageHandler(file_message_handler);
+
+    // ── Logging: bounded rotating file sink + timestamped, level-filtered lines.
+    g_min_rank = level_from_env();
+    // Local time with a baked-in UTC offset (fixed-timezone industrial device;
+    // Qt's %{time} has no offset specifier, so compute it once at boot).
+    const int off = QDateTime::currentDateTime().offsetFromUtc();
+    const QString offset = QStringLiteral("%1%2:%3")
+        .arg(QLatin1Char(off < 0 ? '-' : '+'))
+        .arg(std::abs(off) / 3600, 2, 10, QLatin1Char('0'))
+        .arg(std::abs(off) % 3600 / 60, 2, 10, QLatin1Char('0'));
+    qSetMessagePattern(QStringLiteral("%{time yyyy-MM-ddTHH:mm:ss.zzz}") + offset +
+        QStringLiteral(" %{type} %{category} pid=%{pid} tid=%{threadid} %{message}"));
+    static denso::logging::RotatingLogSink sink(
+        QCoreApplication::applicationDirPath() + QStringLiteral("/denso.log"));
+    g_sink = &sink;
+    qInstallMessageHandler(message_handler);
 
     // Run OpenCV ops (e.g. cvtColor in the live grid's frame conversion) inline
     // rather than via its internal parallel_for_ pool. Each camera already has
@@ -75,6 +118,31 @@ int main(int argc, char** argv) {
     QSqlDatabase conn = db->handle();
     if (!denso::db::run_migrations(conn)) {
         qFatal("run migrations");
+    }
+
+    // ── Session marker: one line per boot to anchor field diagnosis. No
+    // credentials — camera COUNT only, never sources.
+    {
+        QSqlQuery ver(conn);
+        int schema = -1;
+        if (ver.exec(QStringLiteral("PRAGMA user_version")) && ver.next()) {
+            schema = ver.value(0).toInt();
+        }
+#ifdef _WIN32
+        const char* backend = "onnxruntime";
+#else
+        const char* backend = "tensorrt";
+#endif
+        static const char* kLevel[] = {"debug", "info", "warning", "critical", "?", "off"};
+        qInfo().noquote().nospace()
+            << "SESSION start version=" << QStringLiteral(APP_VERSION)
+            << " session=" << QUuid::createUuid().toString(QUuid::WithoutBraces).left(8)
+            << " platform=" << QSysInfo::prettyProductName()
+            << " arch=" << QSysInfo::currentCpuArchitecture()
+            << " schema=v" << schema << " backend=" << backend
+            << " log_level=" << kLevel[g_min_rank]
+            << " cameras=" << static_cast<int>(denso::camera::all(conn).size())
+            << " dir=" << QCoreApplication::applicationDirPath();
     }
 
     // One-time migration of any pre-SQLite settings.json sitting beside the DB.

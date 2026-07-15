@@ -107,6 +107,13 @@ add_executable(denso_tests
     test_engine_requirements.cpp
     # engine_requirements is a header-only pure helper (no backend), so the test
     # needs no extra source.
+    test_log_rotation.cpp
+    test_log_sink.cpp
+    # logging is GUI-target code but Qt-Core-only (QFile) with pure helpers, so
+    # compile the units in for the rotation/redaction/sink tests.
+    ${CMAKE_SOURCE_DIR}/src/app/logging/log_rotation.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/logging/redact.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/logging/log_sink.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
 target_link_libraries(denso_tests PRIVATE denso_core Catch2::Catch2)

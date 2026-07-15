@@ -9,6 +9,10 @@
 add_executable(denso WIN32
     main.cpp
     resources.qrc
+    # logging (bounded rotating file sink + redaction)
+    logging/log_rotation.cpp
+    logging/log_sink.cpp
+    logging/redact.cpp
     # app shell
     ui/theme.cpp
     ui/mainwindow.cpp
