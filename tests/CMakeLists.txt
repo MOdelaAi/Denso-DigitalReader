@@ -32,69 +32,38 @@ add_executable(denso_tests
     test_area_geometry.cpp
     test_class_names.cpp
     test_rtsp_templates.cpp
-    # rtsp_templates lives in the GUI app target but depends only on QtCore
-    # (QString), so compile it straight into the tests for unit coverage.
     test_gst_pipeline.cpp
-    # gst_pipeline is GUI-target code but a pure std::string builder (no Qt/
-    # OpenCV), so compile it into the tests for unit coverage.
     test_snapshot.cpp
     test_roi_geometry.cpp
-    # roi_geometry is GUI-target code but depends only on QtGui/QtCore value
-    # types (QPointF/QRectF), so compile it into the tests for unit coverage.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/roi_geometry.cpp
     test_grid_layout.cpp
-    # grid_layout is GUI-target code but pure int math (no Qt), so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/grid_layout.cpp
     test_fps_meter.cpp
-    # fps_meter is GUI-target code but pure std::chrono (no Qt), so compile it in.
     test_letterbox.cpp
-    # letterbox is GUI-target code but pure OpenCV (no Qt), so compile it in.
     test_yolo_decode.cpp
-    # yolo_decode is GUI-target code but pure OpenCV (no Qt), so compile it in.
     test_merge_detections.cpp
-    # merge_detections is GUI-target code but pure OpenCV (no Qt), so compile it in.
     test_names_metadata.cpp
-    # names_metadata is GUI-target code but OpenCV/ORT-free pure string parsing,
-    # so compile it in.
     test_frame_convert.cpp
-    # frame_convert (qimage_to_mat) is GUI-target code but pure OpenCV/QImage
-    # conversion (no widgets), so compile it in.
     test_stream_pacing.cpp
-    # stream_pacing is GUI-target code but pure int math (no Qt/OpenCV), so
-    # compile it in.
     test_safe_process.cpp
     test_frame_processor.cpp
-    # frame_processor is GUI-target code but its link deps (snapshot,
-    # frame_convert, zone_assembly, merge_detections, area_geometry) are all
-    # already compiled/linked here and inference is behind the InferenceEngine
-    # interface (fake-injectable), so compile it in for the worker-firewall test.
     test_zone_assembly.cpp
-    # zone_assembly is GUI-target code but pure (OpenCV value types + core
-    # geometry, no widgets/Qt-net), so compile it in.
     test_zone_aggregator.cpp
-    # zone_aggregator is pure std (no Qt/OpenCV), so compile it in.
     test_brazing_payload.cpp
-    # brazing_payload is pure std::string (no Qt/OpenCV), so compile it in.
     test_brazing_retry_policy.cpp
-    # brazing_retry_policy is GUI-target code but pure std (no Qt/OpenCV), so
-    # compile it in.
     test_warmup_gate.cpp
-    # warmup_gate is GUI-target code but pure std (no Qt/OpenCV), so compile it in.
     test_startup_mode.cpp
-    # startup_mode is GUI-target code but pure std::filesystem (no Qt/OpenCV), so
-    # compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/startup_mode.cpp
     test_class_names_sidecar.cpp
-    # class_names_sidecar reads a JSON sidecar via Qt Core (no widgets), so
-    # compile it in for unit coverage.
     test_engine_requirements.cpp
-    # engine_requirements is a header-only pure helper (no backend), so the test
-    # needs no extra source.
     test_log_rotation.cpp
     test_log_sink.cpp
     test_log_throttle.cpp
-    # logging is GUI-target code but Qt-Core-only (QFile) with pure helpers, so
-    # compile the units in for the rotation/redaction/sink tests.
+
+    # The app units under test come from the linked subsystem libs
+    # (denso_detection / denso_brazing / denso_camera — see the link line below),
+    # NOT compiled in a second time here. The few units that don't yet have a lib
+    # are compiled in directly:
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/roi_geometry.cpp  # UI geometry
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/grid_layout.cpp     # grid layout algo
+    ${CMAKE_SOURCE_DIR}/src/app/ui/startup_mode.cpp                # cold-start probe
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_rotation.cpp
     ${CMAKE_SOURCE_DIR}/src/app/logging/redact.cpp
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_sink.cpp
