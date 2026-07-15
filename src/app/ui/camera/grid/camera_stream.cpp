@@ -198,12 +198,38 @@ void CameraStream::run() {
         // frame; the winner is remembered for fast reconnects.
         if (!open_source(cam_, preferred_source_, cap, stop_)) {
             if (stop_.load()) break;
-            qWarning().noquote() << "[stream]" << QString::fromStdString(cam_.name)
-                                 << "failed to open (all backends) — retrying";
+            // Episode-throttled: log the first failure, then at most once every
+            // 5 min while still down (with a suppressed count) — a camera offline
+            // for days must not flood the 24/7 log every backoff cycle.
+            const int64_t now =
+                duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
+                    .count();
+            const auto d = reconnect_episode_.on_failure(now);
+            if (d.log) {
+                qWarning().noquote()
+                    << "[stream]" << QString::fromStdString(cam_.name)
+                    << "failed to open (all backends) — retrying"
+                    << (d.suppressed > 0
+                            ? QStringLiteral("(%1 attempts suppressed)").arg(d.suppressed)
+                            : QString());
+            }
             emit status_changed(static_cast<int>(Status::Offline));
             backoff_ms = next_backoff_ms(backoff_ms);
             if (!wait_or_stop(backoff_ms, stop_)) break;
             continue;  // reconnect
+        }
+        // Opened — if we were in a failure episode, log one recovery line.
+        {
+            const int64_t now =
+                duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
+                    .count();
+            const auto r = reconnect_episode_.on_success(now);
+            if (r.log) {
+                qInfo().noquote()
+                    << "[stream]" << QString::fromStdString(cam_.name)
+                    << "reconnected after" << (r.downtime_ms / 1000) << "s and"
+                    << r.total_failures << "failed attempts";
+            }
         }
 
         // USB-only capture-resolution request (see note in the header history).

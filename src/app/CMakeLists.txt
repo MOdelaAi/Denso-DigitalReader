@@ -12,6 +12,7 @@ add_executable(denso WIN32
     # logging (bounded rotating file sink + redaction)
     logging/log_rotation.cpp
     logging/log_sink.cpp
+    logging/log_throttle.cpp
     logging/redact.cpp
     # app shell
     ui/theme.cpp

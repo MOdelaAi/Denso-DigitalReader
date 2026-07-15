@@ -1,5 +1,7 @@
 #include "ui/camera/grid/brazing_client.h"
 
+#include "logging/redact.h"
+
 #include "ui/camera/grid/brazing_payload.h"
 
 #include <QByteArray>
@@ -34,7 +36,9 @@ void BrazingClient::post(const std::map<int, int>& zones,
     }
     const QUrl url(base_url_ + QStringLiteral("/api/brazing/update"));
     if (!url.isValid()) {
-        qWarning().noquote() << "[brazing] invalid base URL:" << base_url_;
+        qWarning().noquote() << "[brazing] invalid base URL:"
+                             << QString::fromStdString(
+                                    logging::sanitize_url(base_url_.toStdString()));
         if (done) done(false);
         return;
     }

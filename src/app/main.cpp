@@ -170,6 +170,20 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ── Health heartbeat: one INFO line every 5 min so "alive & healthy" is
+    // visible at a glance over a 24/7 run (288 lines/day). Richer metrics
+    // (cameras up, fps, POST counts) are a follow-up once the grid exposes them.
+    const qint64 boot_ms = QDateTime::currentMSecsSinceEpoch();
+    auto* heartbeat = new QTimer(&app);
+    QObject::connect(heartbeat, &QTimer::timeout, &app, [conn, boot_ms] {
+        const qint64 uptime_s = (QDateTime::currentMSecsSinceEpoch() - boot_ms) / 1000;
+        qInfo().noquote().nospace()
+            << "HEARTBEAT uptime_s=" << uptime_s
+            << " cameras=" << static_cast<int>(denso::camera::all(conn).size())
+            << " log_degraded=" << (g_sink && g_sink->degraded() ? "true" : "false");
+    });
+    heartbeat->start(5 * 60 * 1000);
+
     auto state = std::make_shared<denso::settings::Settings>(denso::settings::load(conn));
 
     return denso::ui::launch(app, conn, state);
