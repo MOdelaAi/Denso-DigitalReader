@@ -22,8 +22,10 @@ public:
                              int max_files = kDefaultMaxFiles);
 
     /// Append one already-formatted record (no trailing newline). Rotates first
-    /// if the record would overflow the per-file cap. Thread-safe. Never throws.
-    void write(const QByteArray& record);
+    /// if the record would overflow the per-file cap. Oversized records are
+    /// truncated so one message can't blow the bound. Thread-safe; never throws
+    /// (contains all exceptions and falls back to stderr).
+    void write(const QByteArray& record) noexcept;
 
     /// True when file logging has failed and output is falling back to stderr —
     /// surfaced in the heartbeat so a degraded logger is visible in the log.

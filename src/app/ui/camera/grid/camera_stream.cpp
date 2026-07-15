@@ -152,8 +152,11 @@ bool open_source(const camera::Camera& cam, int& preferred, cv::VideoCapture& ca
         if (c.isOpened() && c.read(probe) && !probe.empty()) {
             cap = std::move(c);
             preferred = idx;
-            qInfo().noquote() << "[stream]" << QString::fromStdString(cam.name)
-                              << "opened via" << cands[idx].label;
+            // Debug, not info: a flapping camera reopens constantly — this would
+            // flood the 24/7 log at the default level. The throttled reconnect
+            // episode (in run()) carries the field-visible up/down signal.
+            qDebug().noquote() << "[stream]" << QString::fromStdString(cam.name)
+                               << "opened via" << cands[idx].label;
             return true;
         }
     }
