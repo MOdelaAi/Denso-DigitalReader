@@ -16,6 +16,7 @@
 
 #include <QCoreApplication>
 #include <QColor>
+#include <QDebug>
 #include <QGridLayout>
 #include <QPainter>
 #include <QPaintEvent>
@@ -160,20 +161,37 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
         proc = std::make_unique<OrientationProcessor>(
             static_cast<int>(cam.rotation), cam.pitch, cam.roll);
     } else {
-        std::vector<DetectionProcessor::ModelRun> runs;
-        for (const detection::ResolvedModel& rm : det.models) {
-            InferenceEngine* eng = engines_->get(rm.filename);  // cache-hit here
-            if (!eng) continue;  // model failed to load — skip it
-            runs.push_back({eng, rm.class_names, rm.classes});
-        }
-        if (runs.empty()) {
-            proc = std::make_unique<OrientationProcessor>(
-                static_cast<int>(cam.rotation), cam.pitch, cam.roll);
-        } else {
-            proc = std::make_unique<DetectionProcessor>(
-                static_cast<int>(cam.rotation), cam.pitch, cam.roll,
-                std::move(runs), std::move(areas), cam.id,
-                /*ReadingSink*/ nullptr, /*ZoneSink*/ reporter_.get());
+        // Engine-construction firewall. engines_->get() builds the native TensorRT
+        // engine on Linux, whose ctor THROWS on a missing/bad <engine>.names.json
+        // sidecar or an invalid engine. start_one() runs on the GUI thread — often
+        // from a Qt slot (on_model_ready / on_warmup_finished) — so an escaping
+        // exception crosses the event loop and std::terminates the whole app
+        // (this is exactly the field core-dump we saw). Fail loud but survivable:
+        // log, show the tile Offline, and skip this camera — never a fake
+        // orientation-only stream that would silently hide the missing detection.
+        try {
+            std::vector<DetectionProcessor::ModelRun> runs;
+            for (const detection::ResolvedModel& rm : det.models) {
+                InferenceEngine* eng = engines_->get(rm.filename);  // may throw (TRT)
+                if (!eng) continue;  // model failed to load — skip it
+                runs.push_back({eng, rm.class_names, rm.classes});
+            }
+            if (runs.empty()) {
+                proc = std::make_unique<OrientationProcessor>(
+                    static_cast<int>(cam.rotation), cam.pitch, cam.roll);
+            } else {
+                proc = std::make_unique<DetectionProcessor>(
+                    static_cast<int>(cam.rotation), cam.pitch, cam.roll,
+                    std::move(runs), std::move(areas), cam.id,
+                    /*ReadingSink*/ nullptr, /*ZoneSink*/ reporter_.get());
+            }
+        } catch (const std::exception& e) {
+            qCritical().noquote()
+                << "[camera] camera" << cam.id
+                << "— detection model failed to load, camera not started:" << e.what();
+            tile->set_preparing(false);
+            tile->set_status(static_cast<int>(CameraStream::Status::Offline));
+            return;
         }
     }
     tile->set_preparing(false);
