@@ -12,7 +12,7 @@
 
 #include "camera/camera.h"  // CameraArea
 #include "detection/detection.h"
-#include "ui/camera/grid/zone_reading.h"  // ZoneReading
+#include "ui/camera/grid/zone_sink.h"  // ZoneSink (+ ZoneReading)
 #include "detection/inference_engine.h"
 #include "detection/merge_detections.h"  // NamedDetection
 
@@ -66,13 +66,6 @@ struct ReadingSink {
                             const std::vector<NamedDetection>& kept) = 0;
 };
 
-/// Optional per-frame hook that receives the camera's assembled zone values (the
-/// brazing reporter). Same hand-off hot-path contract as ReadingSink; invoked on
-/// the inference worker thread.
-struct ZoneSink {
-    virtual ~ZoneSink() = default;
-    virtual void on_zones(int64_t camera_id, const std::vector<ZoneReading>& zones) = 0;
-};
 
 /// Runs one or more detection models and draws the results — but decoupled from
 /// display. Orientation is applied on the display path; inference runs on a

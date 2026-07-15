@@ -6,7 +6,7 @@
 // network.
 #pragma once
 
-#include "ui/camera/grid/frame_processor.h"   // ZoneSink
+#include "ui/camera/grid/zone_sink.h"   // ZoneSink (no dep on frame_processor)
 #include "ui/camera/grid/zone_aggregator.h"
 
 #include <functional>
