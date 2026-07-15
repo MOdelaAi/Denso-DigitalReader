@@ -24,6 +24,7 @@ add_executable(denso_tests
     test_reassert.cpp
     test_convert.cpp
     test_camera_repo.cpp
+    test_source_change.cpp
     test_detection_repo.cpp
     test_reading_repo.cpp
     test_brazing_config.cpp

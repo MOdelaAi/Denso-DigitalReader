@@ -16,6 +16,7 @@ using denso::camera::insert;
 using denso::camera::Point;
 using denso::camera::remove;
 using denso::camera::replace_areas;
+using denso::camera::set_areas_need_review;
 using denso::camera::update;
 using denso::db::Db;
 using denso::db::run_migrations;
@@ -203,6 +204,33 @@ TEST_CASE("replace_areas saves named polygons and areas_for round-trips them") {
     REQUIRE(got[0].points[2].x == 0.4f);
     REQUIRE(got[1].name == "Display B");
     REQUIRE(got[1].points.size() == 4);
+}
+
+TEST_CASE("areas_need_review round-trips and set_areas_need_review toggles it") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+    REQUIRE_FALSE(get(d.handle(), *id)->areas_need_review);  // default off
+
+    REQUIRE(set_areas_need_review(d.handle(), *id, true));
+    REQUIRE(get(d.handle(), *id)->areas_need_review);
+
+    REQUIRE(set_areas_need_review(d.handle(), *id, false));
+    REQUIRE_FALSE(get(d.handle(), *id)->areas_need_review);
+}
+
+TEST_CASE("replace_areas clears the areas_need_review quarantine (verification)") {
+    auto d = db();
+    const auto id = insert(d.handle(), usb_cam());
+    REQUIRE(id.has_value());
+    REQUIRE(set_areas_need_review(d.handle(), *id, true));
+
+    CameraArea a;
+    a.camera_id = *id;
+    a.name = "Verified";
+    a.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    REQUIRE(replace_areas(d.handle(), *id, {a}));  // saving = verifying
+    REQUIRE_FALSE(get(d.handle(), *id)->areas_need_review);  // quarantine cleared
 }
 
 TEST_CASE("replace_areas overwrites the previous set for that camera") {

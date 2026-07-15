@@ -43,4 +43,9 @@ std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id);
 bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
                    const std::vector<CameraArea>& areas);
 
+/// Set/clear the ROI-review quarantine flag for a camera (see
+/// Camera::areas_need_review). The controller sets it when a view-significant
+/// source/geometry change is saved; replace_areas() clears it on the next save.
+bool set_areas_need_review(const QSqlDatabase& db, int64_t camera_id, bool need);
+
 } // namespace denso::camera

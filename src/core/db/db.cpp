@@ -15,7 +15,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 10;
+constexpr int SCHEMA_VERSION = 11;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -337,6 +337,17 @@ bool run_migrations(const QSqlDatabase& db) {
         // the brazing backend under key "zone<n>"; NULL = ROI-only (confinement,
         // no reporting). Additive; existing areas default to NULL.
         if (!run("ALTER TABLE camera_area ADD COLUMN zone INTEGER")) {
+            return false;
+        }
+    }
+
+    if (version < 11) {
+        // ROI-review quarantine flag. Set when a view-significant source/geometry
+        // change is saved; while set, the camera's ROI areas are excluded from
+        // detection filtering and zone reporting is paused until the operator
+        // re-verifies them (Areas → "Verify & save"). Additive; default 0.
+        if (!run("ALTER TABLE camera ADD COLUMN areas_need_review "
+                 "INTEGER NOT NULL DEFAULT 0")) {
             return false;
         }
     }

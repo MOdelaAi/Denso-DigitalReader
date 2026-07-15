@@ -42,6 +42,12 @@ struct Camera {
     float pitch = 0.0f;
     float roll = 0.0f;
     uint32_t rotation = 0;  // 0 | 90 | 180 | 270
+
+    // When true, the camera's ROI areas are quarantined pending operator review
+    // after a view-significant source/geometry change: they are excluded from
+    // detection ROI-filtering and zone reporting is PAUSED until the operator
+    // re-verifies them against a live preview (Areas step → "Verify & save").
+    bool areas_need_review = false;
 };
 
 /// A single polygon vertex, normalized to the frame: x and y are fractions in

@@ -17,7 +17,7 @@ namespace {
 const QString COLUMNS = QStringLiteral(
     "id, name, camera_type, active, cam_index, ip, rtsp, username, "
     "width, height, fps, pitch, roll, rotation, password, "
-    "channel, stream, manufacturer");
+    "channel, stream, manufacturer, areas_need_review");
 
 QVariant bind_str(const std::optional<std::string>& v) {
     return v ? QVariant(QString::fromStdString(*v)) : QVariant(QMetaType(QMetaType::QString));
@@ -55,6 +55,7 @@ void bind_fields(QSqlQuery& q, const Camera& c) {
     q.addBindValue(bind_uint(c.channel));
     q.addBindValue(bind_uint(c.stream));
     q.addBindValue(bind_str(c.manufacturer));
+    q.addBindValue(c.areas_need_review ? 1 : 0);
 }
 
 Camera from_row(const QSqlQuery& q) {
@@ -77,6 +78,7 @@ Camera from_row(const QSqlQuery& q) {
     c.channel = col_uint(q.value(15));
     c.stream = col_uint(q.value(16));
     c.manufacturer = col_str(q.value(17));
+    c.areas_need_review = q.value(18).toInt() != 0;
     return c;
 }
 
@@ -86,8 +88,9 @@ std::optional<int64_t> insert(const QSqlDatabase& db, const Camera& c) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "INSERT INTO camera (name, camera_type, active, cam_index, ip, rtsp, username, "
-        "width, height, fps, pitch, roll, rotation, password, channel, stream, manufacturer) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "width, height, fps, pitch, roll, rotation, password, channel, stream, manufacturer, "
+        "areas_need_review) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     bind_fields(q, c);
     if (!q.exec()) {
         return std::nullopt;
@@ -100,7 +103,7 @@ bool update(const QSqlDatabase& db, const Camera& c) {
     q.prepare(QStringLiteral(
         "UPDATE camera SET name=?, camera_type=?, active=?, cam_index=?, ip=?, rtsp=?, "
         "username=?, width=?, height=?, fps=?, pitch=?, roll=?, rotation=?, password=?, "
-        "channel=?, stream=?, manufacturer=? "
+        "channel=?, stream=?, manufacturer=?, areas_need_review=? "
         "WHERE id=?"));
     bind_fields(q, c);
     q.addBindValue(static_cast<qlonglong>(c.id));
@@ -225,7 +228,26 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
         }
     }
 
+    // Saving the ROI set IS the verification: whatever quarantine flag was set by
+    // a prior source/geometry change is cleared atomically with the new areas, so
+    // ROI-filtering and zone reporting resume. (A no-op when not under review.)
+    QSqlQuery clr(db);
+    clr.prepare(QStringLiteral("UPDATE camera SET areas_need_review = 0 WHERE id = ?"));
+    clr.addBindValue(static_cast<qlonglong>(camera_id));
+    if (!clr.exec()) {
+        return rollback();
+    }
+
     return conn.commit() || rollback();
+}
+
+bool set_areas_need_review(const QSqlDatabase& db, int64_t camera_id, bool need) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "UPDATE camera SET areas_need_review = ? WHERE id = ?"));
+    q.addBindValue(need ? 1 : 0);
+    q.addBindValue(static_cast<qlonglong>(camera_id));
+    return q.exec();
 }
 
 } // namespace denso::camera
