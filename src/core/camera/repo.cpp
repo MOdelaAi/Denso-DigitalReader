@@ -7,6 +7,7 @@
 #include <QString>
 #include <QVariant>
 
+#include <set>
 #include <utility>
 
 namespace denso::camera {
@@ -187,7 +188,29 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
         return rollback();
     }
 
+    // Zone numbers are unique machine-wide: the combined brazing payload keys by
+    // zone number across all cameras, so two ROIs sharing a number would collide
+    // two readings onto one key. Reject a save that repeats a zone within this
+    // camera or claims one already assigned to another camera. (This camera's own
+    // rows were just deleted above, so the cross-camera check can't self-conflict.)
+    std::set<int> zones_this_camera;
     for (const CameraArea& a : areas) {
+        if (a.zone && *a.zone != 0) {  // 0 == ROI-only (not reported), never unique
+            if (!zones_this_camera.insert(*a.zone).second) {
+                return rollback();  // duplicated within this same save
+            }
+            QSqlQuery chk(db);
+            chk.prepare(QStringLiteral(
+                "SELECT 1 FROM camera_area WHERE zone = ? AND camera_id != ? LIMIT 1"));
+            chk.addBindValue(*a.zone);
+            chk.addBindValue(static_cast<qlonglong>(camera_id));
+            if (!chk.exec()) {
+                return rollback();
+            }
+            if (chk.next()) {
+                return rollback();  // already owned by another camera
+            }
+        }
         QSqlQuery ins(db);
         ins.prepare(QStringLiteral(
             "INSERT INTO camera_area (camera_id, name, points, zone) "

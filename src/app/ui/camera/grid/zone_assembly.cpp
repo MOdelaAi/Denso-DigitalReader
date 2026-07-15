@@ -28,16 +28,17 @@ std::optional<int> assemble_zone_value(const std::vector<NamedDetection>& digits
         digits += d->name;  // class name is the digit label ("0".."9")
     }
     // Every char must be a decimal digit, else it's not a number we can send.
-    if (digits.empty() ||
-        !std::all_of(digits.begin(), digits.end(),
+    if (!std::all_of(digits.begin(), digits.end(),
                      [](unsigned char c) { return c >= '0' && c <= '9'; })) {
         return std::nullopt;
     }
-    try {
-        return std::stoi(digits);  // leading zeros collapse; "500" -> 500
-    } catch (const std::exception&) {
-        return std::nullopt;  // overflow / not representable
+    // Zone values are restricted to 0..999. A spurious extra detection (>3
+    // digits) is rejected rather than POSTed as a bogus 4-digit reading; ≤3
+    // digits can never overflow int (max 999), so no try/catch is needed.
+    if (digits.empty() || digits.size() > 3) {
+        return std::nullopt;
     }
+    return std::stoi(digits);  // leading zeros collapse; "050" -> 50
 }
 
 std::vector<ZoneReading> group_into_zones(const std::vector<NamedDetection>& kept,

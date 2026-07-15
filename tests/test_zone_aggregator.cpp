@@ -46,3 +46,48 @@ TEST_CASE("a frame missing a zone keeps its last stable value", "[zone_aggregato
     CHECK((*s2).at(1) == 505);
     CHECK((*s2).at(2) == 200);  // zone2 retained
 }
+
+TEST_CASE("an expired zone is dropped from the emitted snapshot", "[zone_aggregator]") {
+    ZoneAggregator agg(1, 100);  // stable immediately, expire after 100 ms
+
+    auto first = agg.observe(obs(1, 500), 0);
+    REQUIRE(first.has_value());
+    CHECK(first->at(1) == 500);
+
+    // A later observation of a different zone, past zone1's expiry window, must
+    // evict zone1 from the payload rather than keep re-sending its stale value.
+    auto after_expiry = agg.observe(obs(2, 200), 101);
+    REQUIRE(after_expiry.has_value());
+    CHECK_FALSE(after_expiry->contains(1));
+    REQUIRE(after_expiry->contains(2));
+    CHECK(after_expiry->at(2) == 200);
+}
+
+TEST_CASE("a zone refreshed within the expiry window is retained", "[zone_aggregator]") {
+    ZoneAggregator agg(1, 100);
+
+    REQUIRE(agg.observe(obs(1, 500), 0).has_value());
+    CHECK_FALSE(agg.observe(obs(1, 500), 100).has_value());  // refreshed at t=100
+
+    auto snapshot = agg.observe(obs(2, 200), 150);  // still within zone1's window
+    REQUIRE(snapshot.has_value());
+    REQUIRE(snapshot->contains(1));
+    CHECK(snapshot->at(1) == 500);
+    REQUIRE(snapshot->contains(2));
+    CHECK(snapshot->at(2) == 200);
+}
+
+TEST_CASE("an expired zone is sent again when it reappears", "[zone_aggregator]") {
+    ZoneAggregator agg(1, 100);
+
+    REQUIRE(agg.observe(obs(1, 500), 0).has_value());
+
+    auto expired = agg.observe({}, 101);  // no zones observed; zone1 ages out
+    REQUIRE(expired.has_value());
+    CHECK(expired->empty());
+
+    auto reappeared = agg.observe(obs(1, 500), 102);
+    REQUIRE(reappeared.has_value());
+    REQUIRE(reappeared->contains(1));
+    CHECK(reappeared->at(1) == 500);
+}

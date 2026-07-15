@@ -9,6 +9,7 @@
 #include "ui/camera/shared/snapshot.h"        // grab_snapshot, apply_orientation
 #include "ui/common/async_runner.h"
 
+#include <QMessageBox>
 #include <QSize>
 
 #include <cstdint>
@@ -106,8 +107,18 @@ void CameraWizardController::enter_models() {
 
 void CameraWizardController::save_models() {
     if (editing_id_.has_value()) {
-        denso::detection::set_camera_models(
-            db_, *editing_id_, pages_.models->selections(*editing_id_));
+        // Honour the transactional write result: if it failed, the camera is NOT
+        // configured, so surface the error and stay on the Models page rather
+        // than silently reporting success and advancing (operator would believe
+        // detection is set up when nothing was saved — no readings, no reports).
+        if (!denso::detection::set_camera_models(
+                db_, *editing_id_, pages_.models->selections(*editing_id_))) {
+            QMessageBox::warning(
+                pages_.models, QStringLiteral("Save failed"),
+                QStringLiteral("Could not save the detection models for this "
+                               "camera. Please try again."));
+            return;
+        }
         emit cameras_changed();
     }
     enter_areas(/*direct=*/false);
