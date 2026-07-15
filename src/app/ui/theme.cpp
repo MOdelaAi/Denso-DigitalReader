@@ -71,7 +71,9 @@ QString style_sheet(const Palette& p) {
     // Mirrors how the Slint views bind Theme.* and keep std-widgets in step
     // with Palette.color-scheme: one sheet drives the whole tree.
     return QStringLiteral(R"(
-        QWidget { color: %(txt); background: transparent; }
+        /* No universal `color` — QLineEdit foreground (incl. placeholder) is
+           owned by the palette so ghost text stays readable (see apply_theme). */
+        QWidget { background: transparent; }
         QMainWindow, QDialog { background: %(panel2); }
         #mainContent { background: %(panel); }
         #topBar { background: %(panel2); }
@@ -107,7 +109,7 @@ QString style_sheet(const Palette& p) {
         }
 
         QLineEdit {
-            background: %(panel); color: %(txt);
+            background: %(panel);  /* color via palette (Text/PlaceholderText) */
             border: 1px solid %(panel3); border-radius: 10px;
             padding: 6px 10px; min-height: 20px;
             selection-background-color: %(gold);
@@ -135,7 +137,10 @@ QString style_sheet(const Palette& p) {
         QLineEdit:focus, QComboBox:focus, QAbstractSpinBox:focus {
             border: 1px solid %(gold);
         }
-        QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled {
+        QLineEdit:disabled {
+            background: %(panel2); border: 1px solid %(panel2);
+        }
+        QComboBox:disabled, QAbstractSpinBox:disabled {
             background: %(panel2); color: %(txtFaint); border: 1px solid %(panel2);
         }
         QLineEdit[invalid="true"], QListWidget[invalid="true"] {

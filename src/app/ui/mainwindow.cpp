@@ -219,14 +219,27 @@ void MainWindow::apply_theme(bool dark) {
     // Qualify: unqualified `palette` would resolve to the inherited
     // QWidget::palette() member, hiding the free theme function.
     const Palette p = denso::ui::palette(dark);
-    qApp->setStyleSheet(style_sheet(p));
 
-    // Placeholder ("ghost") text is NOT a stylesheet property — it's the
-    // PlaceholderText palette role, which otherwise falls back to a near-white
-    // platform default (unreadable). Set it to a dim-but-legible colour.
+    // QLineEdit foreground — both the text AND the placeholder ("ghost") text —
+    // is owned by the PALETTE, not the stylesheet. Qt 6.2's QSS engine, when a
+    // QLineEdit stylesheet sets `color`, derives the placeholder from that colour
+    // and IGNORES QPalette::PlaceholderText — which made the ghost text render
+    // near-white (unreadable). So the theme's QSS no longer sets a foreground on
+    // QLineEdit or the universal QWidget rule; the palette provides it, and the
+    // placeholder role finally takes effect. (QSS `placeholder-text-color` only
+    // exists in Qt 6.5+, so it isn't an option on the Jetson's 6.2.4.)
     QPalette pal = qApp->palette();
-    pal.setColor(QPalette::PlaceholderText, p.txt_faint);
+    for (QPalette::ColorGroup g : {QPalette::Active, QPalette::Inactive}) {
+        pal.setColor(g, QPalette::WindowText, p.txt);
+        pal.setColor(g, QPalette::Text, p.txt);
+        pal.setColor(g, QPalette::ButtonText, p.txt);
+        pal.setColor(g, QPalette::PlaceholderText, p.txt_faint);
+    }
+    pal.setColor(QPalette::Disabled, QPalette::Text, p.txt_faint);
+    pal.setColor(QPalette::Disabled, QPalette::PlaceholderText, p.txt_faint);
     qApp->setPalette(pal);
+
+    qApp->setStyleSheet(style_sheet(p));
 }
 
 } // namespace denso::ui
