@@ -1,4 +1,4 @@
-#include "ui/camera/shared/gst_pipeline.h"
+#include "camera/gst_pipeline.h"
 
 #include <algorithm>
 #include <string>

@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/grid/zone_assembly.h"
+#include "camera/zone_assembly.h"
 
 #include <opencv2/core.hpp>
 

@@ -3,7 +3,7 @@
 #include "ui/camera/dialog/camera_devices.h"
 #include "ui/camera/dialog/page_util.h"
 #include "ui/camera/dialog/ip_scan.h"
-#include "ui/camera/shared/rtsp_templates.h"
+#include "camera/rtsp_templates.h"
 #include "ui/common/form_widgets.h"  // mark_invalid
 
 #include <QColor>

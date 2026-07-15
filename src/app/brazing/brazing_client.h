@@ -4,7 +4,7 @@
 // retry/pending state (the BrazingReporter owns that). Lives on the GUI thread.
 #pragma once
 
-#include "ui/camera/grid/brazing_transport.h"
+#include "brazing/brazing_transport.h"
 
 #include <QObject>
 #include <QString>

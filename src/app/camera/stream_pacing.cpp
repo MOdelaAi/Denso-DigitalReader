@@ -1,4 +1,4 @@
-#include "ui/camera/grid/stream_pacing.h"
+#include "camera/stream_pacing.h"
 
 #include <algorithm>
 

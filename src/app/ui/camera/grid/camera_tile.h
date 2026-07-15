@@ -5,7 +5,7 @@
 #pragma once
 
 #include "camera/camera.h"
-#include "ui/camera/grid/fps_meter.h"
+#include "camera/fps_meter.h"
 
 #include <QImage>
 #include <QString>

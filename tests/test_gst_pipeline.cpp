@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#include "ui/camera/shared/gst_pipeline.h"
+#include "camera/gst_pipeline.h"
 
 using Catch::Matchers::ContainsSubstring;
 using denso::ui::Codec;

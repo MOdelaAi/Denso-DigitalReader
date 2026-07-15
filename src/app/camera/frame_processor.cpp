@@ -1,9 +1,9 @@
-#include "ui/camera/grid/frame_processor.h"
+#include "camera/frame_processor.h"
 
 #include "camera/area_geometry.h"             // inside_any_area
-#include "ui/camera/grid/zone_assembly.h"    // group_into_zones
-#include "ui/camera/shared/frame_convert.h"  // qimage_to_mat, mat_to_qimage
-#include "ui/camera/shared/snapshot.h"       // apply_orientation
+#include "camera/zone_assembly.h"    // group_into_zones
+#include "camera/frame_convert.h"  // qimage_to_mat, mat_to_qimage
+#include "camera/snapshot.h"       // apply_orientation
 #include "detection/merge_detections.h"  // merge_detections
 
 #include <QDebug>

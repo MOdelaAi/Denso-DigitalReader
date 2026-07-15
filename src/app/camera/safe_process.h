@@ -5,7 +5,7 @@
 // return the frame unprocessed, keep the capture loop alive.
 #pragma once
 
-#include "ui/camera/grid/frame_processor.h"
+#include "camera/frame_processor.h"
 
 #include <QImage>
 

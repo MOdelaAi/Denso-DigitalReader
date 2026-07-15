@@ -6,7 +6,7 @@
 #pragma once
 
 #include "camera/camera.h"
-#include "ui/camera/grid/warmup_gate.h"
+#include "camera/warmup_gate.h"
 #include "detection/engine_registry.h"
 
 #include <QSqlDatabase>

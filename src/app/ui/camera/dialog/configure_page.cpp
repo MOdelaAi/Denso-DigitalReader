@@ -1,7 +1,7 @@
 #include "ui/camera/dialog/configure_page.h"
 
 #include "ui/camera/dialog/page_util.h"
-#include "ui/camera/shared/snapshot.h"  // apply_orientation
+#include "camera/snapshot.h"  // apply_orientation
 
 #include <QComboBox>
 #include <QDoubleSpinBox>

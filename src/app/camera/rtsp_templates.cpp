@@ -1,4 +1,4 @@
-#include "ui/camera/shared/rtsp_templates.h"
+#include "camera/rtsp_templates.h"
 
 namespace denso::ui {
 

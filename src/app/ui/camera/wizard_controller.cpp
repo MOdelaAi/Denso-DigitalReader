@@ -7,8 +7,8 @@
 #include "ui/camera/dialog/areas_page.h"
 #include "ui/camera/dialog/configure_page.h"
 #include "ui/camera/dialog/models_page.h"
-#include "ui/camera/shared/rtsp_templates.h"  // with_credentials
-#include "ui/camera/shared/snapshot.h"        // grab_snapshot, apply_orientation
+#include "camera/rtsp_templates.h"  // with_credentials
+#include "camera/snapshot.h"        // grab_snapshot, apply_orientation
 #include "ui/common/async_runner.h"
 
 #include <QMessageBox>

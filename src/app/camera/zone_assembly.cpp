@@ -1,4 +1,4 @@
-#include "ui/camera/grid/zone_assembly.h"
+#include "camera/zone_assembly.h"
 
 #include "camera/area_geometry.h"  // point_in_polygon
 

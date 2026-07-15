@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/shared/frame_convert.h"
-#include "ui/camera/shared/snapshot.h"
+#include "camera/frame_convert.h"
+#include "camera/snapshot.h"
 
 #include <QImage>
 #include <opencv2/core.hpp>

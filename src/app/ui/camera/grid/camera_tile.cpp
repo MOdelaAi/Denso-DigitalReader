@@ -1,6 +1,6 @@
 #include "ui/camera/grid/camera_tile.h"
 
-#include "ui/camera/grid/camera_stream.h"  // Status enum
+#include "camera/camera_stream.h"  // Status enum
 #include "ui/camera/shared/roi_geometry.h"   // to_widget
 
 #include <QColor>

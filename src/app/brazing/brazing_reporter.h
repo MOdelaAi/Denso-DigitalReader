@@ -7,7 +7,7 @@
 #pragma once
 
 #include "brazing/brazing_retry_policy.h"
-#include "ui/camera/grid/brazing_transport.h"
+#include "brazing/brazing_transport.h"
 
 #include <QObject>
 

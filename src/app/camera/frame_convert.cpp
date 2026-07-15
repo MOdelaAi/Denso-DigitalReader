@@ -1,4 +1,4 @@
-#include "ui/camera/shared/frame_convert.h"
+#include "camera/frame_convert.h"
 
 #include <opencv2/imgproc.hpp>
 

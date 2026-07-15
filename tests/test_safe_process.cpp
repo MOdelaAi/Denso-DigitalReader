@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/grid/safe_process.h"
-#include "ui/camera/grid/frame_processor.h"
+#include "camera/safe_process.h"
+#include "camera/frame_processor.h"
 
 #include <QImage>
 

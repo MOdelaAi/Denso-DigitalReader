@@ -35,6 +35,27 @@ add_library(denso_brazing STATIC
 target_include_directories(denso_brazing PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(denso_brazing PUBLIC denso_core Qt6::Core)
 
+# ── denso_camera: non-widget capture + frame-processing infrastructure (frame
+#    conversion, GStreamer/RTSP pipeline builders, snapshot, FPS/pacing/warmup
+#    helpers, the frame-processing seam + zone assembly). No Qt Widgets. Both
+#    `denso` and `denso_tests` LINK it. The capture worker (camera_stream, QObject)
+#    stays in `denso`; the grid/dialog WIDGETS stay under ui/.
+add_library(denso_camera STATIC
+    camera/frame_convert.cpp
+    camera/gst_pipeline.cpp
+    camera/rtsp_templates.cpp
+    camera/snapshot.cpp
+    camera/fps_meter.cpp
+    camera/stream_pacing.cpp
+    camera/warmup_gate.cpp
+    camera/zone_assembly.cpp
+    camera/frame_processor.cpp
+)
+target_include_directories(denso_camera PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(denso_camera PUBLIC
+    denso_core denso_detection Qt6::Core Qt6::Gui ${OpenCV_LIBS})
+
 add_executable(denso WIN32
     main.cpp
     resources.qrc
@@ -63,31 +84,23 @@ add_executable(denso WIN32
     ui/camera/camera_view.cpp
     ui/camera/camera_dialog.cpp
     ui/camera/wizard_controller.cpp
-    # camera — cross-cutting primitives (used by both surfaces)
-    ui/camera/shared/snapshot.cpp
-    ui/camera/shared/frame_convert.cpp
-    ui/camera/shared/rtsp_templates.cpp
-    ui/camera/shared/gst_pipeline.cpp
-    ui/camera/shared/roi_geometry.cpp
+    # camera runtime: the capture worker (QObject). The rest of the non-widget
+    # capture/frame-processing infra lives in the denso_camera lib below.
+    camera/camera_stream.cpp
+    ui/camera/shared/roi_geometry.cpp   # widget↔normalized ROI mapping (UI)
     # (detection: pure decode/letterbox/merge/metadata/sidecar are in the
     #  denso_detection lib below; the backend-coupled registry + sync stay here)
     detection/engine_registry.cpp
     detection/model_sync.cpp
-    # camera — live-view grid internals
+    # camera — live-view grid WIDGETS
     ui/camera/grid/camera_grid.cpp
-    ui/camera/grid/warmup_gate.cpp
-    ui/camera/grid/camera_stream.cpp
-    ui/camera/grid/stream_pacing.cpp
-    ui/camera/grid/zone_assembly.cpp
+    ui/camera/grid/camera_tile.cpp
+    ui/camera/grid/grid_layout.cpp
     # brazing/reporting: the Qt-Network transport + ZoneSink impl (pure logic —
     # payload/retry_policy/aggregator — is in the denso_brazing lib below)
     brazing/brazing_client.cpp
     brazing/brazing_reporter.cpp
     brazing/zone_reporter.cpp
-    ui/camera/grid/camera_tile.cpp
-    ui/camera/grid/frame_processor.cpp
-    ui/camera/grid/fps_meter.cpp
-    ui/camera/grid/grid_layout.cpp
     # camera — management modal internals
     ui/camera/dialog/page_util.cpp
     ui/camera/dialog/list_page.cpp
@@ -101,7 +114,7 @@ add_executable(denso WIN32
     ui/camera/dialog/ip_scan.cpp
 )
 target_include_directories(denso PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(denso PRIVATE denso_core denso_detection denso_brazing Qt6::Widgets Qt6::Multimedia Qt6::Network)
+target_link_libraries(denso PRIVATE denso_core denso_detection denso_brazing denso_camera Qt6::Widgets Qt6::Multimedia Qt6::Network)
 target_include_directories(denso PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(denso PRIVATE ${OpenCV_LIBS})
 target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")

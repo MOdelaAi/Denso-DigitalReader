@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/shared/frame_convert.h"
+#include "camera/frame_convert.h"
 
 #include <QImage>
 #include <opencv2/core.hpp>

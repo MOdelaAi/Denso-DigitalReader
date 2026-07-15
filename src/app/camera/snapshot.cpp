@@ -1,7 +1,7 @@
-#include "ui/camera/shared/snapshot.h"
+#include "camera/snapshot.h"
 
-#include "ui/camera/shared/frame_convert.h"
-#include "ui/camera/shared/gst_pipeline.h"  // rtsp_gst_pipeline (NVDEC)
+#include "camera/frame_convert.h"
+#include "camera/gst_pipeline.h"  // rtsp_gst_pipeline (NVDEC)
 
 #include <QTransform>
 

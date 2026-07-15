@@ -1,11 +1,11 @@
-#include "ui/camera/grid/camera_stream.h"
+#include "camera/camera_stream.h"
 
-#include "ui/camera/shared/frame_convert.h"   // mat_to_qimage
-#include "ui/camera/grid/frame_processor.h"
-#include "ui/camera/grid/stream_pacing.h"     // next_backoff_ms
-#include "ui/camera/grid/safe_process.h"      // safe_process
-#include "ui/camera/shared/gst_pipeline.h"    // rtsp_gst_pipeline
-#include "ui/camera/shared/rtsp_templates.h"  // with_credentials
+#include "camera/frame_convert.h"   // mat_to_qimage
+#include "camera/frame_processor.h"
+#include "camera/stream_pacing.h"     // next_backoff_ms
+#include "camera/safe_process.h"      // safe_process
+#include "camera/gst_pipeline.h"    // rtsp_gst_pipeline
+#include "camera/rtsp_templates.h"  // with_credentials
 
 #include <QDebug>
 #include <QString>

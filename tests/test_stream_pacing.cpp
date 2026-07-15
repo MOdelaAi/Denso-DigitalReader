@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "ui/camera/grid/stream_pacing.h"
+#include "camera/stream_pacing.h"
 
 using denso::ui::next_backoff_ms;
 using denso::ui::should_emit;

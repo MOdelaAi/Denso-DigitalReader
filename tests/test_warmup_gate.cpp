@@ -1,4 +1,4 @@
-#include "ui/camera/grid/warmup_gate.h"
+#include "camera/warmup_gate.h"
 
 #include <catch2/catch_test_macros.hpp>
 

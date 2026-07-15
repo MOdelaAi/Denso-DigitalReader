@@ -34,13 +34,10 @@ add_executable(denso_tests
     test_rtsp_templates.cpp
     # rtsp_templates lives in the GUI app target but depends only on QtCore
     # (QString), so compile it straight into the tests for unit coverage.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/rtsp_templates.cpp
     test_gst_pipeline.cpp
     # gst_pipeline is GUI-target code but a pure std::string builder (no Qt/
     # OpenCV), so compile it into the tests for unit coverage.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/gst_pipeline.cpp
     test_snapshot.cpp
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/snapshot.cpp
     test_roi_geometry.cpp
     # roi_geometry is GUI-target code but depends only on QtGui/QtCore value
     # types (QPointF/QRectF), so compile it into the tests for unit coverage.
@@ -50,7 +47,6 @@ add_executable(denso_tests
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/grid_layout.cpp
     test_fps_meter.cpp
     # fps_meter is GUI-target code but pure std::chrono (no Qt), so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/fps_meter.cpp
     test_letterbox.cpp
     # letterbox is GUI-target code but pure OpenCV (no Qt), so compile it in.
     test_yolo_decode.cpp
@@ -63,22 +59,18 @@ add_executable(denso_tests
     test_frame_convert.cpp
     # frame_convert (qimage_to_mat) is GUI-target code but pure OpenCV/QImage
     # conversion (no widgets), so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/frame_convert.cpp
     test_stream_pacing.cpp
     # stream_pacing is GUI-target code but pure int math (no Qt/OpenCV), so
     # compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/stream_pacing.cpp
     test_safe_process.cpp
     test_frame_processor.cpp
     # frame_processor is GUI-target code but its link deps (snapshot,
     # frame_convert, zone_assembly, merge_detections, area_geometry) are all
     # already compiled/linked here and inference is behind the InferenceEngine
     # interface (fake-injectable), so compile it in for the worker-firewall test.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/frame_processor.cpp
     test_zone_assembly.cpp
     # zone_assembly is GUI-target code but pure (OpenCV value types + core
     # geometry, no widgets/Qt-net), so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_assembly.cpp
     test_zone_aggregator.cpp
     # zone_aggregator is pure std (no Qt/OpenCV), so compile it in.
     test_brazing_payload.cpp
@@ -88,7 +80,6 @@ add_executable(denso_tests
     # compile it in.
     test_warmup_gate.cpp
     # warmup_gate is GUI-target code but pure std (no Qt/OpenCV), so compile it in.
-    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/warmup_gate.cpp
     test_startup_mode.cpp
     # startup_mode is GUI-target code but pure std::filesystem (no Qt/OpenCV), so
     # compile it in.
@@ -110,7 +101,7 @@ add_executable(denso_tests
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_throttle.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
-target_link_libraries(denso_tests PRIVATE denso_core denso_detection denso_brazing Catch2::Catch2)
+target_link_libraries(denso_tests PRIVATE denso_core denso_detection denso_brazing denso_camera Catch2::Catch2)
 target_include_directories(denso_tests PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(denso_tests PRIVATE ${OpenCV_LIBS} Qt6::Gui)
 
