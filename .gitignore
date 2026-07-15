@@ -23,3 +23,8 @@ third_party/gpu_ep/
 # specific to the GPU architecture and TensorRT version, so never tracked.
 models/*.engine
 models/trt_cache/
+
+# untracked local scratch + custom model (added by mistake once)
+note.txt
+models/digitv2.onnx
+models/digitv2.engine.bak
