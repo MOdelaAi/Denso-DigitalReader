@@ -23,6 +23,11 @@ std::optional<int64_t> upsert_model(const QSqlDatabase& db, const DetectionModel
 /// Every catalog model, ordered by id.
 std::vector<DetectionModel> list_models(const QSqlDatabase& db);
 
+/// Every distinct model filename attached to any camera — the engines the app
+/// must be able to load at warm-up. Used to fail loud when a configured model
+/// is missing (rather than silently demoting the camera to no-detection).
+std::vector<std::string> attached_model_filenames(const QSqlDatabase& db);
+
 // ─── per-camera attachments ──────────────────────────────────────────────────
 
 /// The models attached to a camera with their class selections, ordered by id.

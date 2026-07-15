@@ -129,6 +129,11 @@ private:
     int det_w_ = 0;  // frame width the boxes were computed at
     int det_h_ = 0;
 
+    // Consecutive inference-failure count (worker thread only; no lock needed).
+    // Throttles the failure log to once per this many consecutive throws.
+    static constexpr int kInferFailLogEvery = 60;
+    int infer_fail_streak_ = 0;
+
     std::thread worker_;  // started last in the ctor
 };
 

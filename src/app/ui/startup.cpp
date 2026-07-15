@@ -1,5 +1,6 @@
 #include "ui/startup.h"
 
+#include "detection/repo.h"
 #include "ui/camera/shared/detection/engine_registry.h"
 #include "ui/mainwindow.h"
 #include "ui/startup_mode.h"
@@ -15,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace denso::ui {
 
@@ -109,7 +111,11 @@ int launch(QApplication& app, QSqlDatabase db,
     const std::string dir = QCoreApplication::applicationDirPath().toStdString();
     const std::string models_dir = dir + "/models";
     const std::string cache_dir = dir + "/models/trt_cache";
-    auto engines = std::make_shared<EngineRegistry>(models_dir, cache_dir);
+    // The models configured cameras actually need — warm_up fails loud if any is
+    // missing, instead of silently demoting the camera to no-detection.
+    std::vector<std::string> required = detection::attached_model_filenames(db);
+    auto engines = std::make_shared<EngineRegistry>(models_dir, cache_dir,
+                                                    std::move(required));
 
     // Splash only when there's a minutes-long build to wait on (cold); otherwise
     // the fast UI-first load.
