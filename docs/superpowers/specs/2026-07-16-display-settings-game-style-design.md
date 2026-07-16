@@ -25,8 +25,11 @@ Problems this creates:
 3. **Resolution ↔ fullscreen** — changing resolution while fullscreen does
    nothing visible; `showNormal()` restores pre-fullscreen geometry, not the
    chosen preset.
-4. **Fullscreen escape** — the top bar (with the Settings button) is hidden in
-   fullscreen; only F11/Esc get you out.
+4. **Stale claim** — a comment at `mainwindow.cpp:69-71` says the top bar is
+   "hidden while fullscreen"; it is **not** (no code hides it — `showFullScreen()`
+   only strips OS decorations, and `topBar` is an app widget). The Settings
+   button therefore stays touch-reachable in every mode. The comment is corrected
+   as part of this work.
 
 The user wants this reworked to feel like a **desktop game's video settings**.
 
@@ -50,8 +53,11 @@ Primary target: a fixed industrial **touchscreen on the Jetson Orin Nano**
   "Window size" resizes the app window only; the monitor's native mode is never
   touched. This is deliberate — fragile in general and actively unwanted on a
   fixed industrial panel.
-- **No in-fullscreen touch affordance** (floating gear button / edge tab). The
-  user chose **F11/Esc only**. See Known limitations.
+- **No added in-fullscreen touch affordance** (floating gear button / edge tab).
+  The user chose **F11/Esc only** — and this is safe because the **top bar (with
+  the Settings button) stays visible in every mode**, including fullscreen, so a
+  touchscreen operator always has a path back to Windowed via Settings. F11/Esc
+  are convenience shortcuts on top of that.
 - No multi-monitor selector, refresh-rate, or VSync controls.
 
 ## Design
@@ -78,9 +84,20 @@ this in a defined order (see §6) rather than flipping the flag in place.
   where the window fills the screen and a size is meaningless.
 - The preset list is **filtered to sizes that fit the current screen's available
   logical geometry**, so no label ever exceeds what the window can actually be —
-  replacing the clamp-that-lies. A pure helper `fitting_presets(avail_w,
-  avail_h)` (Qt-free, unit-tested) returns the indices of `PRESETS` that fit; the
-  dialog is populated from that against the screen the window is currently on.
+  replacing the clamp-that-lies. A pure helper `fitting_presets(avail_w, avail_h,
+  frame_w, frame_h)` (Qt-free, unit-tested) returns the `PRESETS` indices whose
+  **framed** size (client + window-frame overhead) fits `availableGeometry`. It
+  returns **empty when none fit** (the dialog then shows the current size as a
+  disabled single entry — never an oversized lie).
+- **Combo item-data holds the real `PRESETS` index** (`setItemData`), because
+  after filtering the visible combo row no longer equals the preset index. All
+  size lookups go through the item-data id, not the row.
+- The filtered list is **rebuilt whenever Settings opens** and when the target
+  screen / available geometry changes, against the screen the window is currently
+  on (not `primaryScreen()`).
+- **Persisted size no longer offered** (screen shrank, or came from another
+  machine): stage the **largest fitting preset**, and do **not** persist it until
+  a confirmed Apply.
 - Note: Qt geometry is in device-independent pixels; under display scaling a
   preset need not equal physical panel pixels. Acceptable — "Window size" is a
   logical window size, not a panel-pixel promise.
@@ -98,23 +115,46 @@ this in a defined order (see §6) rather than flipping the flag in place.
 
 ### 4. Confirm / revert transaction
 
-When Apply changes display mode and/or window size:
+Applies only when the change is a **semantic display change** (see below), never
+for theme-only.
 
-1. Snapshot the **last-known-good** `DisplayState` (mode, normal geometry,
-   window flags, the screen the window is on) **before** applying.
-2. Apply the new state (§6), let window-system events settle, then show a
-   **frameless, always-on-top modal** overlay: *"Keep these display settings?
-   Reverting in 15s…"* with a live countdown and **Keep** / **Revert** buttons.
-   The overlay must render **above** the (possibly fullscreen) window on Windows
-   and X11.
-3. **Keep** → persist the new state (§5), close the overlay.
-4. **Revert** or **timeout** → restore the snapshot fully (flags + geometry +
-   state + screen), persist nothing.
-5. **Nothing is persisted until Keep.** This recovers from an unusable render or
-   a mode the operator can't read.
+1. Snapshot the **last-known-good semantic `DisplayState`** *before* applying:
+   `{ mode, windowed_size (normal client size), screen_name (+ fallback
+   geometry) }`. **Not** raw Qt window flags — those are stale/transient and
+   `setWindowFlags()` recreates+hides the native window. Optionally also keep an
+   opaque `saveGeometry()` blob as a *restoration aid only*, not the source of
+   truth.
+2. Apply the new state (§6), let window-system events settle (a queued tick),
+   then show the confirm overlay: *"Keep these display settings? Reverting in
+   15s…"* with a live countdown + **Keep** / **Revert**.
+3. **Keep** → persist the new state (§5, transactional), close the overlay.
+4. **Revert** or **timeout** → **re-apply the snapshot by calling the same
+   canonical mode applicator** (§6) — do not replay raw flags. Persist nothing.
+5. **Nothing is persisted until Keep.**
 
-The revert-target selection and the "did display actually change?" decision are
-pure, testable logic over `DisplayState`; the countdown itself is a `QTimer`.
+**Semantic "display changed?"** = mode differs, OR (mode is Windowed on both
+sides AND windowed_size differs). Re-picking the same values, or changing the
+staged size while staying Fullscreen/Borderless, is **not** a display change and
+skips the overlay — but a staged windowed size still records what a *future*
+Windowed switch would use (saved only on a confirmed Apply).
+
+**Interference while a transaction is pending** must be explicitly routed:
+- **Esc** / **Revert button** → revert the transaction.
+- **F11**, a second **Apply**, **Reset defaults** → disabled/rejected while
+  pending (Reset, if it changes display state, runs *through* this same
+  transaction rather than around it).
+- **Window close / app shutdown** → persist nothing; startup keeps the last kept
+  state (fail safe).
+
+**The overlay** is a **child-owned top-level `QDialog`** with
+`Qt::WindowStaysOnTopHint`, application-modal, explicitly `raise()`+
+`activateWindow()`ed after the applied window settles — *not* a generic reusable
+widget (no second consumer yet). **Failure criterion** (fail-safe → immediate
+revert): the dialog fails to create/show, or a short queued post-show check finds
+it not visible / not the active window.
+
+The "display changed?" test, the semantic snapshot, and the revert plan are pure,
+testable logic over `DisplayState`; the countdown is a `QTimer`.
 
 ### 5. Persistence (no SQL migration)
 
@@ -124,29 +164,61 @@ not columns — so this needs **no schema migration** and `SCHEMA_VERSION` stays
 - `settings::Settings` replaces `bool fullscreen` with
   `DisplayMode mode` (`enum class DisplayMode { Windowed, Borderless, Fullscreen }`).
   `width`/`height` remain the **windowed** size; `dark` unchanged.
-- `save()` writes a `"display_mode"` key (`"windowed"|"borderless"|"fullscreen"`).
-- `load()` reads `"display_mode"`; **legacy fallback**: if that key is absent but
-  the old `"fullscreen"` key exists, map `fullscreen=1 → Fullscreen`, else
-  `Windowed`. An **unknown/corrupt** `display_mode` value falls back to
-  **Windowed** (never strand startup in an unreachable mode).
+- `save()` **dual-writes** so an older binary opening the same DB degrades
+  safely (it only knows the `fullscreen` key):
+  - Windowed → `display_mode=windowed`, `fullscreen=0`
+  - Borderless → `display_mode=borderless`, `fullscreen=0` (old build → Windowed)
+  - Fullscreen → `display_mode=fullscreen`, `fullscreen=1`
+  Writes must be **transactional** (all keys in one commit) so a partial failure
+  can't leave `display_mode` and `fullscreen` disagreeing.
+- `load()` **prefers `display_mode`**; if absent, **legacy fallback** to the old
+  `fullscreen` key (`1 → Fullscreen`, else `Windowed`). An **unknown/corrupt**
+  `display_mode` falls back to **Windowed** (never strand startup in an
+  unreachable mode).
 - `import_legacy` (JSON) gains the same mapping: `fullscreen` bool → `mode`,
   tolerating absence.
 
-### 6. Mode application order (MainWindow)
+### 6. Mode application (MainWindow) — canonical states, deterministic sequence
 
-A single `apply_display_mode(DisplayMode, size)` that:
+Each mode is a **canonical absolute state**, never derived incrementally from the
+previous mode (so no stale `FramelessWindowHint` survives e.g. Borderless →
+Fullscreen):
 
-- **Windowed**: if currently frameless/fullscreen, `showNormal()`, clear
-  `FramelessWindowHint` (hide→setFlag→show as needed), then
-  `resize_within_screen(size)`.
-- **Borderless**: `showNormal()`, set `FramelessWindowHint`, `setGeometry(screen
-  full rect)`, show.
-- **Fullscreen**: `showFullScreen()`.
+| Mode | Fullscreen state | Frameless flag | Geometry |
+|---|---|---|---|
+| Windowed | no | **off** | `resize_within_screen(size)`, centered |
+| Borderless | no | **on** | current screen's **full** rect |
+| Fullscreen | **yes** | **off** | (screen native, via `showFullScreen`) |
 
-Use `showFullScreen()`/`showNormal()` + geometry rather than hand-forcing
-positions where the platform constrains it. Startup (`apply_startup`) applies the
-persisted mode the same way, **without** the confirm/revert overlay (persisted
-state is already trusted).
+Because `setWindowFlags()`/frameless changes recreate and hide the native window,
+`apply_display_mode(mode, size)` uses **one deterministic sequence**:
+
+1. Capture target `QScreen*` + desired geometry.
+2. `hide()`.
+3. Set the **canonical** flags for the target mode while hidden
+   (`FramelessWindowHint` on for Borderless, off otherwise).
+4. `setWindowState(Qt::WindowNoState)` to clear any prior fullscreen/maximized.
+5. `show()` on the intended screen.
+6. Re-assert geometry after the native window is (re)created: Windowed →
+   `resize_within_screen`; Borderless → `setGeometry(full screen rect)`;
+   Fullscreen → `showFullScreen()`.
+
+> xcb note (Jetson): some WMs honor geometry only after mapping, so Borderless
+> may need `show()` then a **queued** `setGeometry(fullRect)`. This ordering is
+> verified on-device (X11 GNOME), not assumed.
+
+**Pure transition planner (testable):** a Qt-free
+`plan_transition(current_semantic_state, requested_mode, requested_size,
+platform_caps) → { target flags-state (as an enum triple), geometry action,
+needs_confirm }`. `MainWindow` executes the plan against real `QWidget` calls;
+the *decision* logic (what to do) is unit-tested, the *execution* (QWidget) is
+manual/platform-tested.
+
+Startup (`apply_startup`) runs the planner+applicator for the persisted mode
+**without** the confirm/revert overlay (persisted state is already trusted).
+
+Also: **correct the stale comment** at `mainwindow.cpp:69-71` — the top bar is
+not hidden in fullscreen; F11/Esc are convenience shortcuts, not the only exit.
 
 ### 7. Platform-capability guard (defensive)
 
@@ -160,11 +232,11 @@ Borderless there falls back to `showMaximized()`-like behavior; acceptable.
 
 | File | Change |
 |---|---|
-| `src/core/settings/settings.h` | Add `enum class DisplayMode`; replace `bool fullscreen` with `DisplayMode mode`; add pure `fitting_presets(avail_w, avail_h)` + `display_mode` string (de)serialize helpers. |
-| `src/core/settings/repo.cpp` | Load/save `display_mode` key + legacy `fullscreen` fallback + safe unknown→Windowed; update `import_legacy`. |
-| `src/app/ui/settings/settings_dialog.{h,cpp}` | Display-mode combobox; rename Resolution→Window size + subtext; enable size only in Windowed; stage selections; emit single `apply_display_requested`; drop `apply_resolution_requested`/`toggle_fullscreen_requested`. |
-| `src/app/ui/mainwindow.{h,cpp}` | `apply_display_mode()`; `DisplayState` snapshot/restore; confirm/revert transaction; startup applies persisted mode; platform guard. F11/Esc unchanged. |
-| `src/app/ui/common/` (new) | A small reusable confirm/revert overlay widget (frameless, top-most, countdown). |
+| `src/core/settings/settings.h` | Add `enum class DisplayMode`; replace `bool fullscreen` with `DisplayMode mode`; pure helpers: `fitting_presets(avail_w, avail_h, frame_w, frame_h)`, `display_mode` ⇄ string, `plan_transition(...)`, semantic `DisplayState` + "changed?"/revert logic. |
+| `src/core/settings/repo.cpp` | Load `display_mode` (prefer) + legacy `fullscreen` fallback + unknown→Windowed; **transactional dual-write** (`display_mode` + `fullscreen`); update `import_legacy`. |
+| `src/app/ui/settings/settings_dialog.{h,cpp}` | Display-mode combobox; rename Resolution→Window size + subtext; size combo carries `PRESETS` id in item-data, enabled only in Windowed, filtered+rebuilt on open/screen-change; stage selections; emit single `apply_display_requested`; drop `apply_resolution_requested`/`toggle_fullscreen_requested`. |
+| `src/app/ui/mainwindow.{h,cpp}` | `apply_display_mode()` (canonical sequence); semantic snapshot/restore via the applicator; confirm/revert transaction + interference routing; startup applies persisted mode; platform guard; **fix the stale `topBar`-hidden comment**. |
+| `src/app/ui/settings/display_confirm_dialog.{h,cpp}` (new) | Display-specific child-owned top-level `QDialog` (`WindowStaysOnTopHint`, app-modal, countdown, Keep/Revert). Not in `ui/common` — no second consumer. |
 | `tests/` | Unit tests (below). |
 
 ## Data flow
@@ -194,13 +266,19 @@ Startup --> load() (display_mode | legacy fullscreen | Windowed) -> apply_displa
 ## Testing
 
 **Pure / unit (Catch2, cross-platform):**
-- `DisplayMode` ⇄ string round-trip; unknown → Windowed.
-- Legacy `fullscreen=1/0` (no `display_mode` key) → Fullscreen/Windowed.
+- `DisplayMode` ⇄ string round-trip; unknown/corrupt → Windowed.
+- Persistence precedence + dual-write: `display_mode` present wins over
+  `fullscreen`; new `save()` writes both keys consistently for all 3 modes;
+  legacy `fullscreen=1/0` alone → Fullscreen/Windowed; **old-build downgrade**
+  (borderless persisted → an old reader sees `fullscreen=0` → Windowed).
 - `import_legacy` JSON mapping incl. missing `fullscreen`.
-- `fitting_presets(avail)` filters correctly (all fit, some fit, none fit →
-  at least the smallest, or empty handled).
+- `fitting_presets(avail, frame)` — all fit / some fit / **none fit → empty**;
+  framed size (client+frame) is what's compared.
 - `preset_index` still round-trips windowed size.
-- "display changed?" + revert-target selection over `DisplayState`.
+- `plan_transition(...)` — canonical target per requested mode from every source
+  mode (incl. Borderless→Fullscreen leaves frameless **off**); `needs_confirm`
+  only on semantic display change; platform-caps force Fullscreen on eglfs.
+- Persisted size no-longer-offered → largest fitting preset, not persisted.
 
 **Manual / on-device (no display over SSH → AnyDesk on Jetson):**
 - Windows + Jetson X11: each mode transition; Apply→Keep persists; Apply→wait
@@ -209,15 +287,17 @@ Startup --> load() (display_mode | legacy fullscreen | Windowed) -> apply_displa
 
 ## Known limitations (accepted)
 
-- **Keyboardless fullscreen trap:** with F11/Esc-only escape and a hidden top
-  bar, an operator on a keyboardless touchscreen who **keeps** Fullscreen has no
-  touch path back to Settings until a keyboard is attached. The confirm/revert
-  countdown protects only the *transition* (a broken/unreadable render
-  auto-reverts), not a deliberately-kept working fullscreen. A future in-screen
-  gear button can lift this without changing the rest of the design.
-- Borderless is visually ~identical to Fullscreen on a single monitor.
+- **No keyboardless trap** (corrected from the first draft): the top bar with the
+  Settings button stays visible in fullscreen, so a touchscreen operator always
+  reaches Settings → Windowed without a keyboard. F11/Esc are extras. *(If a
+  future change hides the top bar in fullscreen for a cleaner game feel, an
+  in-screen gear button must be added at the same time — out of scope here.)*
+- Borderless is visually ~identical to Fullscreen on a single monitor (the user
+  wants all three modes regardless).
 - "Window size" is logical (device-independent) pixels, not guaranteed physical
   panel pixels under display scaling.
+- Wayland: Borderless can't force top-level position, so it falls back to
+  maximized-within-work-area behavior there.
 
 ## Open questions
 
