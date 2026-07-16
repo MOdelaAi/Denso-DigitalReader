@@ -6,12 +6,14 @@
 // the Slint original.
 #pragma once
 
+#include "network/model.h"
 #include "ui/viewmodel.h"
 
 #include <QPointer>
 #include <QSqlDatabase>
 #include <QWidget>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,6 +51,11 @@ private:
     NetConfigUi wifi_config_;
     std::vector<QPointer<QThread>> workers_;  // outstanding async workers
     bool net_busy_ = false;  // an action is in flight — ignore overlapping clicks
+    // Last live status, kept so on_shown() can paint it instantly (stale-while-
+    // revalidate) instead of blanking to "Loading…" during the slow OS query.
+    // The panel outlives each modal open (the dialog is built once), so this
+    // survives reopens.
+    std::optional<network::NetworkSnapshot> last_snapshot_;
 };
 
 } // namespace denso::ui
