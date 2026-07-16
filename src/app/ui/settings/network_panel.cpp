@@ -82,6 +82,14 @@ void NetworkPanel::on_shown() {
     // then refresh live status — the Slint nav callback's behavior.
     eth_card_->set_config(eth_config_);
     wifi_card_->set_config(wifi_config_);
+    // Stale-while-revalidate: if we already have a snapshot from a prior open,
+    // paint it immediately so the page shows real status at once instead of a
+    // blank "Loading…" for the seconds the OS query (netsh/nmcli) can take. The
+    // background refresh below then updates it in place.
+    if (last_snapshot_) {
+        eth_card_->set_status(to_net_status(last_snapshot_->ethernet));
+        wifi_card_->set_status(to_net_status(last_snapshot_->wifi));
+    }
     refresh_network();
 }
 
@@ -92,14 +100,27 @@ void NetworkPanel::refresh_network() {
                                   [](const QPointer<QThread>& w) { return !w; }),
                    workers_.end());
     refresh_btn_->setEnabled(false);
-    refresh_btn_->setText(QStringLiteral("Loading…"));
+    // With cached status already on screen this is a background revalidation,
+    // not a cold load — label it so stale-but-visible status reads as provisional.
+    refresh_btn_->setText(last_snapshot_ ? QStringLiteral("Refreshing…")
+                                         : QStringLiteral("Loading…"));
     QPointer<NetworkPanel> self(this);
     workers_.push_back(common::run_on_worker([this, self] {
-        const network::NetworkSnapshot snap = network::backend()->snapshot();
+        // snapshot() is bounded but can still throw (spawn failure, parse). Never
+        // let that escape the worker: it would leave net_busy_ pinned true and the
+        // button stuck on "Loading…" for the rest of the session.
+        std::optional<network::NetworkSnapshot> snap;
+        try {
+            snap = network::backend()->snapshot();
+        } catch (...) {
+        }
         if (!self) return;  // panel gone — skip the post
         common::post_to_gui(this, [this, snap] {
-            eth_card_->set_status(to_net_status(snap.ethernet));
-            wifi_card_->set_status(to_net_status(snap.wifi));
+            if (snap) {
+                last_snapshot_ = snap;
+                eth_card_->set_status(to_net_status(snap->ethernet));
+                wifi_card_->set_status(to_net_status(snap->wifi));
+            }
             refresh_btn_->setText(QStringLiteral("Refresh"));
             refresh_btn_->setEnabled(true);
             net_busy_ = false;
