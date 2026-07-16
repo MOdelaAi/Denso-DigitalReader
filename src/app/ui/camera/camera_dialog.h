@@ -41,6 +41,10 @@ signals:
 
 protected:
     void showEvent(QShowEvent* e) override;  // reopen on the list, compact size
+    /// Escape and the window's X both land here. The Areas step guards its own
+    /// Back/Exit buttons, but those aren't the only ways out of the modal — so
+    /// unsaved ROI work gets the same confirmation whichever exit is taken.
+    void reject() override;
 
 private:
     void show_page(int index);   // switch stack page + drive stepper/sizing

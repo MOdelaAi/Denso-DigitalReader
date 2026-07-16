@@ -44,17 +44,26 @@ public:
     void edit_polygon(const std::vector<camera::Point>&);  // → Editing
     void go_idle();                                        // → Idle, no active polygon
 
-    // Actions the page exposes as on-screen buttons (keyboard is an accelerator,
-    // never the only way in — the Jetson panel may have no keyboard at all).
-    void undo_point();     // Drawing: drop the last vertex
-    void close_polygon();  // Drawing: close it if 3+ vertices
-    void clear();          // wipe the active polygon
+    // Actions the page exposes as on-screen buttons (keyboard and right-click
+    // are accelerators, never the only way in — the panel may have no keyboard,
+    // and a touchscreen has no right button).
+    void undo_point();              // Drawing: drop the last vertex
+    void close_polygon();           // Drawing: close it if 3+ vertices
+    void clear();                   // wipe the active polygon
+    void remove_selected_vertex();  // Editing: drop the tapped corner
 
     Mode mode() const { return mode_; }
     const std::vector<camera::Point>& polygon() const { return points_; }
     int point_count() const { return static_cast<int>(points_.size()); }
     bool is_closed() const { return closed_; }
     bool is_valid() const { return points_.size() >= 3; }
+    /// Index of the corner the operator last tapped while Editing, or -1. This
+    /// is what makes removal reachable without a right button.
+    int selected_vertex() const { return selected_vertex_; }
+    bool can_remove_selected_vertex() const {
+        return mode_ == Mode::Editing && selected_vertex_ >= 0 &&
+               points_.size() > 3;
+    }
     /// True while a polygon is part-drawn — the state that used to vanish
     /// silently when the operator pressed Finish.
     bool has_unfinished_draw() const {
@@ -70,6 +79,9 @@ signals:
     /// A rejected interaction worth explaining (e.g. a click off the frame, or
     /// a delete that would leave fewer than 3 vertices). The page shows it.
     void rejected(const QString& why);
+    /// The tapped corner changed (including to none) — the page uses this to
+    /// enable its "Remove corner" button.
+    void vertex_selection_changed();
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -83,6 +95,8 @@ private:
     QRectF image_rect() const;  // where the frame is drawn inside the widget
     QList<QPointF> widget_points() const;  // active polygon in widget space
     void try_close();
+    void reset_interaction();   // drop drag/hover/selection on a mode change
+    void select_vertex(int index);  // -1 clears; emits only on a real change
     void draw_context(QPainter& p, const QRectF& img) const;
     void draw_active(QPainter& p, const QRectF& img) const;
 
@@ -91,8 +105,9 @@ private:
     std::vector<camera::CameraArea> context_;  // the camera's other areas
     Mode mode_ = Mode::Idle;
     bool closed_ = false;
-    int drag_vertex_ = -1;  // index being dragged, or -1
-    int hover_vertex_ = -1;  // index under the cursor, or -1 (drawn larger)
+    int drag_vertex_ = -1;      // index being dragged, or -1
+    int hover_vertex_ = -1;     // index under the cursor, or -1 (drawn larger)
+    int selected_vertex_ = -1;  // index last tapped while Editing, or -1
 };
 
 } // namespace denso::ui

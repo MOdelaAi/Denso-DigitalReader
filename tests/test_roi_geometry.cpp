@@ -118,6 +118,13 @@ TEST_CASE("hit_test_vertex: an empty polygon has nothing to hit") {
     REQUIRE(hit_test_vertex({}, QPointF(20, 20), 10.0) == -1);
 }
 
+TEST_CASE("hit_test_vertex: a non-positive radius hits nothing") {
+    // Squaring the radius would make -10 behave exactly like 10 — a caller
+    // passing a computed radius that went negative would get silent grabs.
+    REQUIRE(hit_test_vertex(kCorners, QPointF(20, 20), -10.0) == -1);
+    REQUIRE(hit_test_vertex(kCorners, QPointF(20, 20), 0.0) == -1);
+}
+
 // ─── nearest_edge_insert_index ───────────────────────────────────────────────
 // Returns the index the new vertex should be INSERTED AT, i.e. one past the
 // edge's start vertex, so the polygon keeps its winding.
@@ -150,4 +157,9 @@ TEST_CASE("nearest_edge_insert_index: fewer than 3 vertices has no edge to split
     REQUIRE(nearest_edge_insert_index({}, QPointF(0, 0), 8.0) == -1);
     REQUIRE(nearest_edge_insert_index({QPointF(20, 20)}, QPointF(20, 20), 8.0) ==
             -1);
+}
+
+TEST_CASE("nearest_edge_insert_index: a non-positive distance matches nothing") {
+    REQUIRE(nearest_edge_insert_index(kCorners, QPointF(50, 20), -8.0) == -1);
+    REQUIRE(nearest_edge_insert_index(kCorners, QPointF(50, 20), 0.0) == -1);
 }

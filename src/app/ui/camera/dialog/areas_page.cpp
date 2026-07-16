@@ -69,6 +69,8 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     connect(canvas_, &RoiCanvas::rejected, this, [this](const QString& why) {
         status_->setText(why);
     });
+    connect(canvas_, &RoiCanvas::vertex_selection_changed, this,
+            &CameraAreasPage::update_controls);
     canvas_col->addWidget(canvas_, 1);
 
     // Every gesture also has a button: the panel may have no keyboard, and a
@@ -78,6 +80,14 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     status_ = dim_label(QString());
     status_->setWordWrap(true);
     tools->addWidget(status_, 1);
+
+    // A touchscreen has no right button, so removal needs a real control.
+    remove_vertex_btn_ = new QPushButton(QStringLiteral("Remove corner"));
+    connect(remove_vertex_btn_, &QPushButton::clicked, this, [this] {
+        canvas_->remove_selected_vertex();
+        canvas_->setFocus();
+    });
+    tools->addWidget(remove_vertex_btn_, 0);
 
     undo_btn_ = new QPushButton(QStringLiteral("↶ Undo point"));
     connect(undo_btn_, &QPushButton::clicked, this, [this] {
@@ -93,6 +103,12 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
         canvas_->setFocus();
     });
     tools->addWidget(clear_btn_, 0);
+
+    cancel_btn_ = new QPushButton(QStringLiteral("✕ Cancel"));
+    cancel_btn_->setProperty("flatText", true);
+    connect(cancel_btn_, &QPushButton::clicked, this,
+            &CameraAreasPage::cancel_active_draw);
+    tools->addWidget(cancel_btn_, 0);
 
     done_btn_ = new QPushButton(QStringLiteral("✓ Done shape"));
     connect(done_btn_, &QPushButton::clicked, this, [this] {
@@ -118,10 +134,10 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
 
     auto* list_btns = new QHBoxLayout;
     list_btns->setSpacing(8);
-    auto* new_btn = new QPushButton(QStringLiteral("+ New area"));
-    connect(new_btn, &QPushButton::clicked, this,
+    new_btn_ = new QPushButton(QStringLiteral("+ New area"));
+    connect(new_btn_, &QPushButton::clicked, this,
             &CameraAreasPage::start_new_area);
-    list_btns->addWidget(new_btn, 1);
+    list_btns->addWidget(new_btn_, 1);
     delete_btn_ = new QPushButton(QStringLiteral("Delete"));
     delete_btn_->setProperty("flatText", true);
     connect(delete_btn_, &QPushButton::clicked, this,
@@ -312,6 +328,7 @@ void CameraAreasPage::select_area(int row) {
     redrawing_row_ = -1;
     const camera::CameraArea& a = areas_[static_cast<size_t>(row)];
     name_edit_->setText(QString::fromStdString(a.name));
+    rebuild_zone_choices();  // availability depends on which area is selected
     sync_zone_combo(a.zone);
     push_context_areas();
     canvas_->edit_polygon(a.points);
@@ -361,6 +378,7 @@ void CameraAreasPage::start_new_area() {
     draft_name_ = suggested_name().toStdString();
     draft_zone_.reset();
     name_edit_->setText(QString::fromStdString(draft_name_));
+    rebuild_zone_choices();  // a draft blocks against every existing area
     sync_zone_combo(std::nullopt);
     push_context_areas();
     canvas_->begin_draw();
@@ -415,6 +433,35 @@ void CameraAreasPage::apply_edited_polygon(
     }
 }
 
+bool CameraAreasPage::has_active_draw() const {
+    // Deliberately NOT conditioned on having placed a point: a redraw that was
+    // started and then cleared still means "this shape is unresolved", and
+    // saving it as the old polygon is exactly the silent wrong result to avoid.
+    return canvas_->mode() == RoiCanvas::Mode::Drawing &&
+           (drafting_ || redrawing_row_ >= 0);
+}
+
+void CameraAreasPage::cancel_active_draw() {
+    if (!has_active_draw()) {
+        return;
+    }
+    const int restore = redrawing_row_;
+    drafting_ = false;
+    redrawing_row_ = -1;
+    draft_name_.clear();
+    draft_zone_.reset();
+    if (restore >= 0 && restore < static_cast<int>(areas_.size())) {
+        select_area(restore);  // back to the untouched original
+    } else {
+        name_edit_->clear();
+        sync_zone_combo(std::nullopt);
+        canvas_->go_idle();
+        push_context_areas();
+    }
+    update_controls();
+    update_status();
+}
+
 void CameraAreasPage::redraw_selected() {
     const int row = list_->currentRow();
     if (row < 0 || row >= static_cast<int>(areas_.size())) {
@@ -467,28 +514,48 @@ void CameraAreasPage::delete_selected() {
 // ─── Zone picker ─────────────────────────────────────────────────────────────
 
 void CameraAreasPage::rebuild_zone_choices() {
+    // Every zone the operator may NOT pick for the current target, and who has
+    // it. Other cameras hold some; the rest are held by this camera's OTHER
+    // areas — a same-camera clash is just as fatal to the save, so the picker
+    // has to know about both or it isn't authoritative.
+    std::map<int, QString> unavailable;
+    for (const auto& [zone, owner] : zones_taken_) {
+        unavailable.emplace(zone, QString::fromStdString(owner));
+    }
+    const int row = list_->currentRow();
+    for (size_t i = 0; i < areas_.size(); ++i) {
+        if (!drafting_ && static_cast<int>(i) == row) {
+            continue;  // the area being edited doesn't block its own zone
+        }
+        const camera::CameraArea& a = areas_[i];
+        if (a.zone && *a.zone != 0) {
+            unavailable.emplace(*a.zone,
+                                a.name.empty()
+                                    ? QStringLiteral("another area here")
+                                    : QStringLiteral("“%1” on this camera")
+                                          .arg(QString::fromStdString(a.name)));
+        }
+    }
+
     const QSignalBlocker block(zone_combo_);
     zone_combo_->clear();
     // No "0 = none" sentinel to decode — the default choice says what it does.
     zone_combo_->addItem(QStringLiteral("Detection only — do not report"),
                          QVariant());
+    auto* model = qobject_cast<QStandardItemModel*>(zone_combo_->model());
     for (int z = 1; z <= kMaxZone; ++z) {
-        const auto owner = zones_taken_.find(z);
-        const bool taken = owner != zones_taken_.end();
-        zone_combo_->addItem(
-            taken ? QStringLiteral("Zone %1 — used by %2")
-                        .arg(z)
-                        .arg(QString::fromStdString(owner->second))
-                  : QStringLiteral("Zone %1").arg(z),
-            QVariant(z));
-        if (taken) {
+        const auto owner = unavailable.find(z);
+        const bool taken = owner != unavailable.end();
+        zone_combo_->addItem(taken ? QStringLiteral("Zone %1 — used by %2")
+                                         .arg(z)
+                                         .arg(owner->second)
+                                   : QStringLiteral("Zone %1").arg(z),
+                             QVariant(z));
+        if (taken && model) {
             // Visible but unpickable: the operator learns the number is spoken
             // for and by whom, instead of discovering it via a failed save.
-            if (auto* model =
-                    qobject_cast<QStandardItemModel*>(zone_combo_->model())) {
-                if (auto* item = model->item(zone_combo_->count() - 1)) {
-                    item->setEnabled(false);
-                }
+            if (auto* item = model->item(zone_combo_->count() - 1)) {
+                item->setEnabled(false);
             }
         }
     }
@@ -533,9 +600,12 @@ void CameraAreasPage::update_status() {
             break;
         }
         case RoiCanvas::Mode::Editing:
-            status_->setText(QStringLiteral(
-                "Drag a corner to move it · tap an edge to add one · "
-                "right-click a corner to remove it."));
+            status_->setText(
+                canvas_->selected_vertex() >= 0
+                    ? QStringLiteral("Corner selected — drag it to move it, or "
+                                     "press “Remove corner”.")
+                    : QStringLiteral("Drag a corner to move it · tap an edge to "
+                                     "add one · tap a corner to select it."));
             break;
         case RoiCanvas::Mode::Idle:
             status_->setText(
@@ -550,14 +620,23 @@ void CameraAreasPage::update_status() {
 
 void CameraAreasPage::update_controls() {
     const bool drawing = canvas_->mode() == RoiCanvas::Mode::Drawing;
+    const bool active = has_active_draw();
     const bool has_sel = list_->currentRow() >= 0;
     const bool has_frame = canvas_->has_frame();
 
     undo_btn_->setEnabled(drawing && canvas_->point_count() > 0);
     clear_btn_->setEnabled(drawing && canvas_->point_count() > 0);
     done_btn_->setEnabled(drawing && canvas_->is_valid());
+    cancel_btn_->setVisible(active);
+    remove_vertex_btn_->setVisible(!drawing);
+    remove_vertex_btn_->setEnabled(canvas_->can_remove_selected_vertex());
 
-    delete_btn_->setEnabled(has_sel);
+    // Drawing is a sub-task with exactly two exits: finish or cancel. Leaving
+    // the list live here is what let a half-drawn polygon vanish on a stray tap.
+    list_->setEnabled(!active);
+    new_btn_->setEnabled(!active && has_frame);
+
+    delete_btn_->setEnabled(has_sel && !active);
     redraw_btn_->setEnabled(has_sel && has_frame && !drawing);
     // Metadata is only meaningful for a real target — either the selected area
     // or the draft. Enabled-but-ignored controls are how the old page lost the
@@ -566,16 +645,19 @@ void CameraAreasPage::update_controls() {
     zone_combo_->setEnabled(has_sel || drafting_);
 
     hint_->setText(
-        drawing ? QStringLiteral("Name and zone are kept and applied when you "
-                                 "finish the shape.")
-                : QStringLiteral("Areas limit where this camera looks. An area "
-                                 "with a zone also reports its reading."));
+        active ? QStringLiteral("Name and zone are kept and applied when you "
+                                "finish the shape.")
+               : QStringLiteral("Areas limit where this camera looks. An area "
+                                "with a zone also reports its reading."));
 }
 
 // ─── Leaving + saving ────────────────────────────────────────────────────────
 
 bool CameraAreasPage::is_dirty() const {
-    return !camera::areas_equal(areas_, loaded_) || canvas_->has_unfinished_draw();
+    // has_active_draw() rather than has_unfinished_draw(): a started-then-
+    // cleared draw has no points but still represents unresolved intent, and a
+    // draft's typed name/zone live outside `areas_` until the shape closes.
+    return !camera::areas_equal(areas_, loaded_) || has_active_draw();
 }
 
 bool CameraAreasPage::confirm_discard(const QString& action) {
@@ -592,13 +674,19 @@ bool CameraAreasPage::confirm_discard(const QString& action) {
 }
 
 void CameraAreasPage::attempt_save() {
-    // A part-drawn polygon is on screen but not in the working set — saving
-    // would have quietly thrown it away.
-    if (canvas_->has_unfinished_draw()) {
+    // An unresolved draw is on screen but not in the working set. Saving would
+    // quietly drop a part-drawn polygon — or, for a redraw, quietly save the
+    // OLD shape while the operator believes they replaced it.
+    if (has_active_draw()) {
         QMessageBox::warning(
             this, QStringLiteral("Finish the area first"),
-            QStringLiteral("You are still drawing an area. Finish the shape "
-                           "(“Done shape”) or clear it, then save."));
+            redrawing_row_ >= 0
+                ? QStringLiteral("You are redrawing an area. Finish the new "
+                                 "shape (“Done shape”) or press Cancel to keep "
+                                 "the old one, then save.")
+                : QStringLiteral("You are still drawing an area. Finish the "
+                                 "shape (“Done shape”) or press Cancel, then "
+                                 "save."));
         return;
     }
 

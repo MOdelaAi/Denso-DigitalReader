@@ -10,6 +10,7 @@ using denso::camera::find_zone_conflict;
 using denso::camera::Point;
 using denso::camera::polygon_area;
 using denso::camera::polygon_is_degenerate;
+using denso::camera::polygon_self_intersects;
 using denso::camera::ZoneConflict;
 
 namespace {
@@ -80,6 +81,74 @@ TEST_CASE("polygon_is_degenerate: a small but usable area is accepted") {
     // around a small 7-segment display on a wide shot.
     REQUIRE_FALSE(polygon_is_degenerate(
         {{0.50f, 0.50f}, {0.53f, 0.50f}, {0.53f, 0.53f}, {0.50f, 0.53f}}));
+}
+
+TEST_CASE("polygon_is_degenerate: just over the area floor is accepted") {
+    // The floor (kMinPolygonArea = 1e-4) is a 0.01 x 0.01 square. Probe either
+    // side of it with a margin far wider than float error — a tighter probe
+    // would only pin how 0.01 rounds in float, not the rule.
+    REQUIRE_FALSE(polygon_is_degenerate(  // 0.012² = 1.44e-4
+        {{0.5f, 0.5f}, {0.512f, 0.5f}, {0.512f, 0.512f}, {0.5f, 0.512f}}));
+}
+
+TEST_CASE("polygon_is_degenerate: just under the area floor is rejected") {
+    REQUIRE(polygon_is_degenerate(  // 0.008² = 6.4e-5
+        {{0.5f, 0.5f}, {0.508f, 0.5f}, {0.508f, 0.508f}, {0.5f, 0.508f}}));
+}
+
+// ─── polygon_self_intersects ─────────────────────────────────────────────────
+// Dragging a corner across the shape makes a bow-tie in one gesture. Under the
+// even-odd fill point_in_polygon uses, the crossed lobes read as holes — so the
+// ROI silently stops detecting where the operator can plainly see coverage.
+
+TEST_CASE("polygon_self_intersects: a convex square does not") {
+    REQUIRE_FALSE(polygon_self_intersects(
+        {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.8f, 0.8f}, {0.2f, 0.8f}}));
+}
+
+TEST_CASE("polygon_self_intersects: a concave chevron does not") {
+    // Concave is legal and useful — only CROSSING edges are the problem.
+    REQUIRE_FALSE(polygon_self_intersects(
+        {{0.1f, 0.2f}, {0.5f, 0.5f}, {0.9f, 0.2f}, {0.9f, 0.8f}, {0.1f, 0.8f}}));
+}
+
+TEST_CASE("polygon_self_intersects: a triangle never can") {
+    REQUIRE_FALSE(
+        polygon_self_intersects({{0.2f, 0.8f}, {0.8f, 0.8f}, {0.5f, 0.2f}}));
+}
+
+TEST_CASE("polygon_self_intersects: a bow-tie does") {
+    // Corners 2 and 3 swapped — the classic one-drag mistake.
+    REQUIRE(polygon_self_intersects(
+        {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.2f, 0.8f}, {0.8f, 0.8f}}));
+}
+
+TEST_CASE("polygon_self_intersects: a crossing in a longer polygon is caught") {
+    REQUIRE(polygon_self_intersects({{0.1f, 0.1f},
+                                     {0.9f, 0.1f},
+                                     {0.9f, 0.9f},
+                                     {0.5f, 0.0f},
+                                     {0.1f, 0.9f}}));
+}
+
+TEST_CASE("polygon_self_intersects: adjacent edges touching at their shared "
+          "vertex is not a crossing") {
+    // Every pair of neighbouring edges meets at a vertex by construction; that
+    // must not be mistaken for an intersection or nothing would ever pass.
+    REQUIRE_FALSE(polygon_self_intersects(
+        {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.8f, 0.8f}, {0.2f, 0.8f}}));
+}
+
+TEST_CASE("polygon_self_intersects: fewer than 4 vertices cannot cross") {
+    REQUIRE_FALSE(polygon_self_intersects({}));
+    REQUIRE_FALSE(polygon_self_intersects({{0.2f, 0.2f}, {0.8f, 0.8f}}));
+}
+
+TEST_CASE("polygon_is_degenerate: a bow-tie is rejected as unusable") {
+    // Its lobes cancel in the shoelace sum, so the area test catches this one
+    // anyway — pinned so a future area-test change can't quietly admit it.
+    REQUIRE(polygon_is_degenerate(
+        {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.2f, 0.8f}, {0.8f, 0.8f}}));
 }
 
 // ─── find_zone_conflict ──────────────────────────────────────────────────────

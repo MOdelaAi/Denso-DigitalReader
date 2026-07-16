@@ -112,6 +112,16 @@ void CameraDialog::showEvent(QShowEvent* e) {
     show_list();
 }
 
+void CameraDialog::reject() {
+    // showEvent() reopens on the list, so a dismissal here silently drops any
+    // in-progress ROI work — the Areas page's own Back/Exit guard never runs.
+    if (stack_->currentWidget() == areas_page_ &&
+        !areas_page_->confirm_discard(QStringLiteral("Close"))) {
+        return;
+    }
+    QDialog::reject();
+}
+
 void CameraDialog::show_page(int index) {
     // The stepper belongs to the add/edit flow (pages 1–3), not the list.
     stepper_->setVisible(index >= 1);

@@ -65,19 +65,34 @@ private:
     void update_status();
     void update_controls();
     void attempt_save();
-    bool is_dirty() const;
-    bool confirm_discard(const QString& action);
+    void cancel_active_draw();
     camera::CameraArea* selected_area();
     QString suggested_name() const;
 
+public:
+    /// True while a new area is being drawn or an existing one redrawn — even
+    /// with no points placed yet. While this holds, the area list and the step's
+    /// other entry points are locked: the operator finishes the shape or
+    /// cancels it, so a half-drawn polygon can't evaporate on a stray tap.
+    bool has_active_draw() const;
+    /// True when leaving now would lose work — an edited set, or a draw in
+    /// progress. The dialog asks this before closing so the window's X and
+    /// Escape can't bypass the guard the Back/Exit buttons apply.
+    bool is_dirty() const;
+    bool confirm_discard(const QString& action);
+
+private:
     RoiCanvas* canvas_ = nullptr;
     QListWidget* list_ = nullptr;
     QLineEdit* name_edit_ = nullptr;
     QComboBox* zone_combo_ = nullptr;
+    QPushButton* new_btn_ = nullptr;
     QPushButton* redraw_btn_ = nullptr;
     QPushButton* delete_btn_ = nullptr;
+    QPushButton* remove_vertex_btn_ = nullptr;
     QPushButton* undo_btn_ = nullptr;
     QPushButton* clear_btn_ = nullptr;
+    QPushButton* cancel_btn_ = nullptr;
     QPushButton* done_btn_ = nullptr;
     QPushButton* save_btn_ = nullptr;
     QLabel* status_ = nullptr;

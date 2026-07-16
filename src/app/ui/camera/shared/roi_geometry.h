@@ -32,7 +32,8 @@ bool image_contains(const QRectF& image_rect, const QPointF& widget_pt,
 
 /// Index of the vertex within `radius_px` of `probe`, or -1 if none is in
 /// range. The NEAREST vertex wins when several qualify, so a drag grabs the
-/// handle under the cursor rather than whichever was declared first.
+/// handle under the cursor rather than whichever was declared first. A
+/// non-positive radius hits nothing.
 int hit_test_vertex(const QList<QPointF>& widget_pts, const QPointF& probe,
                     double radius_px);
 
@@ -40,7 +41,8 @@ int hit_test_vertex(const QList<QPointF>& widget_pts, const QPointF& probe,
 /// `probe` (one past that edge's start vertex, preserving winding), or -1 when
 /// no edge is within `max_dist_px`. Distance is measured to the SEGMENT, not
 /// its infinite line, and the implicit closing edge is included — it's drawn,
-/// so it must be splittable. Fewer than 3 vertices have no edge to split.
+/// so it must be splittable. Fewer than 3 vertices have no edge to split, and a
+/// non-positive distance matches nothing.
 int nearest_edge_insert_index(const QList<QPointF>& widget_pts,
                               const QPointF& probe, double max_dist_px);
 

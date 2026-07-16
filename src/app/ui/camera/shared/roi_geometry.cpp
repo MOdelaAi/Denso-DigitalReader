@@ -73,6 +73,9 @@ bool image_contains(const QRectF& image_rect, const QPointF& widget_pt,
 
 int hit_test_vertex(const QList<QPointF>& widget_pts, const QPointF& probe,
                     double radius_px) {
+    if (radius_px <= 0.0) {
+        return -1;  // squaring would make a negative radius act positive
+    }
     int best = -1;
     double best_d2 = radius_px * radius_px;
     for (int i = 0; i < widget_pts.size(); ++i) {
@@ -87,7 +90,7 @@ int hit_test_vertex(const QList<QPointF>& widget_pts, const QPointF& probe,
 
 int nearest_edge_insert_index(const QList<QPointF>& widget_pts,
                               const QPointF& probe, double max_dist_px) {
-    if (widget_pts.size() < 3) {
+    if (widget_pts.size() < 3 || max_dist_px <= 0.0) {
         return -1;
     }
     int best = -1;

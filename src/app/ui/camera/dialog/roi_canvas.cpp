@@ -48,12 +48,20 @@ void RoiCanvas::set_context_areas(const std::vector<camera::CameraArea>& others)
     update();
 }
 
+void RoiCanvas::reset_interaction() {
+    drag_vertex_ = -1;
+    hover_vertex_ = -1;
+    if (selected_vertex_ != -1) {
+        selected_vertex_ = -1;
+        emit vertex_selection_changed();
+    }
+}
+
 void RoiCanvas::begin_draw() {
     points_.clear();
     closed_ = false;
     mode_ = Mode::Drawing;
-    drag_vertex_ = -1;
-    hover_vertex_ = -1;
+    reset_interaction();
     emit changed();
     update();
 }
@@ -62,8 +70,7 @@ void RoiCanvas::edit_polygon(const std::vector<camera::Point>& pts) {
     points_ = pts;
     closed_ = points_.size() >= kMinVertices;
     mode_ = Mode::Editing;
-    drag_vertex_ = -1;
-    hover_vertex_ = -1;
+    reset_interaction();
     emit changed();
     update();
 }
@@ -72,8 +79,7 @@ void RoiCanvas::go_idle() {
     points_.clear();
     closed_ = false;
     mode_ = Mode::Idle;
-    drag_vertex_ = -1;
-    hover_vertex_ = -1;
+    reset_interaction();
     emit changed();
     update();
 }
@@ -81,8 +87,33 @@ void RoiCanvas::go_idle() {
 void RoiCanvas::clear() {
     points_.clear();
     closed_ = false;
-    drag_vertex_ = -1;
-    hover_vertex_ = -1;
+    reset_interaction();
+    emit changed();
+    update();
+}
+
+void RoiCanvas::select_vertex(int index) {
+    if (selected_vertex_ == index) {
+        return;
+    }
+    selected_vertex_ = index;
+    emit vertex_selection_changed();
+    update();
+}
+
+void RoiCanvas::remove_selected_vertex() {
+    if (mode_ != Mode::Editing || selected_vertex_ < 0 ||
+        selected_vertex_ >= static_cast<int>(points_.size())) {
+        return;
+    }
+    if (points_.size() <= kMinVertices) {
+        emit rejected(QStringLiteral(
+            "An area needs at least 3 corners — delete the whole area instead."));
+        return;
+    }
+    points_.erase(points_.begin() + selected_vertex_);
+    select_vertex(-1);
+    emit polygon_edited(points_);
     emit changed();
     update();
 }
@@ -127,22 +158,14 @@ void RoiCanvas::mousePressEvent(QMouseEvent* e) {
     const QRectF img = image_rect();
     const QList<QPointF> wpts = widget_points();
 
-    // Right-click removes a vertex while editing — but never below a triangle.
+    // Right-click removes a corner while editing — an accelerator for the
+    // page's "Remove corner" button, which is the discoverable path.
     if (e->button() == Qt::RightButton && mode_ == Mode::Editing) {
         const int v = hit_test_vertex(wpts, e->position(), kGrabRadiusPx);
-        if (v < 0) {
-            return;
+        if (v >= 0) {
+            select_vertex(v);
+            remove_selected_vertex();
         }
-        if (points_.size() <= kMinVertices) {
-            emit rejected(QStringLiteral(
-                "An area needs at least 3 corners — delete the whole area "
-                "instead."));
-            return;
-        }
-        points_.erase(points_.begin() + v);
-        emit polygon_edited(points_);
-        emit changed();
-        update();
         return;
     }
 
@@ -153,7 +176,8 @@ void RoiCanvas::mousePressEvent(QMouseEvent* e) {
     if (mode_ == Mode::Editing) {
         const int v = hit_test_vertex(wpts, e->position(), kGrabRadiusPx);
         if (v >= 0) {
-            drag_vertex_ = v;  // grab it; mouseMove does the work
+            select_vertex(v);  // tapping is also how you pick one to remove
+            drag_vertex_ = v;  // and grabs it; mouseMove does the work
             return;
         }
         const int insert_at =
@@ -164,11 +188,14 @@ void RoiCanvas::mousePressEvent(QMouseEvent* e) {
             points_.insert(points_.begin() + insert_at,
                            camera::Point{static_cast<float>(n.x()),
                                          static_cast<float>(n.y())});
+            select_vertex(insert_at);
             drag_vertex_ = insert_at;  // let the operator place it in one gesture
             emit polygon_edited(points_);
             emit changed();
             update();
+            return;
         }
+        select_vertex(-1);  // tapped empty space: nothing is picked any more
         return;
     }
 
@@ -243,11 +270,20 @@ void RoiCanvas::mouseDoubleClickEvent(QMouseEvent* e) {
 void RoiCanvas::keyPressEvent(QKeyEvent* e) {
     switch (e->key()) {
         case Qt::Key_Backspace:
-            undo_point();
+        case Qt::Key_Delete:
+            // Same key, whichever mode: drop the last point being drawn, or the
+            // corner picked while editing.
+            if (mode_ == Mode::Editing) {
+                remove_selected_vertex();
+            } else {
+                undo_point();
+            }
             break;
         case Qt::Key_Escape:
             if (mode_ == Mode::Drawing) {
                 clear();
+            } else {
+                select_vertex(-1);
             }
             break;
         case Qt::Key_Return:
@@ -328,14 +364,25 @@ void RoiCanvas::draw_active(QPainter& p, const QRectF& img) const {
         const bool close_target =
             (i == 0 && mode_ == Mode::Drawing && !closed_ &&
              poly.size() >= kMinVertices);
+        if (close_target) {
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QPen(kEdge, 3.0));
+            p.drawEllipse(poly[i], kCloseRadiusPx * 0.6, kCloseRadiusPx * 0.6);
+            continue;
+        }
         const double r = (i == hover_vertex_ || i == drag_vertex_)
                              ? kVertexHoverRadiusPx
                              : kVertexRadiusPx;
-        p.setBrush(close_target ? QBrush(Qt::NoBrush) : QBrush(kVertex));
-        p.setPen(QPen(close_target ? kEdge : QColor(17, 17, 17),
-                      close_target ? 3.0 : 1.0));
-        p.drawEllipse(poly[i], close_target ? kCloseRadiusPx * 0.6 : r,
-                      close_target ? kCloseRadiusPx * 0.6 : r);
+        p.setBrush(QBrush(kVertex));
+        p.setPen(QPen(QColor(17, 17, 17), 1.0));
+        p.drawEllipse(poly[i], r, r);
+        if (i == selected_vertex_) {
+            // A halo, not a colour swap: the picked corner must stay obvious
+            // over any camera image, and it's what "Remove corner" will take.
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QPen(kEdge, 2.5));
+            p.drawEllipse(poly[i], r + 5.0, r + 5.0);
+        }
     }
 }
 

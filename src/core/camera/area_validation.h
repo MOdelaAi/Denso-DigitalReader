@@ -24,9 +24,18 @@ double polygon_area(const std::vector<Point>& poly);
 /// as a real ROI. Anything under this is a sliver the operator can't have meant.
 inline constexpr double kMinPolygonArea = 1e-4;
 
-/// True when `poly` can't work as an ROI: fewer than 3 vertices, or an enclosed
-/// area under `kMinPolygonArea` — which covers collinear runs, duplicated
-/// vertices, and the slivers that clicks pinned to the image edge produce.
+/// True when two non-adjacent edges of the closed polygon cross. Neighbouring
+/// edges share a vertex by construction and don't count. Concave shapes are
+/// fine — only crossings are the problem: point_in_polygon fills by even-odd,
+/// so a bow-tie's lobes read as HOLES, and the ROI silently stops detecting
+/// where the operator can plainly see coverage. Dragging one corner across the
+/// shape produces this in a single gesture. Fewer than 4 vertices can't cross.
+bool polygon_self_intersects(const std::vector<Point>& poly);
+
+/// True when `poly` can't work as an ROI: fewer than 3 vertices, an enclosed
+/// area under `kMinPolygonArea` (which covers collinear runs, duplicated
+/// vertices, and the slivers that clicks pinned to the image edge produce), or
+/// edges that cross.
 bool polygon_is_degenerate(const std::vector<Point>& poly);
 
 /// A zone number claimed twice. `owner` is the name of the OTHER camera holding
