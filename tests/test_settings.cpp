@@ -44,3 +44,9 @@ TEST_CASE("largest_fitting_preset picks the biggest fitting, else -1") {
     CHECK(denso::settings::largest_fitting_preset(3000, 2000, 20, 40) == 3);
     CHECK(denso::settings::largest_fitting_preset(500, 400, 20, 40) == -1);
 }
+
+TEST_CASE("fitting_presets does not overflow with a huge frame overhead") {
+    // frame_w near UINT32_MAX must never wrap to look like it fits a small screen.
+    auto none = denso::settings::fitting_presets(1920, 1080, 0xFFFFFF00u, 0xFFFFFF00u);
+    CHECK(none.empty());
+}

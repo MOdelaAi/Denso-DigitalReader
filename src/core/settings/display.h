@@ -47,6 +47,9 @@ struct TransitionPlan {
     bool fullscreen = false;
     enum class Geom { ResizeWithinScreen, FullScreenRect, NativeFullscreen } geom =
         Geom::ResizeWithinScreen;
+    // The windowed client size to apply (Windowed) or carry forward (other
+    // modes). Only Geom::ResizeWithinScreen consumes it, and the window layer
+    // persists it only in Windowed — so it never clobbers the remembered size.
     uint32_t width = 1600;
     uint32_t height = 900;
     bool needs_confirm = false;
