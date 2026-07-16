@@ -119,7 +119,13 @@ public:
             wifi_i = static_cast<int>(cmds.size());
             cmds.push_back({"nmcli", device_show_args(*wifi_dev)});
             wifi_list_i = static_cast<int>(cmds.size());
-            cmds.push_back({"nmcli", {"-t", "-f", "ACTIVE,SSID,SIGNAL", "device", "wifi"}});
+            // `--rescan no`: read the last cached scan, don't force a fresh Wi-Fi
+            // scan (~6-9s on the Jetson). Status only needs the active AP's
+            // SSID/signal, and parse_wifi picks the ACTIVE=yes row and tolerates
+            // an empty list. A forced rescan belongs in the user's Scan action.
+            cmds.push_back({"nmcli",
+                            {"-t", "-f", "ACTIVE,SSID,SIGNAL", "device", "wifi", "list",
+                             "--rescan", "no"}});
         }
         const std::vector<std::string> out = run_concurrent(cmds);
 
