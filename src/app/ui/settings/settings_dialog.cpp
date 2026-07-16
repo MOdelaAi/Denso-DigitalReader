@@ -42,13 +42,12 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     nav_ = new QListWidget;
     nav_->setObjectName(QStringLiteral("navList"));
     nav_->setFixedWidth(160);
-    nav_->addItems({QStringLiteral("Appearance"), QStringLiteral("Display"),
-                    QStringLiteral("System"), QStringLiteral("Network"),
-                    QStringLiteral("Server"), QStringLiteral("About")});
+    nav_->addItems({QStringLiteral("Display"), QStringLiteral("System"),
+                    QStringLiteral("Network"), QStringLiteral("Server"),
+                    QStringLiteral("About")});
     body->addWidget(nav_, 0);
 
     stack_ = new QStackedWidget;
-    stack_->addWidget(build_appearance());
     stack_->addWidget(build_display());
     stack_->addWidget(build_system());
     stack_->addWidget(build_network());
@@ -64,7 +63,7 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     connect(nav_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0) return;
         stack_->setCurrentIndex(row);
-        if (row == 3) {  // Network tab: re-seed cards + refresh status
+        if (row == 2) {  // Network tab (now index 2): re-seed cards + refresh status
             network_panel_->on_shown();
         }
     });
@@ -101,23 +100,6 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     nav_->setCurrentRow(0);
 }
 
-QWidget* SettingsDialog::build_appearance() {
-    auto* page = new QWidget;
-    auto* v = new QVBoxLayout(page);
-    v->setSpacing(10);
-    v->addWidget(common::eyebrow(QStringLiteral("APPEARANCE")));
-    auto* row = new QHBoxLayout;
-    row->addWidget(new QLabel(QStringLiteral("Dark mode")), 1);
-    dark_switch_ = new QCheckBox;
-    connect(dark_switch_, &QCheckBox::toggled, this, [this](bool on) {
-        if (!suppress_signals_) emit theme_changed(on);
-    });
-    row->addWidget(dark_switch_, 0);
-    v->addLayout(row);
-    v->addStretch(1);
-    return page;
-}
-
 QWidget* SettingsDialog::build_display() {
     auto* page = new QWidget;
     auto* v = new QVBoxLayout(page);
@@ -150,6 +132,17 @@ QWidget* SettingsDialog::build_display() {
 
     connect(display_mode_, &QComboBox::currentIndexChanged, this,
             [this](int) { sync_size_enabled(); });
+
+    // Dark mode lives here too (the old standalone Appearance tab held only this).
+    v->addWidget(common::hline());
+    auto* dark_row = new QHBoxLayout;
+    dark_row->addWidget(new QLabel(QStringLiteral("Dark mode")), 1);
+    dark_switch_ = new QCheckBox;
+    connect(dark_switch_, &QCheckBox::toggled, this, [this](bool on) {
+        if (!suppress_signals_) emit theme_changed(on);
+    });
+    dark_row->addWidget(dark_switch_, 0);
+    v->addLayout(dark_row);
 
     v->addStretch(1);
     return page;

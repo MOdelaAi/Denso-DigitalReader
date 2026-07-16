@@ -53,7 +53,6 @@ signals:
     void reset_defaults_requested();
 
 private:
-    QWidget* build_appearance();
     QWidget* build_display();
     QWidget* build_system();
     QWidget* build_network();
