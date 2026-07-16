@@ -16,6 +16,9 @@ class DisplayConfirmDialog : public QDialog {
 public:
     explicit DisplayConfirmDialog(int seconds, QWidget* parent = nullptr);
 
+protected:
+    void showEvent(QShowEvent* event) override;
+
 private:
     void tick();
 

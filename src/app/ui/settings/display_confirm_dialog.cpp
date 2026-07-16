@@ -3,6 +3,7 @@
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -34,6 +35,13 @@ DisplayConfirmDialog::DisplayConfirmDialog(int seconds, QWidget* parent)
     connect(timer_, &QTimer::timeout, this, &DisplayConfirmDialog::tick);
     timer_->start();
     tick();  // paint the initial count
+}
+
+void DisplayConfirmDialog::showEvent(QShowEvent* event) {
+    QDialog::showEvent(event);
+    // Now that the window exists, force it above the (possibly fullscreen) parent.
+    raise();
+    activateWindow();
 }
 
 void DisplayConfirmDialog::tick() {

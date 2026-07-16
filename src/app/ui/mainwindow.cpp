@@ -20,6 +20,7 @@
 #include <QScreen>
 #include <QShortcut>
 #include <QShowEvent>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -75,6 +76,7 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     // is persisted and the dialog stays in sync.
     auto* fs = new QShortcut(QKeySequence(Qt::Key_F11), this);
     connect(fs, &QShortcut::activated, this, [this] {
+        if (display_txn_active_) return;  // don't fight a pending confirm/revert
         const auto next = isFullScreen() ? settings::DisplayMode::Windowed
                                          : settings::DisplayMode::Fullscreen;
         on_apply_display(static_cast<int>(next), static_cast<int>(state_->width),
@@ -82,6 +84,7 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     });
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     connect(esc, &QShortcut::activated, this, [this] {
+        if (display_txn_active_) return;
         if (isFullScreen())
             on_apply_display(static_cast<int>(settings::DisplayMode::Windowed),
                              static_cast<int>(state_->width),
@@ -199,14 +202,14 @@ settings::DisplayState MainWindow::current_display_state() const {
 }
 
 void MainWindow::apply_display_mode(const settings::TransitionPlan& plan) {
-    // Canonical + deterministic: hide -> set absolute flags -> clear fullscreen
-    // state -> show -> re-assert geometry. Guarantees no stale frameless hint
-    // survives a switch (e.g. Borderless -> Fullscreen).
+    // Canonical + deterministic: hide -> set absolute flags -> clear ALL window
+    // state -> show -> re-assert geometry. Guarantees no stale frameless hint or
+    // maximized/fullscreen bit survives a switch (e.g. Borderless -> Fullscreen).
     const bool frameless_now = windowFlags().testFlag(Qt::FramelessWindowHint);
     if (frameless_now != plan.frameless || isFullScreen()) {
         hide();
         setWindowFlag(Qt::FramelessWindowHint, plan.frameless);
-        setWindowState(windowState() & ~Qt::WindowFullScreen);
+        setWindowState(Qt::WindowNoState);  // canonical: drop fullscreen/maximized
         show();
     }
     switch (plan.geom) {
@@ -239,8 +242,17 @@ void MainWindow::commit_display(const settings::TransitionPlan& plan) {
 }
 
 void MainWindow::on_apply_display(int mode, int width, int height) {
+    if (display_txn_active_) return;  // a confirm/revert is already pending
+    // Defer one tick so the app-modal Settings dialog (whose Apply click we're
+    // inside) fully closes before we open the confirm dialog — otherwise the two
+    // modal loops stack.
+    QTimer::singleShot(0, this,
+                       [this, mode, width, height] { run_apply_display(mode, width, height); });
+}
+
+void MainWindow::run_apply_display(int mode, int width, int height) {
     const auto requested = static_cast<settings::DisplayMode>(mode);
-    const settings::DisplayState before = current_display_state();
+    const settings::DisplayState before = current_display_state();  // == committed state_
     const settings::TransitionPlan plan = settings::plan_transition(
         before, requested, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
         platform_caps());
@@ -251,19 +263,28 @@ void MainWindow::on_apply_display(int mode, int width, int height) {
         commit_display(plan);
         return;
     }
-    // Real display change -> confirm above the (maybe fullscreen) window.
-    DisplayConfirmDialog dlg(15, this);
-    dlg.raise();
-    dlg.activateWindow();
-    if (dlg.exec() == QDialog::Accepted) {
-        commit_display(plan);
-    } else {
-        // Revert by re-applying the previous semantic state (no raw-flag replay).
-        const settings::TransitionPlan revert = settings::plan_transition(
-            current_display_state(), before.mode, before.width, before.height,
-            platform_caps());
-        apply_display_mode(revert);
-    }
+    display_txn_active_ = true;
+    // Let the window-system settle (X11 re-decoration -> real frame margins) then
+    // confirm above the (maybe fullscreen) window. Re-fit Windowed once margins
+    // are known so a frameless->Windowed switch centers correctly on xcb.
+    QTimer::singleShot(0, this, [this, plan, before] {
+        if (plan.geom == settings::TransitionPlan::Geom::ResizeWithinScreen) {
+            resize_within_screen(static_cast<int>(plan.width), static_cast<int>(plan.height));
+        }
+        DisplayConfirmDialog dlg(15, this);
+        const bool kept = dlg.exec() == QDialog::Accepted;  // timeout/close -> reject
+        if (kept) {
+            commit_display(plan);
+        } else {
+            // Revert to the previous committed semantic state (state_ is untouched
+            // until commit, so `before` still describes it). Re-apply, don't replay
+            // raw flags.
+            const settings::TransitionPlan revert = settings::plan_transition(
+                before, before.mode, before.width, before.height, platform_caps());
+            apply_display_mode(revert);
+        }
+        display_txn_active_ = false;
+    });
 }
 
 void MainWindow::on_theme_changed(bool dark) {
@@ -273,6 +294,7 @@ void MainWindow::on_theme_changed(bool dark) {
 }
 
 void MainWindow::on_reset_defaults() {
+    if (display_txn_active_) return;  // don't mutate display mid-transaction
     const settings::Settings d;  // defaults (Windowed, 1600x900, dark)
     state_->mode = d.mode;
     state_->width = d.width;
