@@ -299,15 +299,18 @@ void MainWindow::on_theme_changed(bool dark) {
 void MainWindow::on_reset_defaults() {
     if (display_txn_active_) return;  // don't mutate display mid-transaction
     const settings::Settings d;  // defaults (Windowed, 1600x900, dark)
-    state_->mode = d.mode;
-    state_->width = d.width;
-    state_->height = d.height;
-    state_->dark = d.dark;
-    settings::save(db_, *state_);
 
+    // Reset is the recovery action — it always lands on the safe Windowed default,
+    // so it applies DIRECTLY with no confirm/revert. A countdown here would be
+    // backwards: a timeout would restore the very (possibly unusable) state the
+    // operator reset away from. Build the plan from the CURRENT state (pre-reset)
+    // so the transition is computed correctly, then apply and persist.
     const settings::TransitionPlan p = settings::plan_transition(
         current_display_state(), d.mode, d.width, d.height, platform_caps());
     apply_display_mode(p);
+
+    *state_ = d;
+    settings::save(db_, *state_);
     settings_->set_display_mode(d.mode);
     settings_->set_window_size(d.width, d.height);
     settings_->set_theme_dark(d.dark);

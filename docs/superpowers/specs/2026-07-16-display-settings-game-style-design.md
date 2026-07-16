@@ -141,9 +141,13 @@ Windowed switch would use (saved only on a confirmed Apply).
 
 **Interference while a transaction is pending** must be explicitly routed:
 - **Esc** / **Revert button** → revert the transaction.
-- **F11**, a second **Apply**, **Reset defaults** → disabled/rejected while
-  pending (Reset, if it changes display state, runs *through* this same
-  transaction rather than around it).
+- **F11**, a second **Apply**, **Reset defaults** → rejected while a transaction
+  is pending (each early-returns on the `display_txn_active_` guard).
+- **Reset defaults** is itself the *recovery* action: it always lands on the safe
+  Windowed default, so it applies **directly, without a confirm/revert countdown**
+  — a countdown would be backwards, since a timeout would restore the very
+  (possibly unusable) state the operator reset away from. Theme (dark) is reset
+  live alongside it.
 - **Window close / app shutdown** → persist nothing; startup keeps the last kept
   state (fail safe).
 
@@ -302,5 +306,8 @@ Startup --> load() (display_mode | legacy fullscreen | Windowed) -> apply_displa
 
 ## Open questions
 
-None outstanding — the three contested choices (three modes; theme stays live;
-F11/Esc-only escape) were decided by the user.
+None outstanding — the three contested choices were decided by the user: three
+modes (Windowed/Borderless/Fullscreen); theme stays live; and F11/Esc kept as
+the only *keyboard* shortcuts for leaving fullscreen (extras on top of the
+always-visible top bar, which stays reachable in every mode — there is no
+keyboardless trap).

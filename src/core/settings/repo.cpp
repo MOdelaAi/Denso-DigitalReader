@@ -74,9 +74,10 @@ Settings load(const QSqlDatabase& db) {
 }
 
 void save(const QSqlDatabase& db, const Settings& settings) {
-    // Dual-write display_mode + the legacy fullscreen bool in one transaction so
-    // an older binary opening the same DB degrades safely (Borderless→Windowed)
-    // and the two keys can never disagree after a partial write. transaction()/
+    // Dual-write display_mode + the legacy fullscreen bool so an older binary
+    // opening the same DB degrades safely (Borderless→Windowed). When the
+    // transaction starts, the two keys stay consistent (all-or-nothing); if it
+    // can't start we fall back to best-effort autocommit writes. transaction()/
     // commit() are non-const, so operate on a copy of the handle (same connection).
     QSqlDatabase wdb = db;
     const bool tx = wdb.transaction();
@@ -90,11 +91,13 @@ void save(const QSqlDatabase& db, const Settings& settings) {
     ok = set(db, QStringLiteral("fullscreen"),
              settings.mode == DisplayMode::Fullscreen ? QStringLiteral("1")
                                                       : QStringLiteral("0")) && ok;
-    // Commit only a fully-successful batch; roll back a partial one so
-    // display_mode and the legacy fullscreen key can never end up disagreeing.
+    // Commit only a fully-successful batch; roll back a partial one (or a failed
+    // commit) so within a working transaction display_mode and the legacy
+    // fullscreen key stay consistent. If the transaction couldn't even start we
+    // fall back to best-effort autocommit writes (non-atomic) rather than lose
+    // the setting — load() prefers display_mode and self-heals on the next save.
     if (tx) {
-        if (ok) wdb.commit();
-        else wdb.rollback();
+        if (!ok || !wdb.commit()) wdb.rollback();
     }
 }
 
