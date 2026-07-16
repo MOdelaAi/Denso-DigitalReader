@@ -119,11 +119,12 @@ Applies only when the change is a **semantic display change** (see below), never
 for theme-only.
 
 1. Snapshot the **last-known-good semantic `DisplayState`** *before* applying:
-   `{ mode, windowed_size (normal client size), screen_name (+ fallback
-   geometry) }`. **Not** raw Qt window flags — those are stale/transient and
-   `setWindowFlags()` recreates+hides the native window. Optionally also keep an
-   opaque `saveGeometry()` blob as a *restoration aid only*, not the source of
-   truth.
+   `{ mode, windowed_size (normal client size), screen_name }`. **Not** raw Qt
+   window flags — those are stale/transient and `setWindowFlags()` recreates+hides
+   the native window. **Scope note:** the target is a **single-panel** kiosk, so
+   revert restores **mode + windowed size on the current screen**; `screen_name`
+   is captured for a future multi-monitor pass but is **not** acted on today
+   (no cross-screen restoration). Do not claim screen restoration in code comments.
 2. Apply the new state (§6), let window-system events settle (a queued tick),
    then show the confirm overlay: *"Keep these display settings? Reverting in
    15s…"* with a live countdown + **Keep** / **Revert**.

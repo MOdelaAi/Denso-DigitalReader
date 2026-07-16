@@ -26,15 +26,16 @@ std::optional<QString> get(const QSqlDatabase& db, const QString& key) {
     return std::nullopt;
 }
 
-/// Upsert a single setting. Errors are silently ignored.
-void set(const QSqlDatabase& db, const QString& key, const QString& value) {
+/// Upsert a single setting. Returns whether the write succeeded so a batched
+/// save() can roll back a partial dual-write.
+bool set(const QSqlDatabase& db, const QString& key, const QString& value) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "INSERT INTO settings (key, value) VALUES (?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value"));
     q.addBindValue(key);
     q.addBindValue(value);
-    q.exec();
+    return q.exec();
 }
 
 } // namespace
@@ -79,13 +80,22 @@ void save(const QSqlDatabase& db, const Settings& settings) {
     // commit() are non-const, so operate on a copy of the handle (same connection).
     QSqlDatabase wdb = db;
     const bool tx = wdb.transaction();
-    set(db, QStringLiteral("width"), QString::number(settings.width));
-    set(db, QStringLiteral("height"), QString::number(settings.height));
-    set(db, QStringLiteral("dark"), settings.dark ? QStringLiteral("1") : QStringLiteral("0"));
-    set(db, QStringLiteral("display_mode"), QString::fromLatin1(to_string(settings.mode)));
-    set(db, QStringLiteral("fullscreen"),
-        settings.mode == DisplayMode::Fullscreen ? QStringLiteral("1") : QStringLiteral("0"));
-    if (tx) wdb.commit();
+    bool ok = true;
+    ok = set(db, QStringLiteral("width"), QString::number(settings.width)) && ok;
+    ok = set(db, QStringLiteral("height"), QString::number(settings.height)) && ok;
+    ok = set(db, QStringLiteral("dark"),
+             settings.dark ? QStringLiteral("1") : QStringLiteral("0")) && ok;
+    ok = set(db, QStringLiteral("display_mode"),
+             QString::fromLatin1(to_string(settings.mode))) && ok;
+    ok = set(db, QStringLiteral("fullscreen"),
+             settings.mode == DisplayMode::Fullscreen ? QStringLiteral("1")
+                                                      : QStringLiteral("0")) && ok;
+    // Commit only a fully-successful batch; roll back a partial one so
+    // display_mode and the legacy fullscreen key can never end up disagreeing.
+    if (tx) {
+        if (ok) wdb.commit();
+        else wdb.rollback();
+    }
 }
 
 void import_legacy(const QSqlDatabase& db, const QString& json_path) {

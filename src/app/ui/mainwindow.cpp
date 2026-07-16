@@ -242,7 +242,10 @@ void MainWindow::commit_display(const settings::TransitionPlan& plan) {
 }
 
 void MainWindow::on_apply_display(int mode, int width, int height) {
-    if (display_txn_active_) return;  // a confirm/revert is already pending
+    if (display_txn_active_) return;  // a request is already in flight
+    // Guard from the moment of request — not inside run_apply_display — so a
+    // second Apply/F11/Reset can't queue in the gap before the deferred tick runs.
+    display_txn_active_ = true;
     // Defer one tick so the app-modal Settings dialog (whose Apply click we're
     // inside) fully closes before we open the confirm dialog — otherwise the two
     // modal loops stack.
@@ -261,9 +264,9 @@ void MainWindow::run_apply_display(int mode, int width, int height) {
 
     if (!plan.needs_confirm) {  // same mode/size, or platform forced a no-op
         commit_display(plan);
+        display_txn_active_ = false;
         return;
     }
-    display_txn_active_ = true;
     // Let the window-system settle (X11 re-decoration -> real frame margins) then
     // confirm above the (maybe fullscreen) window. Re-fit Windowed once margins
     // are known so a frameless->Windowed switch centers correctly on xcb.
