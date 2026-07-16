@@ -4,10 +4,12 @@
 #include "settings/repo.h"
 #include "ui/camera/camera_dialog.h"
 #include "ui/camera/camera_view.h"
+#include "ui/settings/display_confirm_dialog.h"
 #include "ui/settings/settings_dialog.h"
 #include "ui/theme.h"
 
 #include <QApplication>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QKeySequence>
@@ -18,6 +20,7 @@
 #include <QScreen>
 #include <QShortcut>
 #include <QShowEvent>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -66,14 +69,26 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     bar->addWidget(settings_btn, 0);
     col->addWidget(top);
 
-    // Fullscreen shortcuts: F11 toggles, Esc leaves. Needed because the top bar
-    // (with the Settings button) is hidden while fullscreen — these keep a way
-    // back to windowed mode without it.
+    // Fullscreen shortcuts: F11 toggles Fullscreen<->Windowed, Esc leaves
+    // Fullscreen. These are convenience shortcuts — the top bar (with the
+    // Settings button) stays visible in every mode, so a touchscreen operator can
+    // also switch mode from Settings. Route through on_apply_display so the mode
+    // is persisted and the dialog stays in sync.
     auto* fs = new QShortcut(QKeySequence(Qt::Key_F11), this);
-    connect(fs, &QShortcut::activated, this, [this] { set_fullscreen(!isFullScreen()); });
+    connect(fs, &QShortcut::activated, this, [this] {
+        if (display_txn_active_) return;  // don't fight a pending confirm/revert
+        const auto next = isFullScreen() ? settings::DisplayMode::Windowed
+                                         : settings::DisplayMode::Fullscreen;
+        on_apply_display(static_cast<int>(next), static_cast<int>(state_->width),
+                         static_cast<int>(state_->height));
+    });
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     connect(esc, &QShortcut::activated, this, [this] {
-        if (isFullScreen()) set_fullscreen(false);
+        if (display_txn_active_) return;
+        if (isFullScreen())
+            on_apply_display(static_cast<int>(settings::DisplayMode::Windowed),
+                             static_cast<int>(state_->width),
+                             static_cast<int>(state_->height));
     });
 
     // Main content area: the camera view (empty state / configured count).
@@ -87,12 +102,10 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     // lifetime, so the network worker threads always have a valid target.
     settings_ = new SettingsDialog(db_, this);
     settings_->setModal(true);
-    connect(settings_, &SettingsDialog::apply_resolution_requested, this,
-            &MainWindow::on_apply_resolution);
+    connect(settings_, &SettingsDialog::apply_display_requested, this,
+            &MainWindow::on_apply_display);
     connect(settings_, &SettingsDialog::theme_changed, this,
             &MainWindow::on_theme_changed);
-    connect(settings_, &SettingsDialog::toggle_fullscreen_requested, this,
-            &MainWindow::on_toggle_fullscreen);
     connect(settings_, &SettingsDialog::reset_defaults_requested, this,
             &MainWindow::on_reset_defaults);
 }
@@ -105,12 +118,16 @@ void MainWindow::apply_startup() {
                             QString::fromStdString(hw.ram), QString::fromStdString(hw.storage));
 
     const settings::Settings& s = *state_;
-    settings_->set_resolution_index(settings::preset_index(s.width, s.height));
-    settings_->set_fullscreen(s.fullscreen);
+    settings_->set_display_mode(s.mode);
+    settings_->set_window_size(s.width, s.height);
     settings_->set_theme_dark(s.dark);
 
-    resize_within_screen(static_cast<int>(s.width), static_cast<int>(s.height));
-    if (s.fullscreen) setWindowState(windowState() | Qt::WindowFullScreen);
+    // Apply the persisted mode through the same planner, but with no confirm
+    // dialog — persisted state is already trusted.
+    const settings::TransitionPlan boot = settings::plan_transition(
+        settings::DisplayState{settings::DisplayMode::Windowed, s.width, s.height, {}},
+        s.mode, s.width, s.height, platform_caps());
+    apply_display_mode(boot);
     apply_theme(s.dark);
 }
 
@@ -146,8 +163,8 @@ void MainWindow::resize_within_screen(int w, int h) {
 
 void MainWindow::open_settings() {
     // Re-seed from current state, reset to the first tab, then show modally.
-    settings_->set_resolution_index(settings::preset_index(state_->width, state_->height));
-    settings_->set_fullscreen(state_->fullscreen);
+    settings_->set_display_mode(state_->mode);
+    settings_->set_window_size(state_->width, state_->height);
     settings_->set_theme_dark(state_->dark);
     settings_->show();
     settings_->raise();
@@ -170,12 +187,107 @@ void MainWindow::open_camera() {
     camera_->activateWindow();
 }
 
-void MainWindow::on_apply_resolution(int index) {
-    const auto [w, h] = settings::PRESETS[static_cast<size_t>(index)];
-    state_->width = w;
-    state_->height = h;
+settings::PlatformCaps MainWindow::platform_caps() const {
+    const QString plat = QGuiApplication::platformName();
+    // eglfs/linuxfb have no window manager -> windowed/borderless are fictional.
+    const bool windowing = plat != QStringLiteral("eglfs") &&
+                           plat != QStringLiteral("linuxfb");
+    return settings::PlatformCaps{windowing};
+}
+
+settings::DisplayState MainWindow::current_display_state() const {
+    const QScreen* scr = screen();
+    return settings::DisplayState{state_->mode, state_->width, state_->height,
+                                  scr ? scr->name().toStdString() : std::string{}};
+}
+
+void MainWindow::apply_display_mode(const settings::TransitionPlan& plan) {
+    // Canonical + deterministic: hide -> set absolute flags -> clear ALL window
+    // state -> show -> re-assert geometry. Guarantees no stale frameless hint or
+    // maximized/fullscreen bit survives a switch (e.g. Borderless -> Fullscreen).
+    const bool frameless_now = windowFlags().testFlag(Qt::FramelessWindowHint);
+    if (frameless_now != plan.frameless || isFullScreen()) {
+        hide();
+        setWindowFlag(Qt::FramelessWindowHint, plan.frameless);
+        setWindowState(Qt::WindowNoState);  // canonical: drop fullscreen/maximized
+        show();
+    }
+    switch (plan.geom) {
+        case settings::TransitionPlan::Geom::ResizeWithinScreen:
+            showNormal();
+            resize_within_screen(static_cast<int>(plan.width),
+                                 static_cast<int>(plan.height));
+            break;
+        case settings::TransitionPlan::Geom::FullScreenRect: {
+            showNormal();
+            const QScreen* scr = screen();
+            if (scr) setGeometry(scr->geometry());
+            break;
+        }
+        case settings::TransitionPlan::Geom::NativeFullscreen:
+            showFullScreen();
+            break;
+    }
+}
+
+void MainWindow::commit_display(const settings::TransitionPlan& plan) {
+    state_->mode = plan.mode;
+    if (plan.mode == settings::DisplayMode::Windowed) {  // only Windowed carries a size
+        state_->width = plan.width;
+        state_->height = plan.height;
+    }
     settings::save(db_, *state_);
-    resize_within_screen(static_cast<int>(w), static_cast<int>(h));
+    settings_->set_display_mode(state_->mode);
+    settings_->set_window_size(state_->width, state_->height);
+}
+
+void MainWindow::on_apply_display(int mode, int width, int height) {
+    if (display_txn_active_) return;  // a request is already in flight
+    // Guard from the moment of request — not inside run_apply_display — so a
+    // second Apply/F11/Reset can't queue in the gap before the deferred tick runs.
+    display_txn_active_ = true;
+    // Defer one tick so the app-modal Settings dialog (whose Apply click we're
+    // inside) fully closes before we open the confirm dialog — otherwise the two
+    // modal loops stack.
+    QTimer::singleShot(0, this,
+                       [this, mode, width, height] { run_apply_display(mode, width, height); });
+}
+
+void MainWindow::run_apply_display(int mode, int width, int height) {
+    const auto requested = static_cast<settings::DisplayMode>(mode);
+    const settings::DisplayState before = current_display_state();  // == committed state_
+    const settings::TransitionPlan plan = settings::plan_transition(
+        before, requested, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+        platform_caps());
+
+    apply_display_mode(plan);
+
+    if (!plan.needs_confirm) {  // same mode/size, or platform forced a no-op
+        commit_display(plan);
+        display_txn_active_ = false;
+        return;
+    }
+    // Let the window-system settle (X11 re-decoration -> real frame margins) then
+    // confirm above the (maybe fullscreen) window. Re-fit Windowed once margins
+    // are known so a frameless->Windowed switch centers correctly on xcb.
+    QTimer::singleShot(0, this, [this, plan, before] {
+        if (plan.geom == settings::TransitionPlan::Geom::ResizeWithinScreen) {
+            resize_within_screen(static_cast<int>(plan.width), static_cast<int>(plan.height));
+        }
+        DisplayConfirmDialog dlg(15, this);
+        const bool kept = dlg.exec() == QDialog::Accepted;  // timeout/close -> reject
+        if (kept) {
+            commit_display(plan);
+        } else {
+            // Revert to the previous committed semantic state (state_ is untouched
+            // until commit, so `before` still describes it). Re-apply, don't replay
+            // raw flags.
+            const settings::TransitionPlan revert = settings::plan_transition(
+                before, before.mode, before.width, before.height, platform_caps());
+            apply_display_mode(revert);
+        }
+        display_txn_active_ = false;
+    });
 }
 
 void MainWindow::on_theme_changed(bool dark) {
@@ -184,35 +296,25 @@ void MainWindow::on_theme_changed(bool dark) {
     apply_theme(dark);
 }
 
-void MainWindow::on_toggle_fullscreen(bool fullscreen) {
-    set_fullscreen(fullscreen);
-}
-
-void MainWindow::set_fullscreen(bool on) {
-    state_->fullscreen = on;
-    settings::save(db_, *state_);
-    if (on)
-        showFullScreen();
-    else
-        showNormal();
-}
-
 void MainWindow::on_reset_defaults() {
-    const settings::Settings d;  // defaults
-    settings::save(db_, d);
+    if (display_txn_active_) return;  // don't mutate display mid-transaction
+    const settings::Settings d;  // defaults (Windowed, 1600x900, dark)
 
-    if (d.fullscreen) {
-        showFullScreen();
-    } else {
-        showNormal();
-        resize_within_screen(static_cast<int>(d.width), static_cast<int>(d.height));
-    }
-    settings_->set_resolution_index(settings::preset_index(d.width, d.height));
-    settings_->set_fullscreen(d.fullscreen);
-    settings_->set_theme_dark(d.dark);
-    apply_theme(d.dark);
+    // Reset is the recovery action — it always lands on the safe Windowed default,
+    // so it applies DIRECTLY with no confirm/revert. A countdown here would be
+    // backwards: a timeout would restore the very (possibly unusable) state the
+    // operator reset away from. Build the plan from the CURRENT state (pre-reset)
+    // so the transition is computed correctly, then apply and persist.
+    const settings::TransitionPlan p = settings::plan_transition(
+        current_display_state(), d.mode, d.width, d.height, platform_caps());
+    apply_display_mode(p);
 
     *state_ = d;
+    settings::save(db_, *state_);
+    settings_->set_display_mode(d.mode);
+    settings_->set_window_size(d.width, d.height);
+    settings_->set_theme_dark(d.dark);
+    apply_theme(d.dark);
 }
 
 void MainWindow::apply_theme(bool dark) {

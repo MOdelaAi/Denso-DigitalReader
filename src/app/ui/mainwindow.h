@@ -46,14 +46,21 @@ private:
     /// would otherwise push the title bar + bottom rows under the taskbar.
     void resize_within_screen(int width, int height);
 
-    void on_apply_resolution(int index);
+    /// Batched display apply from the Settings dialog. Deferred to the next event
+    /// tick (run_apply_display) so the Settings modal closes before the confirm
+    /// dialog opens, and ignored while a transaction is already pending.
+    void on_apply_display(int mode, int width, int height);
+    void run_apply_display(int mode, int width, int height);
     void on_theme_changed(bool dark);
-    void on_toggle_fullscreen(bool fullscreen);
     void on_reset_defaults();
 
-    /// Enter/leave fullscreen and persist the choice. F11 toggles it; Esc leaves
-    /// it — convenience shortcuts so fullscreen isn't only reachable via Settings.
-    void set_fullscreen(bool on);
+    /// Execute a planned transition against the real window (canonical, ordered:
+    /// hide → set absolute flags → clear state → show → re-assert geometry).
+    void apply_display_mode(const settings::TransitionPlan& plan);
+    /// Persist the applied plan + re-seed the dialog (called only on Keep / no-op).
+    void commit_display(const settings::TransitionPlan& plan);
+    settings::DisplayState current_display_state() const;
+    settings::PlatformCaps platform_caps() const;
 
     void apply_theme(bool dark);
 
@@ -64,6 +71,7 @@ private:
     CameraView* camera_view_ = nullptr;
     WarmupState* warmup_ = nullptr;
     bool fitted_ = false;  // first-show re-fit has run
+    bool display_txn_active_ = false;  // a confirm/revert transaction is pending
 };
 
 } // namespace denso::ui

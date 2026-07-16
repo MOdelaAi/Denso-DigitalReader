@@ -3,17 +3,20 @@
 // helper in `settings::repo`. Persistence (load/save/import) is the DB layer.
 #pragma once
 
+#include "settings/display.h"
+
 #include <array>
 #include <cstdint>
 #include <utility>
+#include <vector>
 
 namespace denso::settings {
 
 struct Settings {
-    uint32_t width = 1600;
+    uint32_t width = 1600;   // windowed client size
     uint32_t height = 900;
     bool dark = true;
-    bool fullscreen = false;
+    DisplayMode mode = DisplayMode::Windowed;
 };
 
 /// Selectable window resolutions, in display order. Index 2 (1600×900) is the
@@ -28,5 +31,15 @@ inline constexpr std::array<std::pair<uint32_t, uint32_t>, 4> PRESETS = {{
 /// Index into PRESETS matching the given size, or the default index (2) when
 /// no preset matches.
 int preset_index(uint32_t width, uint32_t height);
+
+/// Indices into PRESETS whose FRAMED size (client + window-frame overhead) fits
+/// the available logical geometry. Empty when none fit — never returns an
+/// oversized preset. PRESETS is ascending, so the result is ascending too.
+std::vector<int> fitting_presets(uint32_t avail_w, uint32_t avail_h,
+                                 uint32_t frame_w, uint32_t frame_h);
+
+/// The largest fitting preset index, or -1 if none fit.
+int largest_fitting_preset(uint32_t avail_w, uint32_t avail_h,
+                           uint32_t frame_w, uint32_t frame_h);
 
 } // namespace denso::settings

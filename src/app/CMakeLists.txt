@@ -78,6 +78,7 @@ add_executable(denso WIN32
     ui/common/async_runner.cpp
     # settings modal
     ui/settings/settings_dialog.cpp
+    ui/settings/display_confirm_dialog.cpp
     ui/settings/network_panel.cpp
     ui/settings/netcard.cpp
     # camera management — entry points

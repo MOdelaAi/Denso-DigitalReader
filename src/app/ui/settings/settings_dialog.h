@@ -6,9 +6,13 @@
 // network callbacks + `std::thread`/`upgrade_in_event_loop`).
 #pragma once
 
+#include "settings/display.h"
+
 #include <QDialog>
 #include <QSqlDatabase>
 #include <QString>
+
+#include <cstdint>
 
 class QCheckBox;
 class QComboBox;
@@ -32,11 +36,9 @@ public:
     void set_app_version(const QString& version);
     void set_hardware(const QString& os, const QString& device, const QString& ram,
                       const QString& storage);
-    void set_resolution_index(int index);  // no signal emitted
-    void set_fullscreen(bool fullscreen);   // no signal emitted
-    void set_theme_dark(bool dark);          // no signal emitted
-
-    int resolution_index() const;
+    void set_display_mode(settings::DisplayMode mode);      // no signal emitted
+    void set_window_size(uint32_t width, uint32_t height);  // no signal emitted
+    void set_theme_dark(bool dark);                         // no signal emitted
 
 protected:
     // The Slint modal is recreated on each open, so it always starts on the
@@ -44,18 +46,22 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 signals:
-    void apply_resolution_requested(int index);
+    // Batched display apply: mode is static_cast<int>(DisplayMode); width/height
+    // are the windowed size. The window runs the confirm/revert transaction.
+    void apply_display_requested(int mode, int width, int height);
     void theme_changed(bool dark);
-    void toggle_fullscreen_requested(bool fullscreen);
     void reset_defaults_requested();
 
 private:
-    QWidget* build_appearance();
     QWidget* build_display();
     QWidget* build_system();
     QWidget* build_network();
     QWidget* build_server();
     QWidget* build_about();
+
+    void rebuild_window_sizes();  // filter PRESETS to this dialog's screen
+    void sync_size_enabled();     // enable window_size_ only in Windowed
+    settings::DisplayMode staged_mode() const;
 
     QSqlDatabase db_;
     bool suppress_signals_ = false;
@@ -65,8 +71,9 @@ private:
 
     // Appearance / Display
     QCheckBox* dark_switch_ = nullptr;
-    QComboBox* resolution_ = nullptr;
-    QCheckBox* fullscreen_switch_ = nullptr;
+    QComboBox* display_mode_ = nullptr;
+    QComboBox* window_size_ = nullptr;
+    QLabel* window_size_hint_ = nullptr;
 
     // System / About
     QLabel* hw_os_ = nullptr;
