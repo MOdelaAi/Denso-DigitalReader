@@ -241,6 +241,24 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
     return conn.commit() || rollback();
 }
 
+std::map<int, std::string> zones_owned_by_other_cameras(const QSqlDatabase& db,
+                                                        int64_t camera_id) {
+    std::map<int, std::string> owned;
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT a.zone, c.name FROM camera_area a JOIN camera c "
+        "ON c.id = a.camera_id "
+        "WHERE a.camera_id != ? AND a.zone IS NOT NULL AND a.zone != 0"));
+    q.addBindValue(static_cast<qlonglong>(camera_id));
+    if (!q.exec()) {
+        return owned;  // read error → report nothing taken; the repo still gates the save
+    }
+    while (q.next()) {
+        owned.emplace(q.value(0).toInt(), q.value(1).toString().toStdString());
+    }
+    return owned;
+}
+
 bool set_areas_need_review(const QSqlDatabase& db, int64_t camera_id, bool need) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral(

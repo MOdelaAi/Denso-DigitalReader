@@ -204,9 +204,14 @@ void CameraWizardController::begin_areas_direct(const camera::Camera& cam) {
 
 void CameraWizardController::enter_areas(bool direct) {
     entered_areas_directly_ = direct;
+    // Zones are unique machine-wide, so the page needs to know which numbers
+    // other cameras already hold — it disables them in the picker and names the
+    // owner, instead of letting replace_areas reject the save with no reason.
     pages_.areas->load(editing_id_.has_value()
                            ? camera::areas_for(db_, *editing_id_)
-                           : std::vector<camera::CameraArea>{});
+                           : std::vector<camera::CameraArea>{},
+                       camera::zones_owned_by_other_cameras(
+                           db_, editing_id_.value_or(0)));
     // Prompt re-verification when this edit quarantined the ROIs; saving the areas
     // (replace_areas) clears the flag and resumes reporting.
     pages_.areas->set_review_required(editing_id_.has_value() &&

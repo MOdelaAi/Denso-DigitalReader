@@ -10,7 +10,9 @@
 #include <QSqlDatabase>
 
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace denso::camera {
@@ -42,6 +44,16 @@ std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id);
 /// is taken from the argument, not the struct.
 bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
                    const std::vector<CameraArea>& areas);
+
+/// Zone numbers currently claimed by cameras OTHER than `camera_id`, mapped to
+/// the owning camera's name. Zones are unique machine-wide (replace_areas
+/// enforces it), so this is what the Areas page needs to show which numbers are
+/// free and to name the owner when one is taken — rather than letting the save
+/// fail with a generic error. The edited camera is excluded because its own
+/// rows are deleted before re-insert, so re-saving its zones can't self-clash.
+/// ROI-only areas (no zone, or the 0 sentinel) claim nothing and are omitted.
+std::map<int, std::string> zones_owned_by_other_cameras(const QSqlDatabase& db,
+                                                        int64_t camera_id);
 
 /// Set/clear the ROI-review quarantine flag for a camera (see
 /// Camera::areas_need_review). The controller sets it when a view-significant

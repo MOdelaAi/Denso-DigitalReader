@@ -97,6 +97,8 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     connect(areas_page_, &CameraAreasPage::back_requested, controller_,
             &CameraWizardController::areas_back);
     connect(areas_page_, &CameraAreasPage::skip_requested, this, &CameraDialog::show_list);
+    connect(areas_page_, &CameraAreasPage::refresh_preview_requested, controller_,
+            &CameraWizardController::capture_snapshot);
     connect(areas_page_, &CameraAreasPage::save_requested, controller_,
             &CameraWizardController::save_areas);
 
@@ -108,6 +110,16 @@ void CameraDialog::showEvent(QShowEvent* e) {
     // The dialog is created once and reused; always reopen on the list page at
     // the compact size, even if it was closed mid-flow on the expanded Areas step.
     show_list();
+}
+
+void CameraDialog::reject() {
+    // showEvent() reopens on the list, so a dismissal here silently drops any
+    // in-progress ROI work — the Areas page's own Back/Exit guard never runs.
+    if (stack_->currentWidget() == areas_page_ &&
+        !areas_page_->confirm_discard(QStringLiteral("Close"))) {
+        return;
+    }
+    QDialog::reject();
 }
 
 void CameraDialog::show_page(int index) {

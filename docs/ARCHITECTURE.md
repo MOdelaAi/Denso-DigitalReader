@@ -258,7 +258,16 @@ them, never on each other; the root entry points compose all three.
   per-class select/conf, pre-filled from `models_for`; emits its selections for
   `set_camera_models`), and `areas_page` (`CameraAreasPage`: edits a working ROI
   set over the pushed background frame, emits the set on save — no DB access of
-  its own).
+  its own). The Areas page validates before it emits, so a predictable problem
+  is named there instead of arriving as a generic write failure from
+  `replace_areas`: an unresolved draw blocks the save, degenerate and
+  self-intersecting polygons are refused, and zone clashes are reported with
+  their holder (the picker disables zones held by other cameras —
+  `zones_owned_by_other_cameras` — and by this camera's other areas). Drawing is
+  a locked sub-task: the list and "+ New area" disable until the shape is
+  finished or cancelled. Anything that discards work confirms first, including
+  `CameraDialog::reject()` so Escape and the window's X can't slip past the
+  guard the Back/Exit buttons apply.
 - `camera_devices.{h,cpp}` — USB enumeration via Qt Multimedia (`QMediaDevices`).
 - `ip_scan.{h,cpp}` — crude IP discovery: a threaded subnet probe for hosts with
   the RTSP port open (Qt Network).
@@ -273,14 +282,32 @@ them, never on each other; the root entry points compose all three.
   stored. The rotation combo and the pitch/roll spin boxes all re-render the
   preview live on change. `apply_rotation` (the 0/90/180/270 preset) stays as a
   separately-tested helper.
-- `roi_canvas.{h,cpp}` + `roi_geometry.{h,cpp}` — the **Areas** page's drawing
-  surface. `RoiCanvas` is a draw-only `QWidget` that paints the oriented
-  snapshot (reusing `apply_orientation`, so ROIs sit on exactly the configured
-  view) and lets the user click out a polygon of 3+ vertices: click to add,
-  click the first vertex / double-click / Enter to close, Backspace to undo, Esc
-  to clear. It holds vertices **normalized to [0,1]** and knows no DB policy —
-  the dialog loads/persists. `roi_geometry` is the pure, unit-tested mapping
-  (aspect-fit rect + widget↔normalized conversion with clamping) it builds on.
+- `roi_canvas.{h,cpp}` + `roi_geometry.{h,cpp}` — the **Areas** page's editing
+  surface. `RoiCanvas` paints the oriented snapshot (reusing `apply_orientation`,
+  so ROIs sit on exactly the configured view) plus the camera's *other* areas,
+  dimmed and zone-labelled, so coverage and overlap are visible while editing.
+  Three modes: **Idle** (view only), **Drawing** (click to add a vertex; click
+  the ringed first vertex / double-click / Enter / "Done shape" to close), and
+  **Editing** (drag a corner, click an edge to insert one, tap a corner then
+  "Remove corner" to drop it — never below 3). It holds vertices **normalized to
+  [0,1]** and knows no DB policy — the page loads/persists.
+  `roi_geometry` is the pure, unit-tested mapping it builds on: aspect-fit rect,
+  widget↔normalized conversion, `image_contains`, `hit_test_vertex` (nearest
+  wins), and `nearest_edge_insert_index` (distance to the segment, closing edge
+  included).
+
+  Two rules worth knowing before touching this. **A click is gated by
+  `image_contains`; a drag is not.** The clamp in `to_normalized` is a safety
+  net, not a gate — gating the click stops a tap in the letterbox bars becoming
+  a vertex silently pinned to the frame's edge, while a drag that leaves the
+  frame is the operator holding the handle and pulling, which reads as "put it
+  on the edge". **Because a drag clamps, coincident vertices are manufactured,
+  not a fluke:** two corners pulled past the same border land on the identical
+  coordinate, and several pulled off one side end up collinear along it. That is
+  why `camera::polygon_self_intersects` treats touching and collinear overlap as
+  intersections, not just proper crossings — those shapes pinch the polygon shut
+  while keeping a healthy area, so the area floor cannot catch them, and
+  `point_in_polygon`'s even-odd fill would turn the lobes into holes.
 - `wizard_stepper.{h,cpp}` — `WizardStepper`, the non-interactive
   "① Source — ② Configure — ③ Models — ④ Areas" indicator above the page stack;
   `set_current()` emphasizes the active step. Navigation stays with the dialog's
