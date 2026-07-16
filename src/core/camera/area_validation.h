@@ -24,12 +24,15 @@ double polygon_area(const std::vector<Point>& poly);
 /// as a real ROI. Anything under this is a sliver the operator can't have meant.
 inline constexpr double kMinPolygonArea = 1e-4;
 
-/// True when two non-adjacent edges of the closed polygon cross. Neighbouring
-/// edges share a vertex by construction and don't count. Concave shapes are
-/// fine — only crossings are the problem: point_in_polygon fills by even-odd,
-/// so a bow-tie's lobes read as HOLES, and the ROI silently stops detecting
-/// where the operator can plainly see coverage. Dragging one corner across the
-/// shape produces this in a single gesture. Fewer than 4 vertices can't cross.
+/// True when two non-adjacent edges of the closed polygon meet — crossing,
+/// touching at a point, or overlapping collinearly. Neighbouring edges share a
+/// vertex by construction and don't count. Concave shapes are fine; only a
+/// non-simple outline is the problem: point_in_polygon fills by even-odd, so a
+/// bow-tie's lobes read as HOLES and the ROI silently stops detecting where the
+/// operator can plainly see coverage. Dragging one corner across the shape
+/// produces this in a single gesture, and because dragging CLAMPS to the frame,
+/// two corners pulled past the same border land on the same coordinate exactly.
+/// Fewer than 4 vertices can't do it.
 bool polygon_self_intersects(const std::vector<Point>& poly);
 
 /// True when `poly` can't work as an ROI: fewer than 3 vertices, an enclosed

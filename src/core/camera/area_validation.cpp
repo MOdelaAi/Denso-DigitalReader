@@ -1,5 +1,6 @@
 #include "camera/area_validation.h"
 
+#include <algorithm>
 #include <cmath>
 #include <set>
 
@@ -30,17 +31,36 @@ int orientation(const Point& a, const Point& b, const Point& c) {
     return 0;
 }
 
-/// True when segments a1→a2 and b1→b2 properly cross (each straddles the
-/// other's line). Collinear overlap is deliberately NOT reported: it can't
-/// arise from dragging without also collapsing the area, which the area floor
-/// already rejects, and treating it as a crossing would flag legal shapes.
+/// True when `p` lies within the bounding box of the segment a→b. Only ever
+/// asked of a point already known to be COLLINEAR with a→b, for which this is
+/// exactly the on-segment test.
+bool on_segment(const Point& a, const Point& b, const Point& p) {
+    return p.x >= std::min(a.x, b.x) && p.x <= std::max(a.x, b.x) &&
+           p.y >= std::min(a.y, b.y) && p.y <= std::max(a.y, b.y);
+}
+
+/// True when segments a1→a2 and b1→b2 meet at all — crossing, touching at an
+/// endpoint, or overlapping collinearly. Touching has to count: dragging CLAMPS
+/// to the frame, so two corners pulled past the same border land on exactly the
+/// same coordinate, and several pulled off one side end up collinear along it.
+/// Those pinch the polygon shut while keeping a healthy area, so the area floor
+/// can't catch them. Only ever asked about NON-adjacent edges, which share no
+/// vertex by construction — so any contact here is a defect.
 bool segments_cross(const Point& a1, const Point& a2, const Point& b1,
                     const Point& b2) {
     const int d1 = orientation(a1, a2, b1);
     const int d2 = orientation(a1, a2, b2);
     const int d3 = orientation(b1, b2, a1);
     const int d4 = orientation(b1, b2, a2);
-    return d1 * d2 < 0 && d3 * d4 < 0;
+    if (d1 * d2 < 0 && d3 * d4 < 0) {
+        return true;  // each segment straddles the other: a proper crossing
+    }
+    // A zero orientation means the point is on the other segment's LINE; it
+    // only touches if it also falls within the segment itself.
+    return (d1 == 0 && on_segment(a1, a2, b1)) ||
+           (d2 == 0 && on_segment(a1, a2, b2)) ||
+           (d3 == 0 && on_segment(b1, b2, a1)) ||
+           (d4 == 0 && on_segment(b1, b2, a2));
 }
 
 }  // namespace

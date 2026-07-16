@@ -112,7 +112,11 @@ void RoiCanvas::remove_selected_vertex() {
         return;
     }
     points_.erase(points_.begin() + selected_vertex_);
-    select_vertex(-1);
+    // Every cached index refers to the pre-erase vector, so all of them are now
+    // wrong — not just the selection. The Delete-key path can fire mid-drag,
+    // and a stale drag_vertex_ would then quietly move whichever vertex slid
+    // into that slot.
+    reset_interaction();
     emit polygon_edited(points_);
     emit changed();
     update();

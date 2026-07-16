@@ -7,6 +7,7 @@
 using denso::camera::areas_equal;
 using denso::camera::CameraArea;
 using denso::camera::find_zone_conflict;
+using denso::camera::kMinPolygonArea;
 using denso::camera::Point;
 using denso::camera::polygon_area;
 using denso::camera::polygon_is_degenerate;
@@ -142,6 +143,48 @@ TEST_CASE("polygon_self_intersects: adjacent edges touching at their shared "
 TEST_CASE("polygon_self_intersects: fewer than 4 vertices cannot cross") {
     REQUIRE_FALSE(polygon_self_intersects({}));
     REQUIRE_FALSE(polygon_self_intersects({{0.2f, 0.2f}, {0.8f, 0.8f}}));
+}
+
+// Touching counts, not just crossing. These are reachable precisely BECAUSE
+// dragging clamps to the frame: two corners pulled past the same border land on
+// the same coordinate exactly, so coincident points are manufactured, not a
+// measure-zero fluke.
+
+TEST_CASE("polygon_self_intersects: a corner dropped onto a non-adjacent edge") {
+    // The last corner sits on the first edge (y=0.2, x in 0.2..0.8). The shape
+    // is pinched shut there — non-simple, but it keeps a healthy area, so the
+    // area floor alone would let it through.
+    const std::vector<Point> pinched = {
+        {0.2f, 0.2f}, {0.8f, 0.2f}, {0.8f, 0.8f}, {0.5f, 0.2f}};
+    REQUIRE(polygon_area(pinched) > kMinPolygonArea);  // area test can't save us
+    REQUIRE(polygon_self_intersects(pinched));
+}
+
+TEST_CASE("polygon_self_intersects: two non-adjacent corners at the same point") {
+    // What two corners dragged past the same frame corner produce: both clamp
+    // to the identical coordinate. Area stays positive.
+    const std::vector<Point> pinched = {
+        {0.2f, 0.2f}, {0.8f, 0.2f}, {0.2f, 0.2f}, {0.8f, 0.8f}, {0.2f, 0.8f}};
+    REQUIRE(polygon_area(pinched) > kMinPolygonArea);
+    REQUIRE(polygon_self_intersects(pinched));
+}
+
+TEST_CASE("polygon_self_intersects: non-adjacent edges overlapping collinearly") {
+    // Several corners dragged off the same side all clamp onto x=0, so two
+    // non-adjacent edges can lie along that border and overlap.
+    REQUIRE(polygon_self_intersects({{0.0f, 0.2f},
+                                     {0.0f, 0.8f},
+                                     {0.5f, 0.9f},
+                                     {0.0f, 0.6f},
+                                     {0.0f, 0.4f},
+                                     {0.5f, 0.1f}}));
+}
+
+TEST_CASE("polygon_self_intersects: a square touching the frame border is fine") {
+    // Clamped corners are normal and legal — an ROI may sit flush against the
+    // edge. Only NON-ADJACENT contact is a defect.
+    REQUIRE_FALSE(polygon_self_intersects(
+        {{0.0f, 0.0f}, {0.5f, 0.0f}, {0.5f, 0.5f}, {0.0f, 0.5f}}));
 }
 
 TEST_CASE("polygon_is_degenerate: a bow-tie is rejected as unusable") {
