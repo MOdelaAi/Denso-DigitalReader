@@ -106,11 +106,12 @@ void MainWindow::apply_startup() {
 
     const settings::Settings& s = *state_;
     settings_->set_resolution_index(settings::preset_index(s.width, s.height));
-    settings_->set_fullscreen(s.fullscreen);
+    settings_->set_fullscreen(s.mode == settings::DisplayMode::Fullscreen);
     settings_->set_theme_dark(s.dark);
 
     resize_within_screen(static_cast<int>(s.width), static_cast<int>(s.height));
-    if (s.fullscreen) setWindowState(windowState() | Qt::WindowFullScreen);
+    if (s.mode == settings::DisplayMode::Fullscreen)
+        setWindowState(windowState() | Qt::WindowFullScreen);
     apply_theme(s.dark);
 }
 
@@ -147,7 +148,7 @@ void MainWindow::resize_within_screen(int w, int h) {
 void MainWindow::open_settings() {
     // Re-seed from current state, reset to the first tab, then show modally.
     settings_->set_resolution_index(settings::preset_index(state_->width, state_->height));
-    settings_->set_fullscreen(state_->fullscreen);
+    settings_->set_fullscreen(state_->mode == settings::DisplayMode::Fullscreen);
     settings_->set_theme_dark(state_->dark);
     settings_->show();
     settings_->raise();
@@ -189,7 +190,7 @@ void MainWindow::on_toggle_fullscreen(bool fullscreen) {
 }
 
 void MainWindow::set_fullscreen(bool on) {
-    state_->fullscreen = on;
+    state_->mode = on ? settings::DisplayMode::Fullscreen : settings::DisplayMode::Windowed;
     settings::save(db_, *state_);
     if (on)
         showFullScreen();
@@ -201,14 +202,14 @@ void MainWindow::on_reset_defaults() {
     const settings::Settings d;  // defaults
     settings::save(db_, d);
 
-    if (d.fullscreen) {
+    if (d.mode == settings::DisplayMode::Fullscreen) {
         showFullScreen();
     } else {
         showNormal();
         resize_within_screen(static_cast<int>(d.width), static_cast<int>(d.height));
     }
     settings_->set_resolution_index(settings::preset_index(d.width, d.height));
-    settings_->set_fullscreen(d.fullscreen);
+    settings_->set_fullscreen(d.mode == settings::DisplayMode::Fullscreen);
     settings_->set_theme_dark(d.dark);
     apply_theme(d.dark);
 

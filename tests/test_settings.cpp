@@ -21,7 +21,7 @@ TEST_CASE("default settings are dark 1600x900 windowed") {
     REQUIRE(s.width == 1600);
     REQUIRE(s.height == 900);
     REQUIRE(s.dark);
-    REQUIRE_FALSE(s.fullscreen);
+    REQUIRE(s.mode == denso::settings::DisplayMode::Windowed);
 }
 
 TEST_CASE("fitting_presets returns indices whose FRAMED size fits") {

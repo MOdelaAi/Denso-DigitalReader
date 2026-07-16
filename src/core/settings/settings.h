@@ -3,6 +3,8 @@
 // helper in `settings::repo`. Persistence (load/save/import) is the DB layer.
 #pragma once
 
+#include "settings/display.h"
+
 #include <array>
 #include <cstdint>
 #include <utility>
@@ -11,10 +13,10 @@
 namespace denso::settings {
 
 struct Settings {
-    uint32_t width = 1600;
+    uint32_t width = 1600;   // windowed client size
     uint32_t height = 900;
     bool dark = true;
-    bool fullscreen = false;
+    DisplayMode mode = DisplayMode::Windowed;
 };
 
 /// Selectable window resolutions, in display order. Index 2 (1600×900) is the

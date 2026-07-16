@@ -60,18 +60,32 @@ Settings load(const QSqlDatabase& db) {
     if (const auto v = get(db, QStringLiteral("dark"))) {
         out.dark = (*v == QStringLiteral("1"));
     }
-    if (const auto v = get(db, QStringLiteral("fullscreen"))) {
-        out.fullscreen = (*v == QStringLiteral("1"));
+    // Prefer the new display_mode key; fall back to the legacy fullscreen bool so
+    // a pre-upgrade DB still restores its mode; a corrupt/unknown token is
+    // Windowed (parse_display_mode's contract).
+    if (const auto v = get(db, QStringLiteral("display_mode"))) {
+        out.mode = parse_display_mode(v->toStdString());
+    } else if (const auto f = get(db, QStringLiteral("fullscreen"))) {
+        out.mode = (*f == QStringLiteral("1")) ? DisplayMode::Fullscreen
+                                               : DisplayMode::Windowed;
     }
     return out;
 }
 
 void save(const QSqlDatabase& db, const Settings& settings) {
+    // Dual-write display_mode + the legacy fullscreen bool in one transaction so
+    // an older binary opening the same DB degrades safely (Borderless→Windowed)
+    // and the two keys can never disagree after a partial write. transaction()/
+    // commit() are non-const, so operate on a copy of the handle (same connection).
+    QSqlDatabase wdb = db;
+    const bool tx = wdb.transaction();
     set(db, QStringLiteral("width"), QString::number(settings.width));
     set(db, QStringLiteral("height"), QString::number(settings.height));
     set(db, QStringLiteral("dark"), settings.dark ? QStringLiteral("1") : QStringLiteral("0"));
+    set(db, QStringLiteral("display_mode"), QString::fromLatin1(to_string(settings.mode)));
     set(db, QStringLiteral("fullscreen"),
-        settings.fullscreen ? QStringLiteral("1") : QStringLiteral("0"));
+        settings.mode == DisplayMode::Fullscreen ? QStringLiteral("1") : QStringLiteral("0"));
+    if (tx) wdb.commit();
 }
 
 void import_legacy(const QSqlDatabase& db, const QString& json_path) {
@@ -110,7 +124,7 @@ void import_legacy(const QSqlDatabase& db, const QString& json_path) {
     if (!is_u32(wv) || !is_u32(hv)) {
         return;
     }
-    Settings s;  // defaults supply dark=true, fullscreen=false
+    Settings s;  // defaults supply dark=true, mode=Windowed
     s.width = static_cast<uint32_t>(wv.toDouble());
     s.height = static_cast<uint32_t>(hv.toDouble());
     if (obj.contains(QStringLiteral("dark"))) {
@@ -125,7 +139,7 @@ void import_legacy(const QSqlDatabase& db, const QString& json_path) {
         if (!fv.isBool()) {
             return;
         }
-        s.fullscreen = fv.toBool();
+        s.mode = fv.toBool() ? DisplayMode::Fullscreen : DisplayMode::Windowed;
     }
 
     save(db, s);
