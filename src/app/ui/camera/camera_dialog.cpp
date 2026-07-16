@@ -97,6 +97,8 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     connect(areas_page_, &CameraAreasPage::back_requested, controller_,
             &CameraWizardController::areas_back);
     connect(areas_page_, &CameraAreasPage::skip_requested, this, &CameraDialog::show_list);
+    connect(areas_page_, &CameraAreasPage::refresh_preview_requested, controller_,
+            &CameraWizardController::capture_snapshot);
     connect(areas_page_, &CameraAreasPage::save_requested, controller_,
             &CameraWizardController::save_areas);
 

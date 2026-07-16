@@ -31,6 +31,7 @@ add_executable(denso_tests
     test_brazing_config.cpp
     test_area_points.cpp
     test_area_geometry.cpp
+    test_area_validation.cpp
     test_class_names.cpp
     test_rtsp_templates.cpp
     test_gst_pipeline.cpp

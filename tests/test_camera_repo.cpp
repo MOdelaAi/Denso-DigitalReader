@@ -18,6 +18,7 @@ using denso::camera::remove;
 using denso::camera::replace_areas;
 using denso::camera::set_areas_need_review;
 using denso::camera::update;
+using denso::camera::zones_owned_by_other_cameras;
 using denso::db::Db;
 using denso::db::run_migrations;
 
@@ -326,6 +327,72 @@ TEST_CASE("replace_areas rejects a zone already used by another camera", "[camer
     const auto ga = areas_for(d.handle(), *a);
     REQUIRE(ga.size() == 1);
     CHECK(ga[0].zone == 1);
+}
+
+TEST_CASE("zones_owned_by_other_cameras: none when nothing is assigned",
+          "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    REQUIRE(a.has_value());
+    CHECK(zones_owned_by_other_cameras(d.handle(), *a).empty());
+}
+
+TEST_CASE("zones_owned_by_other_cameras: maps a zone to its owning camera name",
+          "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    const auto b = insert(d.handle(), ip_cam());
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+
+    CameraArea za;
+    za.name = "A-zone1";
+    za.zone = 1;
+    za.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    REQUIRE(replace_areas(d.handle(), *a, {za}));
+
+    // Asked on behalf of B: A's zone 1 is taken, and it says by whom — that
+    // name is what the Areas page shows instead of a bare save failure.
+    const auto taken = zones_owned_by_other_cameras(d.handle(), *b);
+    REQUIRE(taken.size() == 1);
+    REQUIRE(taken.count(1) == 1);
+    CHECK(taken.at(1) == usb_cam().name);
+}
+
+TEST_CASE("zones_owned_by_other_cameras: excludes the camera being edited",
+          "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    REQUIRE(a.has_value());
+
+    CameraArea za;
+    za.name = "A-zone2";
+    za.zone = 2;
+    za.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    REQUIRE(replace_areas(d.handle(), *a, {za}));
+
+    // A's own zone must not be reported back to A: replace_areas deletes its
+    // rows first, so re-saving zone 2 is legal and must not look like a clash.
+    CHECK(zones_owned_by_other_cameras(d.handle(), *a).empty());
+}
+
+TEST_CASE("zones_owned_by_other_cameras: ignores ROI-only areas", "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    const auto b = insert(d.handle(), ip_cam());
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+
+    CameraArea unzoned;  // zone stays nullopt
+    unzoned.name = "A-roi";
+    unzoned.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    CameraArea zero;
+    zero.name = "A-zero";
+    zero.zone = 0;  // the ROI-only sentinel — claims nothing
+    zero.points = {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.5f, 0.8f}};
+    REQUIRE(replace_areas(d.handle(), *a, {unzoned, zero}));
+
+    CHECK(zones_owned_by_other_cameras(d.handle(), *b).empty());
 }
 
 TEST_CASE("replace_areas lets a camera keep its own zone on re-save", "[camera_repo]") {
