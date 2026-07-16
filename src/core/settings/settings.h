@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <utility>
+#include <vector>
 
 namespace denso::settings {
 
@@ -28,5 +29,15 @@ inline constexpr std::array<std::pair<uint32_t, uint32_t>, 4> PRESETS = {{
 /// Index into PRESETS matching the given size, or the default index (2) when
 /// no preset matches.
 int preset_index(uint32_t width, uint32_t height);
+
+/// Indices into PRESETS whose FRAMED size (client + window-frame overhead) fits
+/// the available logical geometry. Empty when none fit — never returns an
+/// oversized preset. PRESETS is ascending, so the result is ascending too.
+std::vector<int> fitting_presets(uint32_t avail_w, uint32_t avail_h,
+                                 uint32_t frame_w, uint32_t frame_h);
+
+/// The largest fitting preset index, or -1 if none fit.
+int largest_fitting_preset(uint32_t avail_w, uint32_t avail_h,
+                           uint32_t frame_w, uint32_t frame_h);
 
 } // namespace denso::settings
