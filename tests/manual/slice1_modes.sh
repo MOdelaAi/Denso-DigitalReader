@@ -40,5 +40,36 @@ for artifact in denso.db denso.log denso.lock models; do
                           || echo "ok   - --check-migrations created no $artifact"
 done
 
+# --check on an empty data dir: no DB and no engines is a VALID fresh install (a
+# fresh DB references no cameras, so it requires no engines).
+CHK=$(mktemp -d); export DENSO_DATA_DIR="$CHK"
+run --check; chk "--check on a fresh data dir exits 0" 0 $?
+
+# Persistent-mutation INVENTORY, not a list of four guesses: after --check the
+# data dir must be byte-for-byte empty. Anything at all (denso.db, denso.log,
+# denso.lock, models/, trt_cache, a -wal/-shm, a leftover probe file) is a
+# contract violation, including artifacts we didn't think to name.
+LEFT=$(ls -A "$CHK")
+if [ -z "$LEFT" ]; then echo "ok   - --check left the data dir empty"
+else echo "FAIL - --check created: $LEFT"; fail=1; fi
+
+# A named package engine that isn't there must FAIL, even with no database --
+# this is the fresh-install case where configured-only checking would pass a
+# corrupt/absent packaged engine.
+run --check --engine absent.engine; chk "--check --engine <missing> exits 1" 1 $?
+
+# A present-but-corrupt database must FAIL, not read as "fresh".
+BAD=$(mktemp -d); export DENSO_DATA_DIR="$BAD"
+printf 'this is not a sqlite file' > "$BAD/denso.db"
+run --check; chk "--check on a corrupt database exits 1" 1 $?
+rm -rf "$BAD"
+
+export DENSO_DATA_DIR="$TMP"
+rm -rf "$CHK"
+
+# NOTE: the unwritable-data-dir case is NOT tested here. `chmod 500` does not
+# reliably make a directory unwritable to a Windows process under MSYS2, so the
+# test would fail despite correct behavior. It is covered on the Jetson below.
+
 rm -rf "$SANDBOX"
 exit $fail
