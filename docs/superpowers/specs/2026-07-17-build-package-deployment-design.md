@@ -168,6 +168,19 @@ sudo -u "$user" env HOME="$home" DENSO_DATA_DIR=/opt/denso/data \
 with `$tmp` target-user-owned and removed afterwards. `--version` and `--check`
 must never take the production lock.
 
+**`--check-running` is the one deliberate exception to that rule.** Liveness
+detection *requires* `QLockFile::tryLock()`, which briefly acquires and releases
+the lock when no instance is running — there is no way to reuse the app's own
+stale-lock semantics without touching the lock. It is therefore explicitly
+exempt, and **must run as the target user**: as root it would leave a root-owned
+lock artifact in an operator-owned data dir, which is the exact poisoning D6
+exists to prevent.
+
+**Missing-DB behavior (fresh install).** A first install has no `denso.db`.
+`--check` must treat an absent live DB as an **empty configured-model set** and
+must **not create one** (consistent with the ground truth that a fresh DB
+requires no engines). Only the packaged engine is validated in that case.
+
 Only package engines and engines referenced by current configuration are
 activation blockers — an unrelated stray engine in the operator's models dir must
 not block an upgrade. GUI/xcb validation is **not** a separate mode in v1: the
@@ -286,10 +299,19 @@ immutable model filenames would solve this cleanly but are cut — see YAGNI.)
 wrong. Migrations run forward-only at first GUI launch, *after* activation — so a
 failing migration produces an activated release that dies at **every autologin**,
 on an appliance whose whole point is unattended power-on. The check is cheap
-next to diagnosing that in a factory: copy `denso.db` into a throwaway
-target-user-owned data dir, run the new binary's migration path **against the
-copy**, and gate activation on success. Mutation is confined to the copy, so D6's
-no-persistent-mutation contract for `--check` is untouched.
+next to diagnosing that in a factory.
+
+It needs its own executable path: `--check` is forbidden from running migrations
+(D6) and normal startup constructs the GUI and continues into the app, so neither
+can serve. Add a fourth headless mode — **`--check-migrations <db-path>`** — that
+dispatches before `QApplication`, runs *only* the migration chain against the
+path it is given, and exits with the result. The installer copies `denso.db` into
+a throwaway target-user-owned dir and points the mode at the copy, so mutation is
+confined there and D6's contract for `--check` is untouched.
+
+**Fresh install:** with no existing `denso.db` there is nothing to copy. The
+smoke test then runs against an **empty temporary DB**, which exercises the full
+migration chain from v0 — the same chain the app will run on first launch.
 
 **Rollback is attended, not automatic.** Migrations are forward-only (schema at
 v11); flipping `current` back does not un-migrate the database. The DB backup is
@@ -336,7 +358,7 @@ is deferred until packages cross an untrusted channel.
 | `packaging/com.denso.DigitalReader.desktop` | menu entry + autostart template | launcher, icon |
 | `src/core/paths/` (`denso::paths`) | single source of truth for mutable paths | `$DENSO_DATA_DIR` |
 | single-instance guard | `QLockFile` before DB/log/cameras | `denso::paths` |
-| `--version` / `--check` / `--check-running` | headless install gate, no persistent mutation; dispatched before `QApplication` | `TrtEngine`, sidecar reader, read-only `detection::repo` |
+| `--version` / `--check` / `--check-running` / `--check-migrations <db>` | headless install gates, all dispatched before `QApplication`. `--check`: no persistent mutation. `--check-running`: takes the lock by design (sole exemption). `--check-migrations`: mutates only the throwaway copy it is given | `TrtEngine`, sidecar reader, read-only `detection::repo`, `db::run_migrations` |
 | `packaging/lib/*.sh` | pure installer policies (version allowlist, apt-plan guard, seeding, GDM INI) | — |
 
 ## Testing
@@ -353,7 +375,11 @@ testable would be worse than not testing them. Single implementation each:
 - **Unit (Catch2, off-device):** `denso::paths` resolution (env set / unset /
   empty / relative); `--version`/`--check` take no lock and don't construct
   `QApplication`; `--check` performs no persistent mutation (no `trt_cache`, no
-  `-wal`/`-shm`, no log, no lock); second-instance rejection.
+  `-wal`/`-shm`, no log, no lock) **and treats a missing DB as an empty
+  configured-model set without creating one**; `--check-migrations` migrates the
+  copy it is given and leaves the live DB untouched, incl. the empty-temp-DB
+  (fresh install) case; `--check-running` reports true/false correctly and
+  releases the lock when no instance holds it; second-instance rejection.
 - **Unit (shell harness, off-device):** version-string allowlist; seeding
   decision table (absent / same-hash / different-hash); autologin INI edit +
   key-level restore incl. "admin changed it since" → refuse, and the
@@ -418,10 +444,11 @@ calls exist.
 the Windows box; independently valuable and reviewable):
 `denso::paths` → move every mutable path onto it (db, log, models, cache, legacy
 settings.json, lock) → unit-test env handling → refactor arg parsing so
-`--version`/`--check`/`--check-running` dispatch **before** `QApplication` →
-read-only DB inspection path → direct engine/sidecar validation bypassing
-`EngineRegistry::warm_up()` → early `QLockFile` guard on normal GUI startup only
-→ tests → verify `--check` against a real engine on the Jetson.
+`--version`/`--check`/`--check-running`/`--check-migrations` dispatch **before**
+`QApplication` → read-only DB inspection path (missing DB = empty set, never
+created) → direct engine/sidecar validation bypassing `EngineRegistry::warm_up()`
+→ `--check-migrations` against a given path → early `QLockFile` guard on normal
+GUI startup only → tests → verify `--check` against a real engine on the Jetson.
 
 **Slice 2 — packaging + host integration** (Jetson-verifiable only):
 launcher + desktop + icon + autostart template → pure testable shell helpers
