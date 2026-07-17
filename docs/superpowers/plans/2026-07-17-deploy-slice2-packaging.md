@@ -1,5 +1,25 @@
 # Deployment Slice 2: Packaging & Appliance Integration — Implementation Plan
 
+> ## ⚠ HISTORICAL — DO NOT COPY CODE FROM THIS FILE
+>
+> **Executed and merged.** The code blocks below are the *pre-review* drafts. They
+> were changed substantially during execution — ~30 review findings plus three
+> bugs that only first contact with the Jetson found — so several snippets here
+> are **known-wrong** and would reintroduce fixed bugs if pasted:
+>
+> - `shlibs.local` still lists `libcudla` and `libopencv_imgcodecs` — **dead
+>   mappings**, removed because they are not directly `NEEDED`.
+> - the preflight/install snippets predate the `.deb`-path normalisation (`apt`
+>   reads a bare filename as a *package name*) and the artifact SHA-256 binding.
+> - `postinst` here chowns and seeds; the shipped one does **neither** (both moved
+>   to `denso-setup configure`, which knows the target user).
+> - the `shlibs.local` lookup here uses `awk '…{exit}'`, which SIGPIPEs the
+>   producer under `pipefail` and killed the build.
+>
+> **The authoritative sources are the code itself, `AGENTS.md`'s Deployment
+> section, and the design spec** (`docs/superpowers/specs/2026-07-17-build-package-deployment-design.md`).
+> This file is kept for the reasoning and the task order, not as a template.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn the built app into a `.deb` the operator `scp`s to a Jetson and installs with `apt`, after which it behaves like a normal Ubuntu application — menu entry, icon, launcher on PATH, listed in `dpkg -l`, upgradable, and starting unattended on power-on.

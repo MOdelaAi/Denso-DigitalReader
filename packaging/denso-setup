@@ -1,6 +1,7 @@
 #!/bin/sh
 # Denso appliance setup: everything `apt install` cannot do.
 #
+#   denso-setup preflight <path-to.deb>
 #   denso-setup configure --user <u> [--autostart] [--enable-autologin]
 #   denso-setup verify
 #   denso-setup unconfigure
@@ -203,6 +204,29 @@ cmd_verify() {
     for el in rtspsrc nvv4l2decoder nvvidconv appsink h264parse; do
         if gst-inspect-1.0 "$el" >/dev/null 2>&1; then echo "  ok  $el"
         else echo "  FAIL $el missing"; rc=1; fi
+    done
+
+    # Seeding lives in `configure`, NOT postinst (postinst must not guess the
+    # target user). So an UPGRADE carrying a new approved engine leaves the
+    # operator's existing one in place, and --check below only proves an engine
+    # LOADS -- not that it is the one this package approved. Without this, verify
+    # says PASS while the appliance runs an engine the MANIFEST does not describe.
+    #
+    # WARN, not FAIL: bring-your-own-engine is deliberate (seed_decision_pair
+    # refuses to overwrite for exactly that reason).
+    echo "== packaged models vs the data dir"
+    for eng in "$PKG_MODELS"/*.engine; do
+        [ -e "$eng" ] || continue
+        stem="$(basename "$eng" .engine)"
+        side="$PKG_MODELS/$stem.names.json"
+        [ -f "$side" ] || continue
+        case "$(seed_decision_pair "$eng" "$side" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json")" in
+            same) echo "  ok   $stem matches the packaged model" ;;
+            seed) echo "  WARN $stem is packaged but ABSENT from $DATA/models — run 'denso-setup configure --user <u>'" ;;
+            differs) echo "  WARN $stem in $DATA/models DIFFERS from the packaged one."
+                     echo "       The appliance is NOT running the model this package approved."
+                     echo "       Keep yours, or adopt the packaged one: denso-setup replace-model $stem" ;;
+        esac
     done
 
     echo "== instance (FIRST: everything below reads the live DB)"

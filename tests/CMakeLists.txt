@@ -82,3 +82,16 @@ target_link_libraries(denso_tests PRIVATE ${OpenCV_LIBS} Qt6::Gui)
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 catch_discover_tests(denso_tests)
+
+# The packaging policy harness (pure POSIX sh, no deps) behind the SAME gate as
+# the C++ tests. It was 339 lines that only ran when someone remembered to — and
+# it covers the decisions that run as ROOT on the appliance (apt-plan guard, GDM
+# [daemon] editing, model seeding, the preflight drift check). Deliberately
+# dependency-free so it runs unchanged on MSYS2 and on the Jetson.
+find_program(BASH_EXECUTABLE bash)
+if(BASH_EXECUTABLE)
+    add_test(NAME packaging_policy
+             COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/packaging/run.sh)
+else()
+    message(STATUS "bash not found — the packaging policy harness will not run under ctest")
+endif()
