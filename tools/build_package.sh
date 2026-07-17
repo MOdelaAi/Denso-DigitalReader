@@ -281,7 +281,13 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$
 ( cd "$STAGE" && find . -type f ! -path './DEBIAN/*' -printf '%P\0'     | xargs -0 md5sum > DEBIAN/md5sums )
 
 # ── build the .deb
-OUT="denso-digitalreader_${VERSION}_${ARCH}.deb"
+# Outputs go to dist/, NOT the repo root. Writing them beside the sources made
+# the build SELF-DEFEATING: the first run succeeded, its own artifacts left the
+# tree dirty (they are untracked), and every later run then refused to package
+# a dirty tree. dist/ is git-ignored, so the dirty-tree gate keeps meaning
+# "the SOURCES are modified" rather than "you have built before".
+mkdir -p dist
+OUT="dist/denso-digitalreader_${VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$OUT" >/dev/null
 sha256sum "$OUT" > "$OUT.sha256"
 DEB_SHA256="$(cut -d' ' -f1 "$OUT.sha256")"
@@ -297,7 +303,7 @@ DEB_SHA256="$(cut -d' ' -f1 "$OUT.sha256")"
 # pair an OLD guard with a NEW .deb with no error at all. Binding the guard to
 # the ONE artifact it was generated for (both by name and by checksum) makes
 # that pairing mistake fail loudly instead of silently passing.
-PREFLIGHT_OUT="preflight-denso-${VERSION}.sh"
+PREFLIGHT_OUT="dist/preflight-denso-${VERSION}.sh"
 emit_preflight_script "packaging/lib/policy.sh" "$PREFLIGHT_OUT" "$DEB_SHA256"
 
 echo

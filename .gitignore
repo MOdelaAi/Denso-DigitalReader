@@ -1,3 +1,8 @@
+# Packaging output (.deb + its checksum + the artifact-bound preflight guard).
+# Ignored so a build cannot dirty its own tree and make the NEXT build refuse.
+/dist
+/build-pkg
+
 # CMake out-of-source build dirs
 /build
 /build-*
