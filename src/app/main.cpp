@@ -103,7 +103,10 @@ int main(int argc, char** argv) {
     // ── Single instance, BEFORE the DB, the log sink, or any camera. Two
     // processes would contend on one SQLite file and silently eat log data
     // (rename-based rotation does not follow another process's open fd).
-    static denso::instance::SingleInstance instance_guard(denso::paths::lock_file());
+    // Automatic, NOT static: it must outlive app.exec() (it does — main hasn't
+    // returned) while being destroyed BEFORE the QApplication above it and
+    // before the static log sink below, so releasing the lock can still log.
+    denso::instance::SingleInstance instance_guard(denso::paths::lock_file());
     if (!instance_guard.acquire()) {
         // The log sink does not exist yet — stderr is all we have.
         std::fprintf(stderr, "denso: another instance is already running\n");
@@ -141,11 +144,18 @@ int main(int argc, char** argv) {
     const QString db_path = denso::paths::db_file();
     auto db = denso::db::Db::open(db_path);
     if (!db) {
-        qFatal("open database");
+        // NOT qFatal: it aborts without unwinding, so instance_guard's lock file
+        // would survive with a dead pid — and an operator retrying immediately
+        // after (say) a permissions error on the data dir would be told "already
+        // running" instead of the real cause. Expected startup failures exit
+        // cleanly; qFatal stays for genuinely unrecoverable aborts.
+        qCritical().noquote() << "[fatal] cannot open database:" << db_path;
+        return 1;
     }
     QSqlDatabase conn = db->handle();
     if (!denso::db::run_migrations(conn)) {
-        qFatal("run migrations");
+        qCritical().noquote() << "[fatal] cannot run migrations on:" << db_path;
+        return 1;
     }
 
     // ── Session marker: one line per boot to anchor field diagnosis. No
