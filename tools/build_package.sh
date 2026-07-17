@@ -78,7 +78,13 @@ if [ -n "$(git status --porcelain)" ]; then
     [ "$ALLOW_DIRTY" = "1" ] || { echo "refusing to package a dirty tree (use --allow-dirty to override)" >&2; exit 1; }
     DIRTY="+dirty"
 fi
-VERSION="${APP_VERSION}+g${SHA}${DIRTY}"
+# A git SHA is NOT monotonic, and dpkg compares non-digits by ASCII: the installed
+# 0.1.0+gda30437 sorts ABOVE a newer 0.1.0+g7a2d661 ("gd" > "g7"), so apt calls the
+# new build a DOWNGRADE and refuses it under -y. Every install was a coin flip.
+# Prefix the commit COUNT, which increases with history and compares numerically
+# (r105 > r99 regardless of the sha that follows). The sha stays for provenance.
+COUNT="$(git rev-list --count HEAD)"
+VERSION="${APP_VERSION}+r${COUNT}.g${SHA}${DIRTY}"
 version_ok "$VERSION" || { echo "computed version is not a safe path component: $VERSION" >&2; exit 1; }
 echo ">> version: $VERSION"
 
