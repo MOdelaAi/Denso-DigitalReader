@@ -98,6 +98,30 @@ std::optional<Db> Db::open_in_memory() {
     return Db(name);
 }
 
+std::optional<Db> Db::open_read_only(const QString& path) {
+    const QString name = next_connection_name();
+    bool ok = false;
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+        db.setDatabaseName(path);
+        // QSQLITE_OPEN_READONLY maps to SQLITE_OPEN_READONLY, which fails rather
+        // than creating an absent file — exactly the contract we want.
+        db.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+        ok = db.open();
+        // Deliberately NO journal_mode pragma here (see the header).
+        if (ok) {
+            // Belt and braces: READONLY already rejects writes, but query_only
+            // makes the intent explicit and is what the spec calls for.
+            ok = QSqlQuery(db).exec(QStringLiteral("PRAGMA query_only = ON"));
+        }
+    }
+    if (!ok) {
+        QSqlDatabase::removeDatabase(name);
+        return std::nullopt;
+    }
+    return Db(name);
+}
+
 bool run_migrations(const QSqlDatabase& db) {
     if (!db.isValid() || !db.isOpen()) {
         qWarning().noquote() << "run_migrations: db not open/valid:" << db.lastError().text();
