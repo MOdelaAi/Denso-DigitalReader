@@ -1495,6 +1495,18 @@ sudo apt remove -y denso-digitalreader; echo "remove rc=$?"
 Expected: `remove rc` is **non-zero**, apt reports the prerm failure, and the message is `denso: the application is running; close it before upgrading or removing.`
 **Postconditions — check all three:** the app is **still running**; `dpkg -l denso-digitalreader` still shows `ii`; and `ls ~/.config/autostart/` still contains the entry (the ordering fix — a *refused* removal must not have unconfigured anything).
 
+**Also exercise the FALLBACK path** — the steps above only prove the authoritative
+lock check. With the app still running, temporarily hide the recorded user so
+`prerm` must fall back to `pgrep`:
+```sh
+sudo mv /opt/denso/install-state/user /opt/denso/install-state/user.bak
+sudo apt remove -y denso-digitalreader; echo "remove rc=$?"     # expect NON-ZERO
+sudo mv /opt/denso/install-state/user.bak /opt/denso/install-state/user
+```
+Expected: still refused, with `denso: the application appears to be running` (the
+pgrep path), the app still running, and the package still `ii`. This is the only
+on-device test of the fallback branch — without it, a bug there ships unseen.
+
 Then close the app and confirm removal now works:
 ```sh
 denso-digitalreader --check-running; echo "rc=$?"    # expect rc=1 (not running)
