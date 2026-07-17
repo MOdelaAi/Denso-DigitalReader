@@ -50,10 +50,12 @@ separate include roots. Bounded 24/7 file logging lives in `src/app/logging/`
 
 A thin orchestrator:
 
-0. The bounded file-logging handler is installed first (`src/app/logging`, see
-   [Logging](#logging)) so every later step's `qDebug/qWarning` lands in
-   `denso.log` — the Windows GUI subsystem has no console.
-1. `QApplication` is constructed, then `QLocale::setDefault(English/UnitedStates)`
+0. `QApplication` is constructed **first** (`main.cpp:83`) — it has to be, since
+   the log sink's path comes from `QCoreApplication::applicationDirPath()`.
+1. The bounded file-logging handler is installed immediately after
+   (`main.cpp:97-99`; `src/app/logging`, see [Logging](#logging)) so every later
+   step's `qDebug/qWarning` lands in `denso.log` — the Windows GUI subsystem has
+   no console. Then `QLocale::setDefault(English/UnitedStates)`
    forces Western Arabic digits in numeric widgets (`QSpinBox`/`QDoubleSpinBox`)
    regardless of the OS regional format — without it a Thai-locale host renders
    spin-box values as Thai numerals (๐–๙).
@@ -61,9 +63,13 @@ A thin orchestrator:
    mode; `db::run_migrations` applies the `user_version`-gated chain.
 3. `settings::import_legacy` does a one-time import of any pre-SQLite
    `settings.json` sitting beside the DB.
-4. `ui::sync_models` scans `models/*.onnx` beside the exe and upserts each into
-   the `model` catalog (reading its class names from the ONNX metadata), so
-   models dropped into `models/` become selectable in the camera wizard.
+4. `ui::sync_models` scans the `models/` dir beside the exe and upserts each into
+   the `model` catalog, so models dropped there become selectable in the camera
+   wizard. **Platform-split** (`model_sync.cpp` — the ONNX branch is
+   `#ifdef _WIN32`): Windows catalogs `*.onnx` with class names from the ONNX
+   metadata; Linux/Jetson catalogs `*.engine` with class names from a
+   `<stem>.names.json` sidecar, skipping any engine whose sidecar is missing or
+   unparseable.
 5. `network::reassert` re-applies every saved interface config to the OS — the
    app is the source of truth. Best-effort and non-fatal: failures are logged
    via `qWarning`, never block startup. It is **deferred to the first event-loop
@@ -443,11 +449,15 @@ append + range-read only; there is no update/delete, since a reading is an
 immutable capture.
 
 The write side is not wired up yet. `DetectionProcessor` (`frame_processor.h`)
-has a dormant seam for it: an optional `ReadingSink*` (plus a `camera_id`), both
-defaulted so the existing 5-arg construction call is untouched. When a sink is
+has a dormant seam for it: an optional `ReadingSink*` (plus a `camera_id`) on
+`DetectionProcessor`'s ctor — now 8 params (`degrees, pitch, roll, models, areas,
+camera_id, sink, zone_sink`), all passed at its sole call site
+(`ui/camera/grid/camera_grid.cpp:195-200`). When a sink is
 set, `process()` calls `sink->on_reading(camera_id, ts_ms, kept)` with the
 frame's post-ROI-confinement detections. **Threading contract:** `on_reading`
-runs on the **capture thread**, in the hot path — an implementation must not
+runs on the **inference worker thread** (`frame_processor.h:59`; the call site is
+in `infer_loop()`) — *not* the capture thread, since inference is decoupled from
+display. An implementation must not
 block or do DB I/O inline; it has to hand the data off to a worker (e.g. via
 `common::run_on_worker`/`post_to_gui`) and return immediately, the same rule
 `camera_stream` already follows for its own frame processing. Assembling a
@@ -522,10 +532,13 @@ box that runs for months must never fill the disk or lose the tail.
 
 ## Gotchas
 
-- **Never `git add -A` in this repo.** The tree carries untracked operator
-  artifacts (`models/*.onnx`, scratch notes); a blanket add sweeps a ~38 MB model
-  into a commit and then blocks `git pull` on the Jetson (the untracked file
-  conflicts with the incoming one). Use explicit `git add <files>` / `git add -u`.
+- **Never `git add -A` in this repo.** `denso/yolo26n/yolov8n.onnx` are tracked,
+  and the 37 MB `digitv2.onnx` + `note.txt` are now git-ignored — but `.gitignore`
+  names `models/digitv2.onnx` **specifically**, not `models/*.onnx`, so a *new*
+  model dropped into `models/` is untracked and unignored. A blanket add still
+  sweeps a multi-MB blob into a commit and then blocks `git pull` on the Jetson
+  (the untracked file conflicts with the incoming one). Use explicit
+  `git add <files>` / `git add -u`.
 - **QSQLITE keeps a read cursor alive until the `QSqlQuery` is finished or
   destroyed.** A live read cursor (e.g. an un-scoped `PRAGMA user_version`
   query) makes a later schema change on the same connection fail with

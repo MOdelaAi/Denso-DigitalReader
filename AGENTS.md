@@ -74,6 +74,33 @@ Jetson runtime deps: `qt6-base-dev`, `qt6-multimedia-dev`, `libqt6sql6-sqlite`,
 `gstreamer1.0-libav` (avdec fallback), OpenCV 4.8, TensorRT 10.3, CUDA 12.6.
 Catch2 v3 is fetched at first configure (needs net once).
 
+## Deployment (designed, NOT built)
+
+There is **no packaging or install flow yet** — the app is run from its build dir
+on the Jetson. The design is specced at
+`docs/superpowers/specs/2026-07-17-build-package-deployment-design.md`: a `.deb`
+installed with `apt`, `/opt/denso/data` for mutable state via `$DENSO_DATA_DIR`,
+a `QLockFile` single-instance guard, four headless modes (`--version`,
+`--check`, `--check-running`, `--check-migrations`), and `denso-setup` for
+autostart/autologin. Do not document any of it as working until it lands.
+
+Verified facts that will bite whoever implements it:
+- **`libopencv` (NVIDIA's OpenCV) ships no `.shlibs`/`.symbols`**, and
+  `dpkg-shlibdeps` errors on `/usr/local/cuda/lib64/libcudart.so.12`. `Depends:`
+  must be mixed: `${shlibs:Depends}` + hand-declared `libopencv`,
+  `cuda-cudart-12-6`, and the dlopened set (`qt6-qpa-plugins`,
+  `libqt6sql6-sqlite`, `gstreamer1.0-*`). Never pass `--ignore-missing-info` — it
+  drops deps silently and looks derived while being wrong.
+- **Debian policy forbids a package installing to `/usr/local`** — the launcher
+  goes in `/usr/bin`.
+- The exe is **relocatable**: the only RUNPATH is the absolute
+  `/usr/local/cuda/lib64`, so no `LD_LIBRARY_PATH` is needed after copying it out
+  of the build tree.
+- The Jetson **halts at the GDM greeter on power-on** (no active graphical user
+  session), so autostart is inert without autologin.
+- `Db::open()` runs `PRAGMA journal_mode = WAL` and `EngineRegistry::warm_up()`
+  creates `trt_cache` — so neither can be used by a "non-mutating" check path.
+
 ## Gotchas
 
 - Tracked architecture doc is **`docs/ARCHITECTURE.md` (UPPERCASE)** — `git add
@@ -85,10 +112,12 @@ Catch2 v3 is fetched at first configure (needs net once).
 - Don't leak Qt Widgets / OpenCV / ORT / CUDA / TensorRT into `denso_core`.
 - Keep platform behavior behind the existing interfaces; the shared
   letterbox/decode must stay identical across backends.
-- **Never `git add -A` in this repo.** Untracked models/scratch (`models/*.onnx`,
-  operator notes) live in the tree; a blanket add sweeps a 38 MB model into a
-  commit and blocks `git pull` on the Jetson. Use explicit `git add <files>` /
-  `git add -u`.
+- **Never `git add -A` in this repo.** `denso/yolo26n/yolov8n.onnx` are tracked,
+  and the 37 MB `digitv2.onnx` + `note.txt` are now git-ignored — but `.gitignore`
+  names `models/digitv2.onnx` **specifically**, not `models/*.onnx`. So a *new*
+  model dropped into `models/` is untracked and unignored, and a blanket add
+  still sweeps a multi-MB blob into a commit, which then blocks `git pull` on the
+  Jetson. Use explicit `git add <files>` / `git add -u`.
 - The DB migration chain is at **v11** (`camera.areas_need_review`, added for the
   editable-source / ROI-quarantine feature). Add a new migration — never edit a
   shipped one.

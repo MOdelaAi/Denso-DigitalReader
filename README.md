@@ -5,8 +5,9 @@ UI for display resolution, theme, host hardware spec, and network configuration.
 Built with **C++ / Qt Widgets / CMake**, backed by a single SQLite store
 (`denso.db`) kept next to the executable.
 
-> Ported 1:1 from a Rust + Slint original. The port lives on branch
-> `port/cpp-qt`; see `docs/ARCHITECTURE.md` for the design and the port notes.
+> Ported 1:1 from a Rust + Slint original. The port has landed — `main` **is**
+> the C++/Qt app (the `port/cpp-qt` branch is gone). See `docs/ARCHITECTURE.md`
+> for the design and the port notes.
 
 ## Features
 
@@ -16,7 +17,8 @@ Built with **C++ / Qt Widgets / CMake**, backed by a single SQLite store
 - **Network** — live Ethernet/Wi-Fi status, editable DHCP/static IP config
   (reasserted to the OS at boot), and Wi-Fi scan / connect. Windows uses
   `netsh`/`ipconfig`; Linux uses `nmcli`.
-- **Camera** — live 1–4 camera grid with per-camera ONNX digit detection and
+- **Camera** — live 1–4 camera grid with per-camera digit detection (ONNX on
+  Windows, TensorRT on the Jetson — see *Requirements*) and
   named ROI polygons. Each camera's source is editable; changing it re-verifies
   the ROIs (reporting pauses until they're re-checked against the new view).
 - **Server** — push each ROI's reading to a backend as one combined JSON POST
@@ -52,19 +54,27 @@ the base URL (e.g. `http://192.168.1.50:8098`). Then, in the Camera wizard →
 *Areas*, give each reporting ROI a zone number (0 = ROI-only, not reported).
 Config changes take effect when the camera grid next reloads.
 
-**Test it locally** against the stand-in server in `test-server/`:
+**Test it locally** against the stand-in server, which lives **outside this repo**
+at `d:\workspace\test-server`:
 
 ```sh
-cd test-server && python server.py --host 0.0.0.0 --port 8098
+cd /d/workspace/test-server && python server.py --host 0.0.0.0 --port 8098
 # point the app's base URL at http://<this-pc-ip>:8098, then watch the posts:
 curl http://localhost:8098/api/state
 ```
 
 ## Requirements
 
+Every `find_package` below is `REQUIRED` — configure fails without it.
+
 - A C++20 compiler (MSVC, GCC, or Clang)
 - CMake ≥ 3.21
-- Qt 6 (components: `Core`, `Gui`, `Sql`, `Widgets`)
+- Qt 6 — components `Core`, `Gui`, `Sql`, `Widgets`, `Multimedia`, `Network`
+- OpenCV
+- A detection backend, **platform-split** (see `docs/ARCHITECTURE.md`):
+  - **Windows** — ONNX Runtime, provisioned into `third_party/onnxruntime/`
+    (git-ignored; see `docs/GPU_SETUP.md`)
+  - **Linux / Jetson** — CUDA Toolkit + TensorRT (`nvinfer` + `NvInfer.h`)
 - Network access on first configure (Catch2 is fetched for the tests)
 
 ## Build
@@ -82,6 +92,13 @@ cmake --build build
 
 The app creates / migrates `denso.db` next to the executable on first run.
 
+## Deploy
+
+Not implemented yet — today the app runs from its build directory. A `.deb`
+package (installed with `apt`, with an app-menu entry, autostart, and mutable
+state in `/opt/denso/data`) is designed in
+`docs/superpowers/specs/2026-07-17-build-package-deployment-design.md`.
+
 ## Test
 
 Unit tests are Catch2 v3:
@@ -96,8 +113,10 @@ passing count differs between Windows and Linux.
 
 ## Project layout
 
-Two CMake targets, split by concern and tied together by a thin top-level
-`CMakeLists.txt`:
+Six CMake targets, split by concern and tied together by a thin top-level
+`CMakeLists.txt` — the `denso` exe, the `denso_core` library, three static
+subsystem libs (`denso_detection` / `denso_brazing` / `denso_camera`) linked by
+both the exe and the tests, and `denso_tests`:
 
 ```
 src/

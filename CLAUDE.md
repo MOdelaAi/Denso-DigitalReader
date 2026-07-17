@@ -4,8 +4,8 @@ Desktop app (C++ / Qt Widgets / CMake) for reading a 4-digit 7-segment display,
 with a settings UI for display resolution, theme, hardware spec, and network
 configuration. Single SQLite store (`denso.db`) next to the executable.
 
-Ported 1:1 from a Rust + Slint original; the port history lives on branch
-`port/cpp-qt`.
+Ported 1:1 from a Rust + Slint original. The port has landed — `main` **is** the
+C++/Qt app; the `port/cpp-qt` branch no longer exists.
 
 ## Commands
 
@@ -124,7 +124,7 @@ via separate include roots.
 | `camera/warmup_gate.{h,cpp}` | Pure (unit-tested) `PendingStart` gate: tracks which detection cameras are still waiting on a model, so `CameraGrid` starts each one exactly once as its models come ready. |
 | `camera/zone_assembly.{h,cpp}` | Pure (unit-tested) brazing digit→number step: `assemble_zone_value` (sort digits left-to-right by box x-center, concat → int) + `group_into_zones` (assign kept digits to each ROI's `zone`, assemble). `ZoneReading{zone_no,value,conf}` in `zone_reading.h`. (Stays camera-side — consumed by `frame_processor`, not brazing-only.) |
 | `brazing/zone_aggregator.{h,cpp}` | Pure (unit-tested) machine-wide zone state: per-zone debounce (`kStableFrames=5`) + change detection; `observe()` returns the full `{zone_no→value}` snapshot when a stable value changed. Absent zones retain their value. |
-| `brazing/zone_reporter.{h,cpp}` | `ZoneSink` impl (Qt-Network-adjacent, stays in `denso`): every camera's `DetectionProcessor` feeds zones here from capture threads → mutex-guarded `ZoneAggregator`; on change invokes a callback (wired to marshal via `post_to_gui` to `BrazingReporter`). |
+| `brazing/zone_reporter.{h,cpp}` | `ZoneSink` impl (Qt-Network-adjacent, stays in `denso`): every camera's `DetectionProcessor` feeds zones here from its **inference worker thread** (`frame_processor.cpp:197`, inside `infer_loop`) → mutex-guarded `ZoneAggregator`; on change invokes a callback (wired to marshal via `post_to_gui` to `BrazingReporter`). |
 | `brazing/brazing_payload.{h,cpp}` | Pure (unit-tested) `build_brazing_payload` → `{"zoneN":v,...}` (ascending order). |
 | `brazing/brazing_retry_policy.{h,cpp}` | Pure (unit-tested) retry state machine: holds pending/delivered/in-flight snapshots + backoff (1s→×2→30s cap); `submit`/`on_result`/`on_retry_tick` each return the next `RetryAction` (Send/ArmRetry/None). Single-flight + latest-value-wins. |
 | `brazing/brazing_reporter.{h,cpp}` | GUI-thread shell over `BrazingRetryPolicy` + a single-shot retry `QTimer` + a `BrazingTransport` (stays in `denso`). `submit()` (marshaled from `ZoneReporter`) drives reliable, coalescing delivery — a downed server is retried until it 2xx-acks the latest snapshot. In-memory only. |
@@ -178,7 +178,8 @@ immediately and each detection `CameraStream` starts only **after its model(s)
 finish warming**. Warm-up never lands on a capture thread.
 
 `denso_core` **never** links OpenCV/ORT/TensorRT — only `Qt6::Core`/`Sql`.
-`models/*.engine`, `models/*.names.json`, and `models/trt_cache/` are git-ignored.
+`models/*.engine` and `models/trt_cache/` are git-ignored. **`models/*.names.json`
+is NOT ignored** — a sidecar dropped into `models/` shows up as untracked.
 
 ## Hard rules
 
@@ -189,8 +190,8 @@ finish warming**. Warm-up never lands on a capture thread.
   OS access). Access policy is the `repo`'s API surface, not SQL grants.
 - Persistence is one SQLite file with version-gated migrations in
   `db::run_migrations` — add a migration, never edit a shipped one.
-- OS-specific work sits behind `NetworkBackend` (`network/backends/`). Keep both
-  platforms in sync.
+- OS-specific work sits behind `NetworkBackend` (`network/backend.{h,cpp}` +
+  `network/windows/`, `network/linux/`). Keep both platforms in sync.
 - `denso_core` must not link `Qt6::Widgets` — the GUI cannot leak into the
   testable core.
 - `build/` and `*.png` are git-ignored (see `.gitignore`); `assets/icon.png`
@@ -199,7 +200,9 @@ finish warming**. Warm-up never lands on a capture thread.
   work, and persistence. Shared dialog chrome (header, async runner, label
   factories) lives in `ui/common/` and is never re-copied into a feature. The
   detection pipeline's `ReadingSink` hook must hand off to a worker — never do
-  DB I/O on the capture thread.
+  DB I/O inline. Since inference was decoupled from display, `on_reading()` fires
+  on the **inference worker thread**, not the capture thread
+  (`camera/frame_processor.h:59` is the authoritative contract).
 
 ## Workflow
 
