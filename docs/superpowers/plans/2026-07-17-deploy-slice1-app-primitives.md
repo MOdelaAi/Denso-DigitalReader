@@ -1056,12 +1056,15 @@ chk() { # chk <description> <expected-rc> <actual-rc>
 # instead of hanging the worker's terminal (timeout returns 124).
 run() { timeout 20 "$EXE" "$@" >/dev/null 2>&1; }
 
-TMP=$(mktemp -d)
+# The data dir must be its OWN directory, with the tmp/cuda sandboxes as
+# SIBLINGS -- not children. An earlier draft put TMPDIR inside the data dir and
+# mkdir'd it, so the "data dir is empty" assertions could never pass for any
+# implementation. Keep the caches redirected but out of the directory under test.
+SANDBOX=$(mktemp -d)
+TMP="$SANDBOX/data"; mkdir -p "$TMP"
 export DENSO_DATA_DIR="$TMP"
-# Keep backend/tmp caches inside the sandbox so a stray write can't land
-# somewhere the assertions below don't look.
-export TMPDIR="$TMP/tmp"; mkdir -p "$TMPDIR"
-export CUDA_CACHE_PATH="$TMP/cuda-cache"
+export TMPDIR="$SANDBOX/tmp"; mkdir -p "$TMPDIR"
+export CUDA_CACHE_PATH="$SANDBOX/cuda-cache"
 
 run --version;            chk "--version exits 0" 0 $?
 run --wat;                chk "unknown flag exits 2" 2 $?
@@ -1080,7 +1083,7 @@ for artifact in denso.db denso.log denso.lock models; do
                           || echo "ok   - --check-migrations created no $artifact"
 done
 
-rm -rf "$TMP"
+rm -rf "$SANDBOX"
 exit $fail
 ```
 
