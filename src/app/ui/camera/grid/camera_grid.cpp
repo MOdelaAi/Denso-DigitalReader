@@ -88,7 +88,9 @@ void CameraGrid::clear() {
 void CameraGrid::reload() {
     clear();
 
-    std::vector<camera::Camera> cams = camera::all(db_);
+    // runtime(), not all(): an unfinished camera must never stream, and the
+    // filter happens in SQL so it cannot eat one of the four tile slots below.
+    std::vector<camera::Camera> cams = camera::runtime(db_);
     if (cams.size() > static_cast<size_t>(kMaxTiles)) {
         cams.resize(kMaxTiles);  // first four by id
     }

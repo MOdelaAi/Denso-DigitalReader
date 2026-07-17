@@ -222,15 +222,18 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     });
     footer->addWidget(back, 0);
 
-    // "Skip" said nothing about what it would do to the work on screen.
-    auto* skip = new QPushButton(QStringLiteral("Exit without saving"));
-    skip->setProperty("flatText", true);
-    connect(skip, &QPushButton::clicked, this, [this] {
+    // "Skip" said nothing about what it would do to the work on screen. The
+    // label is set again in set_unfinished(): for a camera whose setup is not
+    // finished, leaving here does NOT start it, and saying "without saving"
+    // would imply the rest of the wizard is being discarded too.
+    skip_btn_ = new QPushButton(QStringLiteral("Exit without saving"));
+    skip_btn_->setProperty("flatText", true);
+    connect(skip_btn_, &QPushButton::clicked, this, [this] {
         if (confirm_discard(QStringLiteral("Exit"))) {
             emit skip_requested();
         }
     });
-    footer->addWidget(skip, 0);
+    footer->addWidget(skip_btn_, 0);
     footer->addStretch(1);
 
     auto* refresh = new QPushButton(QStringLiteral("⟳ Refresh preview"));
@@ -287,6 +290,18 @@ void CameraAreasPage::show_save_error() {
         this, QStringLiteral("Could not save"),
         QStringLiteral("The areas could not be written to the database. Your "
                        "changes are still on screen — try Save again."));
+}
+
+void CameraAreasPage::set_unfinished(bool on) {
+    // Areas are OPTIONAL, so this page is a terminal step: saving here is what
+    // finishes an in-progress camera. Say that, rather than "Save areas", which
+    // reads as an isolated edit and leaves the operator unsure whether the
+    // camera is now running.
+    unfinished_ = on;
+    save_btn_->setText(on ? QStringLiteral("✓ Save areas & finish setup")
+                          : QStringLiteral("✓ Save areas"));
+    skip_btn_->setText(on ? QStringLiteral("Exit — leave setup unfinished")
+                          : QStringLiteral("Exit without saving"));
 }
 
 void CameraAreasPage::set_review_required(bool on) {

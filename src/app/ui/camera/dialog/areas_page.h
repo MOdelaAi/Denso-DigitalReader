@@ -44,6 +44,9 @@ public:
     /// Show/hide the "re-verify after a source change" banner. When on, the
     /// camera's zone reporting is paused until these areas are saved (verified).
     void set_review_required(bool on);
+    /// The camera's add wizard is not finished: saving here completes it, and
+    /// leaving does not start it. Relabels the terminal actions to say so.
+    void set_unfinished(bool on);
 
 signals:
     void back_requested();
@@ -95,6 +98,8 @@ private:
     QPushButton* cancel_btn_ = nullptr;
     QPushButton* done_btn_ = nullptr;
     QPushButton* save_btn_ = nullptr;
+    QPushButton* skip_btn_ = nullptr;
+    bool unfinished_ = false;
     QLabel* status_ = nullptr;
     QLabel* hint_ = nullptr;
     QLabel* review_banner_ = nullptr;  // "re-verify after source change" notice

@@ -190,6 +190,12 @@ void CameraWizardController::save_configured_camera() {
             return;
         }
     } else {
+        // Inserted UNFINISHED. The row has to exist from here on because
+        // attaching models needs a real id — but until the operator explicitly
+        // finishes, camera::runtime() ignores it, so backing out at Models leaves
+        // an inert draft in the list instead of a live, model-less camera that
+        // silently reports nothing.
+        draft_.setup_complete = false;
         const auto new_id = camera::insert(db_, draft_);
         if (!new_id.has_value()) {
             pages_.configure->show_error(QStringLiteral("Failed to save the camera."));
@@ -212,26 +218,44 @@ void CameraWizardController::enter_models() {
     show_page_(3);
 }
 
+bool CameraWizardController::save_models_only() {
+    if (!editing_id_.has_value()) {
+        return true;
+    }
+    // Honour the transactional write result: if it failed, the camera is NOT
+    // configured, so surface the error and stay on the Models page rather
+    // than silently reporting success and advancing (operator would believe
+    // detection is set up when nothing was saved — no readings, no reports).
+    if (!denso::detection::set_camera_models(
+            db_, *editing_id_, pages_.models->selections(*editing_id_))) {
+        QMessageBox::warning(
+            pages_.models, QStringLiteral("Save failed"),
+            QStringLiteral("Could not save the detection models for this "
+                           "camera. Please try again."));
+        return false;
+    }
+    emit cameras_changed();
+    return true;
+}
+
 void CameraWizardController::save_models() {
-    if (editing_id_.has_value()) {
-        // Honour the transactional write result: if it failed, the camera is NOT
-        // configured, so surface the error and stay on the Models page rather
-        // than silently reporting success and advancing (operator would believe
-        // detection is set up when nothing was saved — no readings, no reports).
-        if (!denso::detection::set_camera_models(
-                db_, *editing_id_, pages_.models->selections(*editing_id_))) {
-            QMessageBox::warning(
-                pages_.models, QStringLiteral("Save failed"),
-                QStringLiteral("Could not save the detection models for this "
-                               "camera. Please try again."));
-            return;
-        }
-        emit cameras_changed();
+    // "Next: Detection areas" — persist, then advance. NOT a finish: the camera
+    // stays unfinished until Areas is saved or whole-frame is chosen.
+    if (!save_models_only()) {
+        return;
     }
     enter_areas(/*direct=*/false);
 }
 
 void CameraWizardController::begin_areas_direct(const camera::Camera& cam) {
+    // Defense in depth, not just a hidden button: this shortcut skips the Models
+    // step, so letting an unfinished camera in would let save_areas() finish a
+    // camera that never chose a model. The list hides the entry point; the
+    // invariant lives here so a future caller can't reintroduce it.
+    if (!cam.setup_complete) {
+        begin_edit(cam);  // resume the wizard from the start instead
+        return;
+    }
     editing_id_ = cam.id;
     draft_ = cam;
     last_frame_ = QImage();
@@ -254,6 +278,9 @@ void CameraWizardController::enter_areas(bool direct) {
     // (replace_areas) clears the flag and resumes reporting.
     pages_.areas->set_review_required(editing_id_.has_value() &&
                                       draft_.areas_need_review);
+    // Saving here is what finishes an in-progress camera — the page relabels its
+    // terminal actions so neither one lies about that.
+    pages_.areas->set_unfinished(editing_id_.has_value() && !draft_.setup_complete);
     update_areas_background();
     show_page_(4);
 }
@@ -304,6 +331,93 @@ void CameraWizardController::save_areas(const std::vector<camera::CameraArea>& a
         pages_.areas->show_save_error();
         return;
     }
+    // Only now — the areas write landed, so the setup this finishes is real.
+    // If completion fails, STAY here: the operator pressed "Save areas & finish
+    // setup", and ejecting them to the list after warning that it did not finish
+    // turns their explicit Finish into a silent "leave unfinished". The areas are
+    // saved, so pressing it again just retries the completion.
+    if (!finish_setup(pages_.areas)) {
+        emit cameras_changed();  // the areas DID persist
+        return;
+    }
+    emit cameras_changed();
+    emit request_show_list();
+}
+
+bool CameraWizardController::finish_setup(QWidget* parent) {
+    // Ordering is the contract: only ever called AFTER the models/areas write
+    // this completes has itself succeeded. Completing first would let a failed
+    // write leave a live camera whose setup never actually landed — the exact
+    // bug this slice exists to remove, just later in the flow.
+    if (!editing_id_.has_value()) {
+        return true;  // nothing was inserted; nothing to finish
+    }
+    if (draft_.setup_complete) {
+        return true;  // editing an already-finished camera
+    }
+    if (!camera::mark_setup_complete(db_, *editing_id_)) {
+        QMessageBox::warning(
+            parent, QStringLiteral("Setup not finished"),
+            QStringLiteral("The camera's settings were saved, but it could not be "
+                           "marked as finished, so it will not start yet. Press "
+                           "Finish again to retry."));
+        return false;
+    }
+    draft_.setup_complete = true;
+    return true;
+}
+
+void CameraWizardController::finish_whole_frame() {
+    // The Models step's terminal action. ROI areas are optional — none means
+    // detect on the whole frame — so this is a real finish, not an "exit".
+    if (!save_models_only()) {
+        return;
+    }
+    if (!editing_id_.has_value()) {
+        return;
+    }
+    // "Use whole frame" has to MEAN it. Marking setup complete while the row
+    // still holds areas would leave the camera confined to those ROIs — the
+    // button would be lying. So the empty set is persisted, which means it can
+    // destroy hand-drawn work: name that consequence rather than doing it
+    // silently.
+    const std::vector<camera::CameraArea> existing =
+        camera::areas_for(db_, *editing_id_);
+    if (!existing.empty()) {
+        QStringList zones;
+        for (const camera::CameraArea& a : existing) {
+            if (a.zone) zones << QString::number(*a.zone);
+        }
+        QString msg = QStringLiteral(
+                          "Detect on the whole frame?\n\nThis camera's %1 "
+                          "detection area(s) will be deleted.")
+                          .arg(existing.size());
+        if (!zones.isEmpty()) {
+            msg += QStringLiteral(" Zone %1 will stop being reported.")
+                       .arg(zones.join(QStringLiteral(", ")));
+        }
+        if (QMessageBox::question(pages_.models, QStringLiteral("Use whole frame"),
+                                  msg, QMessageBox::Yes | QMessageBox::No,
+                                  QMessageBox::No) != QMessageBox::Yes) {
+            return;
+        }
+    }
+    // replace_areas also clears areas_need_review, which is right here: the
+    // quarantine exists to stop ROIs being trusted against an unverified view,
+    // and a camera with no ROIs has nothing to misalign and reports no zones.
+    if (!camera::replace_areas(db_, *editing_id_, {})) {
+        QMessageBox::warning(pages_.models, QStringLiteral("Save failed"),
+                             QStringLiteral("Could not clear this camera's "
+                                            "detection areas. Please try again."));
+        return;
+    }
+    draft_.areas_need_review = false;
+    // Stay on Models when completion fails: the selections are already saved, so
+    // the operator can just press Finish again rather than reopening the row.
+    if (!finish_setup(pages_.models)) {
+        return;
+    }
+    emit cameras_changed();
     emit request_show_list();
 }
 

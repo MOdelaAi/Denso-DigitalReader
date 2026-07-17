@@ -63,19 +63,39 @@ void CameraListPage::reload() {
                                                         : QStringLiteral("USB"));
         rl->addWidget(badge, 0);
 
+        // An unfinished camera is in this list but is NOT running — say so, or it
+        // reads as a working camera that inexplicably never appears in the grid.
+        // This is why the runtime filter needs a visible counterpart.
+        if (!cam.setup_complete) {
+            auto* draft = new QLabel(QStringLiteral("Setup unfinished — not running"));
+            draft->setProperty("warn", true);
+            rl->addWidget(draft, 0);
+        }
+
         const camera::Camera row_cam = cam;  // capture by value for the lambdas
 
-        auto* cfg = new QPushButton(QStringLiteral("Configure"));
+        auto* cfg = new QPushButton(cam.setup_complete
+                                        ? QStringLiteral("Configure")
+                                        : QStringLiteral("Continue setup"));
         cfg->setProperty("flatText", true);
+        if (!cam.setup_complete) {
+            cfg->setProperty("gold", true);  // the action that resolves the state
+        }
         connect(cfg, &QPushButton::clicked, this,
                 [this, row_cam] { emit configure_requested(row_cam); });
         rl->addWidget(cfg, 0);
 
-        auto* areas = new QPushButton(QStringLiteral("Areas"));
-        areas->setProperty("flatText", true);
-        connect(areas, &QPushButton::clicked, this,
-                [this, row_cam] { emit areas_requested(row_cam); });
-        rl->addWidget(areas, 0);
+        // The direct-Areas shortcut skips the Models step, so it must not be the
+        // route that finishes a half-set-up camera — that would let an operator
+        // complete setup without ever choosing a model. Unfinished rows go
+        // through "Continue setup" so completion stays in one place.
+        if (cam.setup_complete) {
+            auto* areas = new QPushButton(QStringLiteral("Areas"));
+            areas->setProperty("flatText", true);
+            connect(areas, &QPushButton::clicked, this,
+                    [this, row_cam] { emit areas_requested(row_cam); });
+            rl->addWidget(areas, 0);
+        }
 
         auto* del = new QPushButton(QStringLiteral("Delete"));
         del->setProperty("flatText", true);

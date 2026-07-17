@@ -57,16 +57,25 @@ ModelsPage::ModelsPage(QWidget* parent) : QWidget(parent) {
     root->addWidget(scroll, 1);
 
     // ── Footer ──
+    // TWO explicit terminal choices, because ROI areas are OPTIONAL: no areas
+    // means whole-frame detection, which is a legitimate configuration and must
+    // be reachable by a button that says so. Previously the only way to finish
+    // without areas was "Exit without saving" on the next step — a label that
+    // reads like a cancel while actually committing the camera.
     auto* footer = new QHBoxLayout;
     auto* back = new QPushButton(QStringLiteral("Back"));
-    // Models is a middle step (Areas follows); the primary button advances.
-    auto* finish = new QPushButton(QStringLiteral("Next"));
+    auto* whole_frame = new QPushButton(QStringLiteral("Finish — use whole frame"));
+    auto* next = new QPushButton(QStringLiteral("Next: Detection areas →"));
+    next->setProperty("gold", true);  // the recommended path
     footer->addWidget(back);
     footer->addStretch(1);
-    footer->addWidget(finish);
+    footer->addWidget(whole_frame);
+    footer->addWidget(next);
     root->addLayout(footer);
     connect(back, &QPushButton::clicked, this, &ModelsPage::back_requested);
-    connect(finish, &QPushButton::clicked, this, &ModelsPage::finish_requested);
+    connect(next, &QPushButton::clicked, this, &ModelsPage::next_requested);
+    connect(whole_frame, &QPushButton::clicked, this,
+            &ModelsPage::finish_whole_frame_requested);
 }
 
 ModelsPage::~ModelsPage() = default;

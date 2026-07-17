@@ -77,7 +77,10 @@ CameraView::CameraView(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
 }
 
 void CameraView::reload() {
-    const int n = static_cast<int>(camera::all(db_).size());
+    // Must match what CameraGrid will actually show: a database holding only
+    // unfinished drafts has nothing live, so this is the empty state even though
+    // the management list has rows to resume.
+    const int n = static_cast<int>(camera::runtime(db_).size());
     grid_->reload();  // rebuild + start streams (clears to nothing when n == 0)
     stack_->setCurrentIndex(n == 0 ? 0 : 1);
 }
