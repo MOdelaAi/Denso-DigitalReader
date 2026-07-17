@@ -179,6 +179,26 @@ cmd_verify() {
     # onto an untested platform.
     [ "$l4t" = "36.5.0" ] || { echo "  FAIL L4T is '${l4t:-unknown}', not the supported 36.5.0"; rc=1; }
 
+    # Assert the VERSIONS, not just presence: the package name `libnvinfer10`
+    # pins only the SONAME major, so it can hold any 10.x — while the shipped
+    # engines are built for TRT 10.3 exactly. Without this, a modified stack
+    # reaches engine deserialization with no baseline diagnosis: the operator
+    # sees a cryptic TensorRT error instead of "your CUDA/TRT is not the one
+    # this package was built for". build_package.sh asserts the same baseline on
+    # the build host; this is the target-side half of that contract.
+    for pv in "libnvinfer10:10.3.:TensorRT 10.3" "cuda-cudart-12-6:12.6.:CUDA 12.6"; do
+        p="${pv%%:*}"; rest="${pv#*:}"; want="${rest%%:*}"; human="${rest##*:}"
+        v="$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null || echo "")"
+        if [ -z "$v" ]; then
+            echo "  FAIL $p is not installed (need $human)"; rc=1
+        else
+            case "$v" in
+                "$want"*) echo "  ok  $p: $v" ;;
+                *) echo "  FAIL $p is $v, expected $human — the shipped engines are pinned to it"; rc=1 ;;
+            esac
+        fi
+    done
+
     echo "== gstreamer elements the capture ladder builds by name"
     for el in rtspsrc nvv4l2decoder nvvidconv appsink h264parse; do
         if gst-inspect-1.0 "$el" >/dev/null 2>&1; then echo "  ok  $el"
