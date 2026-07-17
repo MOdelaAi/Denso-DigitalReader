@@ -237,7 +237,9 @@ printf 'Inst libnvinfer10 (10.3.0.30-1+cuda12.5 [arm64])\n' > "$T/trt"
 apt_plan_ok "$T/trt" >/dev/null; rc_is "apt: touching libnvinfer* is refused" $? 1
 
 printf 'Inst cuda-cudart-12-6 (12.6.68-1 [arm64])\n' > "$T/cuda"
-apt_plan_ok "$T/cuda" >/dev/null; rc_is "apt: touching cuda-* is refused" $? 1
+apt_plan_ok "$T/cuda" >/dev/null; rc_is "apt: a MISSING JetPack component is refused, not auto-installed" $? 1
+apt_plan_ok "$T/cuda" 2>&1 | grep -q "Restore the supported JetPack" \
+  && ok "apt: the refusal tells the operator what to DO" || bad "apt: the refusal tells the operator what to DO"
 
 printf 'Inst nvidia-l4t-core (36.4.0 [arm64])\n' > "$T/l4t"
 apt_plan_ok "$T/l4t" >/dev/null; rc_is "apt: touching nvidia-l4t-* is refused" $? 1
@@ -376,8 +378,17 @@ apt_plan_ok() {
     while read -r verb pkg _rest; do
         case "$verb" in Inst|Conf) : ;; *) continue ;; esac
         case "$pkg" in
-            nvidia-l4t-*|cuda-*|libnvinfer*|libnvonnxparsers*|tensorrt*)
-                echo "apt-plan: REFUSED — the plan touches a protected JetPack package: $pkg" >&2
+            nvidia-l4t-*|cuda-*|libnvinfer*|libnvonnxparsers*|libcudla*|tensorrt*)
+                # We legitimately DEPEND on some of these (we link libcudart and
+                # libnvinfer). On a correctly-provisioned box they are already
+                # installed, so a plan mentions them only when the box is MISSING
+                # a JetPack component — which means it is outside the supported
+                # baseline and the app could not run anyway. Refusing is correct;
+                # auto-repairing would mix repo and JetPack components, the exact
+                # risk this guard exists for. So say THAT, not "protected".
+                echo "apt-plan: REFUSED — required JetPack component '$pkg' is missing from this box." >&2
+                echo "  Denso never installs or modifies CUDA, TensorRT or L4T packages." >&2
+                echo "  Restore the supported JetPack 6.2 / L4T R36.5.0 stack, then retry." >&2
                 return 1 ;;
         esac
         # Ubuntu's OpenCV (libopencv-*4.5d, libopencv-dev from the Ubuntu repo)
@@ -580,9 +591,19 @@ sidecar is the guarantee we can actually offer."
 # dependency silently while still looking derived. Supplying the mapping keeps
 # the distro's own tool working, which is what the spec asks for.
 #
+# EVERY line here is verified at build time (build_package.sh asserts the named
+# package really owns a library with that SONAME on this box, and is installed).
+# That check is not ceremony: this file OVERRIDES authoritative package metadata
+# and dpkg-shlibdeps trusts it blindly — it will happily emit a dependency on a
+# package that does not exist. An earlier draft of this very file mapped libcudla
+# to `nvidia-l4t-cuda`; `dpkg -S` says the real owner is `libcudla-12-6`, so the
+# package would have declared a dependency nothing provides and `apt install`
+# would have failed on a correctly-provisioned box. Locally supplied metadata
+# needs an ownership invariant, not just successful generation.
+#
 # Format: <library-name> <soname-version> <dependency>
 libcudart 12 cuda-cudart-12-6
-libcudla 1 nvidia-l4t-cuda
+libcudla 1 libcudla-12-6
 libopencv_core 408 libopencv (>= 4.8.0)
 libopencv_imgproc 408 libopencv (>= 4.8.0)
 libopencv_imgcodecs 408 libopencv (>= 4.8.0)
@@ -1297,6 +1318,31 @@ ARCH="$(dpkg --print-architecture)"
 # derived) — it is packaging/debian/shlibs.local, which supplies exactly that
 # missing metadata. Verified on the Jetson: with it, shlibdeps exits 0 and emits
 # the full version-constrained set including libnvinfer10 and libc6.
+# ── shlibs.local is only trustworthy if its mappings are TRUE on this box.
+# dpkg-shlibdeps trusts this file blindly and will emit a dependency on a
+# package that does not exist (an earlier draft mapped libcudla -> nvidia-l4t-cuda;
+# the real owner is libcudla-12-6, so `apt install` would have failed on a
+# correct box). Assert ownership before using it.
+echo ">> verifying packaging/debian/shlibs.local mappings against this box"
+bad_map=0
+while read -r libname sover dep _rest; do
+    case "${libname-}" in ''|'#'*) continue ;; esac
+    dep="${dep%%(*}"; dep="${dep// /}"     # strip any version constraint
+    lib="$(ldconfig -p | awk -v s="$libname.so.$sover" '$1==s {print $NF; exit}')"
+    [ -n "$lib" ] || lib="$(ldd "$EXE" | awk -v s="$libname.so.$sover" '$1==s {print $3; exit}')"
+    if [ -z "$lib" ] || [ ! -e "$lib" ]; then
+        echo "   BAD  $libname.so.$sover — not resolvable on this box" >&2; bad_map=1; continue
+    fi
+    owner="$(dpkg-query -S "$(readlink -f "$lib")" 2>/dev/null | cut -d: -f1 | head -1)"
+    if [ "$owner" != "$dep" ]; then
+        echo "   BAD  $libname.so.$sover -> mapped to '$dep' but dpkg says '${owner:-<unowned>}'" >&2; bad_map=1; continue
+    fi
+    dpkg-query -W -f='${Status}' "$dep" 2>/dev/null | grep -q "install ok installed" || {
+        echo "   BAD  mapped package '$dep' is not installed" >&2; bad_map=1; continue; }
+    echo "   ok   $libname.so.$sover -> $dep"
+done < packaging/debian/shlibs.local
+[ "$bad_map" = "0" ] || { echo "shlibs.local has wrong mappings — fix them; shlibdeps trusts this file blindly" >&2; exit 1; }
+
 echo ">> deriving Depends: with dpkg-shlibdeps"
 SHLIBDIR="$(mktemp -d)"
 mkdir -p "$SHLIBDIR/debian"
@@ -1428,26 +1474,46 @@ ssh modela@192.168.1.15 'cd ~/project/Denso-DigitalReader &&
 ```
 Expected: `dpkg -l` shows `ii denso-digitalreader`; `configure` seeds `digitv2.engine` into `/opt/denso/data/models`; `verify` prints `verify: PASS`.
 
-- [ ] **Step 4: The gates that matter**
+- [ ] **Step 4: Ownership + PATH**
 
 ```sh
 ssh modela@192.168.1.15 '
-set -x
-# data dir is operator-owned, NOT root — the whole ownership contract
-ls -ld /opt/denso/data /opt/denso/data/models
-# the launcher works and is on PATH
-which denso-digitalreader
-# prerm REFUSES while the app runs (start it headless-ish, then try to remove)
-# (run this one from the AnyDesk desktop session, not SSH — it needs a display)
-# apt remove KEEPS data; apt purge removes it
-sudo apt remove -y denso-digitalreader
-ls /opt/denso/data/models    # engines MUST still be here
-sudo apt install -y ./denso-digitalreader_*.deb   # reinstall for the purge test
+ls -ld /opt/denso/data /opt/denso/data/models   # MUST be modela-owned, not root
+ls -l  /opt/denso/data/models                   # digitv2.engine + .names.json, modela-owned
+which denso-digitalreader                       # /usr/bin/denso-digitalreader
 '
 ```
-Expected: `/opt/denso/data` owned by `modela:modela`; `which` → `/usr/bin/denso-digitalreader`; after `apt remove` the engines survive.
+Expected: every path under `/opt/denso/data` owned by `modela`. **A single root-owned file here is a failure**, not cosmetics — it is the poisoning the whole run-as-target-user rule exists to prevent, and it surfaces later as an app that cannot write its own log.
 
-- [ ] **Step 5: Upgrade preserves state**
+- [ ] **Step 5: `prerm` refuses while the app is running** — run from the **AnyDesk desktop session** (`d:\workspace\devices.md`), because the app needs a display to be running at all:
+
+```sh
+denso-digitalreader &            # start it; wait for the window
+denso-digitalreader --check-running; echo "rc=$?"    # expect rc=0 (running)
+sudo apt remove -y denso-digitalreader; echo "remove rc=$?"
+```
+Expected: `remove rc` is **non-zero**, apt reports the prerm failure, and the message is `denso: the application is running; close it before upgrading or removing.`
+**Postconditions — check all three:** the app is **still running**; `dpkg -l denso-digitalreader` still shows `ii`; and `ls ~/.config/autostart/` still contains the entry (the ordering fix — a *refused* removal must not have unconfigured anything).
+
+Then close the app and confirm removal now works:
+```sh
+denso-digitalreader --check-running; echo "rc=$?"    # expect rc=1 (not running)
+sudo apt remove -y denso-digitalreader; echo "remove rc=$?"   # expect 0
+```
+
+- [ ] **Step 6: `remove` keeps data; `purge` destroys only the right thing**
+
+```sh
+ls -l /opt/denso/data/models/digitv2.engine && echo "ok: remove KEPT the engines"
+ls -l /opt/denso/data/denso.db 2>/dev/null   && echo "ok: remove KEPT the database"
+sudo apt install -y ./denso-digitalreader_*.deb    # reinstall
+sudo denso-setup configure --user modela           # removal reverted config — reconfigure
+sudo apt purge -y denso-digitalreader; echo "purge rc=$?"
+ls /opt/denso/data 2>&1                            # expect: No such file or directory
+```
+Expected: `remove` leaves the engines and database intact; `purge` removes `/opt/denso/data`.
+
+- [ ] **Step 7: Upgrade preserves state**
 
 ```sh
 ssh modela@192.168.1.15 '
@@ -1459,7 +1525,7 @@ ls /opt/denso/data/models/digitv2.engine && echo "ok: engine survived the upgrad
 '
 ```
 
-- [ ] **Step 6: Commit any fixes, then record results**
+- [ ] **Step 8: Commit any fixes, then record results**
 
 Append the observed output to the plan's execution notes or the ledger. Do not mark Task 7 done on anything less than: build ok, `verify: PASS`, data operator-owned, remove-keeps-data, upgrade-preserves-state.
 
@@ -1497,7 +1563,10 @@ Wait ~60s, then from the **AnyDesk session** confirm:
 - the box reached a desktop **without anyone typing a password**;
 - Denso Digital Reader is **running**;
 - `loginctl show-session $XDG_SESSION_ID -p Type` — **record whether it is x11 or wayland.** This is the open question the spec flagged: the greeter is X11, but the user session type was never observed. If it is `wayland`, decide then whether the launcher must pin `QT_QPA_PLATFORM=xcb` — do not pin it before observing.
-- `denso --check-running` → **exit 0** (it is running);
+- `denso-digitalreader --check-running` → **exit 0** (it is running). Use the
+  **launcher**, not `/opt/denso/bin/denso`: it is the stable public command, it
+  forwards `"$@"`, and it supplies the right `DENSO_DATA_DIR`. `/opt/denso/bin/denso`
+  is an internal payload path — never teach an operator to depend on it;
 - `/opt/denso/data/denso.log` has a fresh `SESSION start` line;
 - the camera grid recovers (cameras + network come up after the app does — the app must tolerate their absence, it does not wait for them).
 
