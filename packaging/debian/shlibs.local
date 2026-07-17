@@ -16,11 +16,18 @@
 # would have failed on a correctly-provisioned box. Locally supplied metadata
 # needs an ownership invariant, not just successful generation.
 #
+# ONLY DIRECT `NEEDED` sonames belong here. A mapping for a transitive library
+# is dead weight that rots silently: dpkg-shlibdeps only consults direct
+# dependencies, and the owning package handles its own. Two dead entries were
+# removed after `objdump -p denso | grep NEEDED` showed the real set is
+# libcudart.so.12 + libopencv_{core,imgproc,videoio,dnn}.so.408 — libcudla
+# (transitive via TensorRT) and libopencv_imgcodecs were never linked directly.
+# If a future build DOES link one, shlibdeps fails loudly with 'no dependency
+# information found' and the line comes back — which is the behaviour we want.
+#
 # Format: <library-name> <soname-version> <dependency>
 libcudart 12 cuda-cudart-12-6
-libcudla 1 libcudla-12-6
 libopencv_core 408 libopencv (>= 4.8.0)
 libopencv_imgproc 408 libopencv (>= 4.8.0)
-libopencv_imgcodecs 408 libopencv (>= 4.8.0)
 libopencv_videoio 408 libopencv (>= 4.8.0)
 libopencv_dnn 408 libopencv (>= 4.8.0)

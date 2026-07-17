@@ -7,10 +7,12 @@ Priority: optional
 Depends: @SHLIBS_DEPENDS@,
          qt6-qpa-plugins (>= 6.2.4),
          libqt6sql6-sqlite (>= 6.2.4),
+         gstreamer1.0-tools,
          gstreamer1.0-plugins-base,
          gstreamer1.0-plugins-good,
          gstreamer1.0-plugins-bad,
          gstreamer1.0-libav,
+         nvidia-l4t-gstreamer,
          network-manager
 Description: Denso Digital Reader
  Reads 4-digit 7-segment displays from live cameras and reports each ROI's
