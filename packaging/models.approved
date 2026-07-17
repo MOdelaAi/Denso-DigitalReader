@@ -1,11 +1,16 @@
 # Approved production models. build_package.sh --model <path> REFUSES anything
-# not listed here with a matching SHA-256.
+# not listed here with a matching SHA-256 for BOTH the engine and its sidecar.
 #
 # This is why model selection is not a models/*.engine glob: a glob is accidental
 # directory-content selection, and models/ is git-ignored, so a forgotten
 # experimental engine with a valid sidecar would silently reach production.
 #
-# Format: <stem> <sha256-of-.engine> <trtexec recipe used to build it>
+# The PAIR is approved, not just the engine: TrtEngine's ctor reads
+# <stem>.names.json for class names, so a wrong/modified sidecar changes
+# application semantics just as much as a wrong engine, and would otherwise
+# ship unchecked as long as the engine hash matched.
 #
-# To approve a new engine: build it on-device, sha256sum it, add the line.
-digitv2 29b24a69fcee995485b075715c0008e8e1ab938c4d0ace3c9d560bc3278a4356 trtexec --onnx=digitv2.onnx --saveEngine=digitv2.engine --fp16
+# Format: <stem> <sha256-of-.engine> <sha256-of-.names.json> <trtexec recipe used to build it>
+#
+# To approve a new engine: build it on-device, sha256sum both files, add the line.
+digitv2 29b24a69fcee995485b075715c0008e8e1ab938c4d0ace3c9d560bc3278a4356 47538d1023947674faffb92a905429bc9deaa0890f0549d4c1bed1d1a33f9026 trtexec --onnx=digitv2.onnx --saveEngine=digitv2.engine --fp16

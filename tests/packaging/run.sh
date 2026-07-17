@@ -260,9 +260,26 @@ is "leak: s2 unchanged after seed_decision_pair"     "$s2"          "SENTINEL_s2
 . "$HERE/../../packaging/lib/gen_preflight.sh"
 PF="$T/pf"
 mkdir -p "$PF/bin"
-emit_preflight_script "$HERE/../../packaging/lib/policy.sh" "$PF/preflight-denso.sh"
+
+# A real (non-empty, content-distinguishable) fake .deb so its SHA-256 means
+# something for the binding tests below -- plus a second, DIFFERENT fake .deb
+# to prove a mismatched artifact is refused.
+printf 'not a real deb, just needs a stable sha256\n' > "$PF/fake.deb"
+FAKE_DEB_SHA="$(sha256sum "$PF/fake.deb" | cut -d' ' -f1)"
+printf 'a DIFFERENT fake deb -- must never be accepted by a guard generated for fake.deb\n' > "$PF/other.deb"
+
+emit_preflight_script "$HERE/../../packaging/lib/policy.sh" "$PF/preflight-denso.sh" "$FAKE_DEB_SHA"
 [ -x "$PF/preflight-denso.sh" ] && ok "preflight: generated standalone script is executable" \
     || bad "preflight: generated standalone script is executable"
+
+# Finding 7: emit_preflight_script must run in a SUBSHELL so its locals
+# (policy/out/deb_sha/tmp) cannot leak into the caller -- the exact defect
+# already fixed across every function in packaging/lib/policy.sh, and
+# build_package.sh sources both files into the same shell.
+policy="SENTINEL_policy"; out="SENTINEL_out"
+emit_preflight_script "$HERE/../../packaging/lib/policy.sh" "$PF/leak-check.sh" "$FAKE_DEB_SHA" >/dev/null
+is "leak: policy unchanged after emit_preflight_script" "$policy" "SENTINEL_policy"
+is "leak: out unchanged after emit_preflight_script"    "$out"    "SENTINEL_out"
 
 # Fake `id` (the standalone driver root-checks) and a fake `apt-get -s install`
 # that just replays a FIXTURE plan file's content -- this is how a plan file
@@ -283,7 +300,6 @@ cat "$FAKE_APT_PLAN"
 exit 0
 EOF
 chmod +x "$PF/bin/id" "$PF/bin/apt-get"
-: > "$PF/fake.deb"
 
 compare_guards() {
     label="$1"; fixture="$2"; want_rc="$3"
@@ -301,6 +317,22 @@ compare_guards() {
 compare_guards "preflight-drift: plain install"       "$T/plain"  0
 compare_guards "preflight-drift: plan with a removal" "$T/remove" 1
 compare_guards "preflight-drift: plan touching cuda-*" "$T/cuda"  1
+
+# Finding 6: the generated preflight is bound to the ONE .deb it was
+# generated for by an EMBEDDED SHA-256, not just a filename convention -- an
+# operator must not be able to pair an old guard with a new .deb. FAKE_APT_PLAN
+# is set to the PLAIN (allowed) fixture for both calls below, so if the
+# checksum gate did not run before the apt simulation, "$PF/other.deb" would
+# sail through to a false PASS -- proving the hash check gates the simulation,
+# not just that a mismatch is somehow eventually noticed.
+FAKE_APT_PLAN="$T/plain" PATH="$PF/bin:$PATH" "$PF/preflight-denso.sh" "$PF/fake.deb" >/dev/null 2>&1
+rc_is "preflight-binding: accepts the .deb it was generated for" $? 0
+
+FAKE_APT_PLAN="$T/plain" PATH="$PF/bin:$PATH" "$PF/preflight-denso.sh" "$PF/other.deb" >"$PF/mismatch.out" 2>&1
+rc_is "preflight-binding: refuses a .deb whose SHA-256 does not match" $? 1
+grep -q "is not the .deb this preflight script was generated for" "$PF/mismatch.out" \
+    && ok "preflight-binding: refusal names the mismatch" \
+    || bad "preflight-binding: refusal names the mismatch"
 
 rm -rf "$T"
 echo; echo "passed: $pass   failed: $fail"

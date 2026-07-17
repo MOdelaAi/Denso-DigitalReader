@@ -25,6 +25,39 @@ done
 
 cd "$HERE"
 
+# ── JetPack 6.2 / L4T R36.5.0 platform contract — HARD-enforced, not just
+# aarch64. An aarch64 box running a different L4T/TensorRT/CUDA stack can
+# still produce a package whose control file and MANIFEST swear R36.5/JP6.2
+# while the shipped engines are pinned to TRT 10.3 / sm_87 — this is a
+# build-time contract, so a warning is not enough; refuse the build outright.
+# Same L4T-parsing expression `denso-setup verify` uses (packaging/denso-setup)
+# so the two checks can never quietly diverge on what "36.5.0" means.
+echo ">> verifying build-host platform contract (JetPack 6.2 / L4T R36.5.0)"
+CONTRACT_FAIL=0
+DPKG_ARCH="$(dpkg --print-architecture)"
+if [ "$DPKG_ARCH" = "arm64" ]; then
+    echo "   ok   dpkg architecture: $DPKG_ARCH"
+else
+    echo "   FAIL dpkg architecture is '$DPKG_ARCH', expected arm64" >&2
+    CONTRACT_FAIL=1
+fi
+L4T="$(sed -n 's/^# R\([0-9]*\).*REVISION: \([0-9.]*\).*/\1.\2/p' /etc/nv_tegra_release 2>/dev/null | head -1)"
+if [ "$L4T" = "36.5.0" ]; then
+    echo "   ok   L4T: $L4T"
+else
+    echo "   FAIL L4T is '${L4T:-unknown}', expected exactly 36.5.0 -- the shipped engines are TRT 10.3/sm_87 pinned to this image" >&2
+    CONTRACT_FAIL=1
+fi
+for pkg in libnvinfer10 cuda-cudart-12-6; do
+    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
+        echo "   ok   $pkg installed"
+    else
+        echo "   FAIL $pkg is not installed" >&2
+        CONTRACT_FAIL=1
+    fi
+done
+[ "$CONTRACT_FAIL" = "0" ] || { echo "build-host platform contract not satisfied -- refusing to build a package that would misrepresent its target platform" >&2; exit 1; }
+
 # ── version: 0.1.0+g<sha>, dirty-marked. It becomes a dpkg field AND a path.
 APP_VERSION="$(sed -n 's/.*APP_VERSION="\([^"]*\)".*/\1/p' src/app/CMakeLists.txt | head -1)"
 SHA="$(git rev-parse --short HEAD)"
@@ -41,16 +74,31 @@ version_ok "$VERSION" || { echo "computed version is not a safe path component: 
 echo ">> version: $VERSION"
 
 # ── models: explicit, and hash-checked against the tracked approval manifest.
+# The PAIR is approved, never the engine alone: TrtEngine's ctor reads
+# <stem>.names.json for class names, so a wrong/modified sidecar changes
+# application semantics exactly as much as a wrong engine would, and would
+# otherwise ship unchecked as long as the engine's own hash matched.
+SEEN_STEMS=""
 for m in "${MODELS[@]}"; do
     [ -f "$m" ] || { echo "no such engine: $m" >&2; exit 1; }
     stem="$(basename "$m" .engine)"
+    # Reject a duplicate stem BEFORE staging: passing the same --model twice
+    # would silently overwrite during `install -m` staging and the MANIFEST
+    # would list the same model twice — neither failure is loud.
+    case " $SEEN_STEMS " in
+        *" $stem "*) echo "duplicate --model stem '$stem' -- pass each engine once" >&2; exit 1 ;;
+    esac
+    SEEN_STEMS="$SEEN_STEMS $stem"
     side="$(dirname "$m")/$stem.names.json"
     [ -f "$side" ] || { echo "engine $stem has no sidecar: $side" >&2; exit 1; }
-    want="$(awk -v s="$stem" '$1==s {print $2}' packaging/models.approved)"
-    [ -n "$want" ] || { echo "engine '$stem' is not in packaging/models.approved — approve it explicitly" >&2; exit 1; }
-    got="$(sha256sum "$m" | cut -d' ' -f1)"
-    [ "$want" = "$got" ] || { echo "engine '$stem' HASH MISMATCH:" >&2; echo "  approved: $want" >&2; echo "  actual:   $got" >&2; exit 1; }
-    echo ">> model approved: $stem ($got)"
+    want_eng="$(awk -v s="$stem" '$1==s {print $2}' packaging/models.approved)"
+    want_side="$(awk -v s="$stem" '$1==s {print $3}' packaging/models.approved)"
+    [ -n "$want_eng" ] && [ -n "$want_side" ] || { echo "engine '$stem' is not in packaging/models.approved — approve it explicitly" >&2; exit 1; }
+    got_eng="$(sha256sum "$m" | cut -d' ' -f1)"
+    got_side="$(sha256sum "$side" | cut -d' ' -f1)"
+    [ "$want_eng" = "$got_eng" ] || { echo "engine '$stem' HASH MISMATCH:" >&2; echo "  approved: $want_eng" >&2; echo "  actual:   $got_eng" >&2; exit 1; }
+    [ "$want_side" = "$got_side" ] || { echo "engine '$stem' SIDECAR HASH MISMATCH:" >&2; echo "  approved: $want_side" >&2; echo "  actual:   $got_side" >&2; exit 1; }
+    echo ">> model approved: $stem (engine $got_eng, sidecar $got_side)"
 done
 
 # ── build
@@ -81,7 +129,7 @@ for m in "${MODELS[@]}"; do
 done
 for s in postinst prerm postrm; do install -m 0755 "packaging/debian/$s" "$STAGE/DEBIAN/$s"; done
 
-ARCH="$(dpkg --print-architecture)"
+ARCH="$DPKG_ARCH"   # already verified == arm64 by the platform contract above
 
 # ── DEPENDENCY DERIVATION — the distro's own tool, as the spec asks.
 #
@@ -97,24 +145,56 @@ ARCH="$(dpkg --print-architecture)"
 # the real owner is libcudla-12-6, so `apt install` would have failed on a
 # correct box). Assert ownership before using it.
 echo ">> verifying packaging/debian/shlibs.local mappings against this box"
+# The set of SONAMEs the exe actually, directly, links against -- the ONLY
+# thing shlibs.local mappings are allowed to correspond to. dpkg-shlibdeps
+# only ever consults DIRECT NEEDED entries, so a mapping for anything else
+# (a transitive lib, or one that stopped being linked) is dead weight that
+# rots silently while still looking correctly-owned; two such entries already
+# had to be found and removed by hand (libcudla, libopencv_imgcodecs).
+NEEDED="$(objdump -p "$EXE" | awk '/NEEDED/{print $2}')"
 bad_map=0
-while read -r libname sover dep _rest; do
+while read -r libname sover dep rest; do
     case "${libname-}" in ''|'#'*) continue ;; esac
-    dep="${dep%%(*}"; dep="${dep// /}"     # strip any version constraint
-    lib="$(ldconfig -p | awk -v s="$libname.so.$sover" '$1==s {print $NF; exit}')"
-    [ -n "$lib" ] || lib="$(ldd "$EXE" | awk -v s="$libname.so.$sover" '$1==s {print $3; exit}')"
+    dep="${dep%%(*}"; dep="${dep// /}"     # defensive: dep should already be bare
+    soname="$libname.so.$sover"
+
+    if ! printf '%s\n' "$NEEDED" | grep -qxF "$soname"; then
+        echo "   BAD  $soname is mapped in shlibs.local but is not a direct NEEDED entry of $EXE (dead mapping — remove it)" >&2
+        bad_map=1; continue
+    fi
+
+    lib="$(ldconfig -p | awk -v s="$soname" '$1==s {print $NF; exit}')"
+    [ -n "$lib" ] || lib="$(ldd "$EXE" | awk -v s="$soname" '$1==s {print $3; exit}')"
     if [ -z "$lib" ] || [ ! -e "$lib" ]; then
-        echo "   BAD  $libname.so.$sover — not resolvable on this box" >&2; bad_map=1; continue
+        echo "   BAD  $soname — not resolvable on this box" >&2; bad_map=1; continue
     fi
     owner="$(dpkg-query -S "$(readlink -f "$lib")" 2>/dev/null | cut -d: -f1 | head -1)"
     if [ "$owner" != "$dep" ]; then
-        echo "   BAD  $libname.so.$sover -> mapped to '$dep' but dpkg says '${owner:-<unowned>}'" >&2; bad_map=1; continue
+        echo "   BAD  $soname -> mapped to '$dep' but dpkg says '${owner:-<unowned>}'" >&2; bad_map=1; continue
     fi
     dpkg-query -W -f='${Status}' "$dep" 2>/dev/null | grep -q "install ok installed" || {
         echo "   BAD  mapped package '$dep' is not installed" >&2; bad_map=1; continue; }
-    echo "   ok   $libname.so.$sover -> $dep"
+
+    # A bare package-name match is not enough: shlibdeps will happily emit an
+    # UNSATISFIABLE `libopencv (>= 999)` if this file lies about the floor, and
+    # that only fails at `apt install` time on the appliance -- far from here.
+    if [ -n "$rest" ]; then
+        floor="$(printf '%s' "$rest" | sed -n 's/^(>= \(.*\))$/\1/p')"
+        if [ -z "$floor" ]; then
+            echo "   BAD  $soname -> unsupported version-constraint syntax '$rest' (only '(>= X)' is handled)" >&2
+            bad_map=1; continue
+        fi
+        installed_ver="$(dpkg-query -W -f='${Version}' "$dep" 2>/dev/null)"
+        if ! dpkg --compare-versions "$installed_ver" ge "$floor"; then
+            echo "   BAD  $soname -> $dep declares floor >= $floor but installed is '$installed_ver'" >&2
+            bad_map=1; continue
+        fi
+        echo "   ok   $soname -> $dep (>= $floor, installed $installed_ver)"
+    else
+        echo "   ok   $soname -> $dep"
+    fi
 done < packaging/debian/shlibs.local
-[ "$bad_map" = "0" ] || { echo "shlibs.local has wrong mappings — fix them; shlibdeps trusts this file blindly" >&2; exit 1; }
+[ "$bad_map" = "0" ] || { echo "shlibs.local has wrong/dead mappings — fix them; shlibdeps trusts this file blindly" >&2; exit 1; }
 
 echo ">> deriving Depends: with dpkg-shlibdeps"
 SHLIBDIR="$(mktemp -d)"
@@ -126,25 +206,33 @@ Architecture: %s
 Depends: ${shlibs:Depends}
 Description: x
 ' "$ARCH" > "$SHLIBDIR/debian/control"
-mkdir -p "$SHLIBDIR/debian/denso-digitalreader"
-cp "$EXE" "$SHLIBDIR/debian/denso-digitalreader/denso"
+# Stage at the REAL package path, opt/denso/bin/denso, not a bare filename
+# under debian/denso-digitalreader/. dpkg-shlibdeps expects the binary to
+# already be installed at its package-relative location -- staging it at the
+# wrong path is exactly what produces its "binaries to analyze should already
+# be installed in their package's directory" warning.
+mkdir -p "$SHLIBDIR/debian/denso-digitalreader/opt/denso/bin"
+cp "$EXE" "$SHLIBDIR/debian/denso-digitalreader/opt/denso/bin/denso"
 # NO --ignore-missing-info: if this errors, a dependency is genuinely
 # underivable and shlibs.local needs a line — do not paper over it.
-SHLIBS_LINE="$( cd "$SHLIBDIR" && dpkg-shlibdeps -O debian/denso-digitalreader/denso )" || {
+SHLIBS_LINE="$( cd "$SHLIBDIR" && dpkg-shlibdeps -O debian/denso-digitalreader/opt/denso/bin/denso )" || {
     echo "dpkg-shlibdeps FAILED — add the missing SONAME to packaging/debian/shlibs.local" >&2
     rm -rf "$SHLIBDIR"; exit 1; }
 rm -rf "$SHLIBDIR"
+# Require exactly the expected shape with a non-empty suffix: any non-empty
+# output lacking the "shlibs:Depends=" prefix (a warning line, a different
+# -O field, malformed output) must never silently become SHLIBS_DEPENDS.
+case "$SHLIBS_LINE" in
+    shlibs:Depends=?*) : ;;
+    *) echo "dpkg-shlibdeps produced unexpected output: '$SHLIBS_LINE'" >&2; exit 1 ;;
+esac
 SHLIBS_DEPENDS="${SHLIBS_LINE#shlibs:Depends=}"
-[ -n "$SHLIBS_DEPENDS" ] || { echo "shlibdeps produced an EMPTY Depends — refusing" >&2; exit 1; }
 echo "   derived: $SHLIBS_DEPENDS"
 
 sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$SHLIBS_DEPENDS|"     packaging/debian/control.in > "$STAGE/DEBIAN/control"
 
-# md5sums: `dpkg-deb --build` does NOT generate these, and without them
-# `dpkg -V` verifies nothing — the payload-integrity claim would be empty.
-( cd "$STAGE" && find . -type f ! -path './DEBIAN/*' -printf '%P\0'     | xargs -0 md5sum > DEBIAN/md5sums )
-
-# ── MANIFEST: what this artifact IS, for after-the-fact diagnosis.
+# ── MANIFEST: what this artifact IS, for after-the-fact diagnosis. Written
+# BEFORE md5sums so md5sums covers it too (see below).
 {
     echo "package: denso-digitalreader"
     echo "version: $VERSION"
@@ -163,24 +251,39 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$
     for m in "${MODELS[@]}"; do
         stem="$(basename "$m" .engine)"
         echo "model: $stem engine-sha256=$(sha256sum "$m" | cut -d' ' -f1) sidecar-sha256=$(sha256sum "$(dirname "$m")/$stem.names.json" | cut -d' ' -f1)"
-        echo "model-recipe: $stem $(awk -v s="$stem" '$1==s {$1="";$2="";print}' packaging/models.approved | sed 's/^  *//')"
+        echo "model-recipe: $stem $(awk -v s="$stem" '$1==s {$1="";$2="";$3="";print}' packaging/models.approved | sed 's/^  *//')"
     done
     echo "--- ldd report (diagnostic evidence, not a dependency source) ---"
     ldd "$EXE"
 } > "$STAGE/opt/denso/MANIFEST"
 
+# md5sums: MUST be the LAST payload write before dpkg-deb --build. Generating
+# it any earlier (e.g. before MANIFEST is staged) means `dpkg -V` never
+# verifies MANIFEST at all — the file that documents what this artifact IS
+# would be the one thing integrity-checking silently skips. `dpkg-deb --build`
+# itself does not generate md5sums, and without them `dpkg -V` verifies
+# nothing.
+( cd "$STAGE" && find . -type f ! -path './DEBIAN/*' -printf '%P\0'     | xargs -0 md5sum > DEBIAN/md5sums )
+
 # ── build the .deb
 OUT="denso-digitalreader_${VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$OUT" >/dev/null
 sha256sum "$OUT" > "$OUT.sha256"
+DEB_SHA256="$(cut -d' ' -f1 "$OUT.sha256")"
 
 # ── PREFLIGHT GUARD, standalone: `denso-setup preflight` cannot protect a
 # FIRST install, because denso-setup does not exist on the box until the .deb
 # containing it is already installed. So we ALSO emit a standalone guard next
 # to the .deb that works with nothing but this .deb and a shell — generated by
 # the one shared emitter in packaging/lib/gen_preflight.sh (see there for why).
-PREFLIGHT_OUT="preflight-denso.sh"
-emit_preflight_script "packaging/lib/policy.sh" "$PREFLIGHT_OUT"
+#
+# The filename is VERSIONED and the .deb's own SHA-256 is embedded in it: every
+# build used to overwrite the same preflight-denso.sh, so an operator could
+# pair an OLD guard with a NEW .deb with no error at all. Binding the guard to
+# the ONE artifact it was generated for (both by name and by checksum) makes
+# that pairing mistake fail loudly instead of silently passing.
+PREFLIGHT_OUT="preflight-denso-${VERSION}.sh"
+emit_preflight_script "packaging/lib/policy.sh" "$PREFLIGHT_OUT" "$DEB_SHA256"
 
 echo
 echo ">> built $OUT"
