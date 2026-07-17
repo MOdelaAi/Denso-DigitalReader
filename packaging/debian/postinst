@@ -1,0 +1,37 @@
+#!/bin/sh
+# Structural only, and idempotent: dpkg may re-invoke this during recovery, and
+# a failure here leaves the package unconfigured and blocks later apt runs.
+# Everything with judgement (target user, autostart, autologin, validation)
+# lives in `denso-setup`, which the operator runs explicitly afterwards.
+set -e
+
+case "$1" in
+  configure)
+    DATA=/opt/denso/data
+    STATE=/opt/denso/install-state
+
+    mkdir -p "$DATA/models" "$STATE"
+    chmod 0755 "$STATE"
+
+    # If denso-setup has already recorded a target user (i.e. this is an
+    # UPGRADE), keep the data dir owned by them. On a FIRST install nobody has
+    # chosen a user yet, so leave ownership alone — `denso-setup configure
+    # --user <u>` sets it. Guessing here (e.g. from SUDO_USER) is exactly the
+    # trust mistake the spec forbids.
+    if [ -r "$STATE/user" ]; then
+        user="$(cat "$STATE/user")"
+        if id "$user" >/dev/null 2>&1; then
+            chown -R "$user":"$user" "$DATA" || true
+        fi
+    fi
+
+    echo "denso: installed. Next:"
+    echo "  sudo denso-setup configure --user <username> [--autostart] [--enable-autologin]"
+    echo "  denso-setup verify"
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

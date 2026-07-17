@@ -1,0 +1,36 @@
+#!/bin/sh
+# `remove` keeps ALL operator data. Only `purge` deletes it, behind a
+# resolved-path guard.
+set -e
+
+case "$1" in
+  purge)
+    DATA=/opt/denso/data
+    STATE=/opt/denso/install-state
+
+    # NOTE: autologin/autostart are reverted in `prerm remove`, NOT here. By the
+    # time postrm purge runs, dpkg has already deleted /usr/bin/denso-setup and
+    # /opt/denso/lib/policy.sh — calling them here would silently do nothing and
+    # leave the box auto-logging-in forever after a purge.
+
+    # Resolved-path guard: refuse to delete anything that is not EXACTLY the
+    # canonical data dir (a symlinked /opt/denso/data must not turn `purge` into
+    # rm -rf of somewhere else).
+    if [ -d "$DATA" ]; then
+        real="$(readlink -f "$DATA" 2>/dev/null || echo "")"
+        if [ "$real" = "/opt/denso/data" ]; then
+            echo "denso: purging $DATA"
+            rm -rf "$DATA"
+        else
+            echo "denso: NOT purging $DATA — it resolves to '$real', not /opt/denso/data" >&2
+        fi
+    fi
+    rm -rf "$STATE"
+    rmdir /opt/denso 2>/dev/null || true
+    ;;
+  remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

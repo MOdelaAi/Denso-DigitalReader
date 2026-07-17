@@ -1,0 +1,56 @@
+#!/bin/sh
+# Refuse to upgrade or remove while an instance is running. Failing here leaves
+# the OLD package installed — exactly what we want.
+set -e
+
+TARGET_USER_FILE=/opt/denso/install-state/user
+DENSO=/opt/denso/bin/denso
+
+if [ -x "$DENSO" ] && [ -r "$TARGET_USER_FILE" ]; then
+    user="$(cat "$TARGET_USER_FILE")"
+    # --check-running is TRI-STATE and MUST be read as such:
+    #   0 = running            -> refuse
+    #   1 = definitely not     -> proceed          <-- the ONLY safe-to-proceed code
+    #   4 = cannot determine   -> refuse
+    # `if denso --check-running; then refuse; fi` would be WRONG: it proceeds on
+    # BOTH 1 and 4, i.e. it treats "couldn't tell" as "safe", which is exactly
+    # the unsafe upgrade (replacing a release under a live app) the tri-state
+    # exists to prevent.
+    #
+    # Run as the target user: --check-running is the one mode that takes the lock
+    # (answering requires tryLock), and as root it would leave a root-owned lock
+    # artifact in an operator-owned data dir — after which every later check
+    # returns 4.
+    set +e
+    runuser -u "$user" -- env DENSO_DATA_DIR=/opt/denso/data "$DENSO" --check-running >/dev/null 2>&1
+    rc=$?
+    set -e
+    case "$rc" in
+        1) : ;;  # definitely not running — proceed
+        0) echo "denso: the application is running; close it before upgrading or removing." >&2
+           exit 1 ;;
+        *) echo "denso: cannot establish whether the application is running (rc=$rc); refusing." >&2
+           echo "denso: check /opt/denso/data ownership and permissions." >&2
+           exit 1 ;;
+    esac
+fi
+
+# ONLY NOW, having established that removal is safe, revert what we configured.
+# ORDER MATTERS: an earlier draft unconfigured FIRST, so a REFUSED removal had
+# already torn down the operator's autostart/autologin.
+#
+# It belongs here rather than in postrm because by the time `postrm purge` runs,
+# dpkg has already deleted /usr/bin/denso-setup — the revert would silently never
+# happen and the box would auto-login forever after a purge.
+#
+# `upgrade` must NOT revert: the new version keeps the same setup.
+case "$1" in
+  remove)
+    if [ -x /usr/bin/denso-setup ]; then
+        /usr/bin/denso-setup unconfigure || true   # never block a removal
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+exit 0
