@@ -45,18 +45,23 @@ std::vector<DetectionModel> list_models(const QSqlDatabase& db) {
     return out;
 }
 
-std::vector<std::string> attached_model_filenames(const QSqlDatabase& db) {
+std::optional<std::vector<std::string>>
+try_attached_model_filenames(const QSqlDatabase& db) {
     std::vector<std::string> out;
     QSqlQuery q(db);
     if (!q.exec(QStringLiteral(
             "SELECT DISTINCT m.filename FROM camera_model cm "
             "JOIN model m ON m.id = cm.model_id ORDER BY m.filename"))) {
-        return out;
+        return std::nullopt;
     }
     while (q.next()) {
         out.push_back(q.value(0).toString().toStdString());
     }
     return out;
+}
+
+std::vector<std::string> attached_model_filenames(const QSqlDatabase& db) {
+    return try_attached_model_filenames(db).value_or(std::vector<std::string>{});
 }
 
 static std::vector<ModelClassSelection> classes_for(const QSqlDatabase& db,

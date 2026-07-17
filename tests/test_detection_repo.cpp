@@ -176,3 +176,24 @@ TEST_CASE("attached_model_filenames returns distinct filenames across cameras") 
     REQUIRE(files.size() == 1);  // distinct: one filename, not two rows
     REQUIRE(files[0] == "denso.onnx");
 }
+
+TEST_CASE("try_attached_model_filenames distinguishes empty from unreadable",
+          "[detection][repo]") {
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db.has_value());
+
+    SECTION("valid schema with no attachments yields an empty vector, not nullopt") {
+        REQUIRE(denso::db::run_migrations(db->handle()));
+        const auto got = denso::detection::try_attached_model_filenames(db->handle());
+        REQUIRE(got.has_value());
+        REQUIRE(got->empty());
+    }
+
+    SECTION("a missing schema yields nullopt, NOT an empty vector") {
+        // No migrations: camera_model/model do not exist, so the query fails.
+        // The old attached_model_filenames() returns {} here, which would let a
+        // corrupt database pass --check as if it were a fresh install.
+        REQUIRE_FALSE(
+            denso::detection::try_attached_model_filenames(db->handle()).has_value());
+    }
+}

@@ -1,6 +1,5 @@
 #include "db/db.h"
 
-#include <QCoreApplication>
 #include <QDebug>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -25,14 +24,6 @@ QString next_connection_name() {
 }
 
 } // namespace
-
-QString default_path() {
-    const QString dir = QCoreApplication::applicationDirPath();
-    if (dir.isEmpty()) {
-        return QStringLiteral("denso.db");
-    }
-    return dir + QStringLiteral("/denso.db");
-}
 
 Db::Db(QString name) : name_(std::move(name)) {}
 
@@ -90,6 +81,30 @@ std::optional<Db> Db::open_in_memory() {
         QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
         db.setDatabaseName(QStringLiteral(":memory:"));
         ok = db.open();
+    }
+    if (!ok) {
+        QSqlDatabase::removeDatabase(name);
+        return std::nullopt;
+    }
+    return Db(name);
+}
+
+std::optional<Db> Db::open_read_only(const QString& path) {
+    const QString name = next_connection_name();
+    bool ok = false;
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+        db.setDatabaseName(path);
+        // QSQLITE_OPEN_READONLY maps to SQLITE_OPEN_READONLY, which fails rather
+        // than creating an absent file — exactly the contract we want.
+        db.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+        ok = db.open();
+        // Deliberately NO journal_mode pragma here (see the header).
+        if (ok) {
+            // Belt and braces: READONLY already rejects writes, but query_only
+            // makes the intent explicit and is what the spec calls for.
+            ok = QSqlQuery(db).exec(QStringLiteral("PRAGMA query_only = ON"));
+        }
     }
     if (!ok) {
         QSqlDatabase::removeDatabase(name);

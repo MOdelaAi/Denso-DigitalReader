@@ -3,7 +3,8 @@
 A desktop application for reading a 4-digit 7-segment display, with a settings
 UI for display resolution, theme, host hardware spec, and network configuration.
 Built with **C++ / Qt Widgets / CMake**, backed by a single SQLite store
-(`denso.db`) kept next to the executable.
+(`denso.db`) kept in the data dir — beside the executable by default, or
+wherever `$DENSO_DATA_DIR` points.
 
 > Ported 1:1 from a Rust + Slint original. The port has landed — `main` **is**
 > the C++/Qt app (the `port/cpp-qt` branch is gone). See `docs/ARCHITECTURE.md`
@@ -90,7 +91,21 @@ cmake --build build
 ./build/src/app/denso     # exact path varies by generator
 ```
 
-The app creates / migrates `denso.db` next to the executable on first run.
+The app creates / migrates `denso.db` on first run, in the data dir: beside the
+executable by default, or `$DENSO_DATA_DIR` when set (which is how a packaged
+install keeps state off the root-owned, upgrade-replaced program dir).
+
+Headless modes — used by the installer, no display required:
+
+```sh
+denso --version
+denso --check [--engine <file>]...   # validate data dir + engines; no primary-DB mutation,
+                                      # run as the target user (see docs/ARCHITECTURE.md)
+denso --check-running                # exit 0 running, 1 not running, 4 cannot determine
+denso --check-migrations <db-path>   # run the migration chain against that path ONLY
+```
+
+Only one instance may run at a time; a second exits 3.
 
 ## Deploy
 
@@ -106,6 +121,15 @@ Unit tests are Catch2 v3:
 ```sh
 ctest --test-dir build
 ```
+
+Testing on the real target (Jetson Orin Nano): connection details, credentials
+and the platform/toolchain versions live in **`d:\workspace\devices.md`**, the
+shared device registry outside this repo.
+
+> Catch2 test names are passed back to the binary by `catch_discover_tests` as
+> CLI arguments, so keep them **ASCII** and never start one with `--` — a name
+> like `--engine only applies to --check`, or one containing `→`, arrives
+> mangled and the case reports Failed while its logic is fine.
 
 The pure logic (parsers, formatters, the domain↔view converter, persistence) is
 covered off-device. Platform network backend tests are compiled per-OS, so the

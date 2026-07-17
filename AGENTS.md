@@ -70,6 +70,11 @@ Jetson:
 ```sh
 cmake -S . -B build -G "Unix Makefiles" && cmake --build build --target denso -j6
 ```
+**Real-device testing:** the shared hardware registry is **`d:\workspace\devices.md`**
+(outside this repo) — it has the Jetson's IP/user, the passwordless-SSH and
+AnyDesk details, and the JetPack/CUDA/TensorRT versions. Look there first rather
+than re-deriving how to reach a box. Anything that needs `sm_87`, real TensorRT,
+NVDEC, or a GDM session can only be proven there, not on the Windows dev box.
 Jetson runtime deps: `qt6-base-dev`, `qt6-multimedia-dev`, `libqt6sql6-sqlite`,
 `gstreamer1.0-libav` (avdec fallback), OpenCV 4.8, TensorRT 10.3, CUDA 12.6.
 Catch2 v3 is fetched at first configure (needs net once).

@@ -58,6 +58,7 @@ target_link_libraries(denso_camera PUBLIC
 
 add_executable(denso WIN32
     main.cpp
+    cli/run_headless.cpp
     resources.qrc
     # logging (bounded rotating file sink + redaction)
     logging/log_rotation.cpp

@@ -30,7 +30,7 @@ Camera ip_cam() {
 }
 } // namespace
 
-TEST_CASE("identical camera → no review", "[source_change]") {
+TEST_CASE("identical camera -> no review", "[source_change]") {
     CHECK(same_effective_source(ip_cam(), ip_cam()));
     CHECK_FALSE(view_geometry_changed(ip_cam(), ip_cam()));
     CHECK_FALSE(requires_area_review(ip_cam(), ip_cam()));
@@ -106,7 +106,7 @@ TEST_CASE("resolution change at the SAME aspect ratio is safe", "[source_change]
     CHECK_FALSE(requires_area_review(before, after));
 }
 
-TEST_CASE("legacy unset (0x0) resolution → real preset needs review", "[source_change]") {
+TEST_CASE("legacy unset (0x0) resolution -> real preset needs review", "[source_change]") {
     Camera before = ip_cam();
     before.width = 0;
     before.height = 0;  // legacy camera with no stored geometry

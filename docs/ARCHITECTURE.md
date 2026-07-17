@@ -3,6 +3,12 @@
 Depth reference for Denso-DigitalReader (C++ / Qt Widgets / CMake). For the
 quick map and commands, see the root `CLAUDE.md`.
 
+**Verifying on real hardware:** the parts of this design that only exist on the
+target — native TensorRT on `sm_87`, NVDEC/GStreamer, the Linux network backend,
+and (for deployment) a real GDM session — cannot be proven on the Windows dev
+box. The shared device registry at **`d:\workspace\devices.md`** (outside this
+repo) has the Jetson's address, credentials, AnyDesk ID and toolchain versions.
+
 ## Project layout
 
 Split by concern, wired by a thin top-level `CMakeLists.txt` via
@@ -50,34 +56,50 @@ separate include roots. Bounded 24/7 file logging lives in `src/app/logging/`
 
 A thin orchestrator:
 
-0. `QApplication` is constructed **first** (`main.cpp:83`) — it has to be, since
-   the log sink's path comes from `QCoreApplication::applicationDirPath()`.
-1. The bounded file-logging handler is installed immediately after
-   (`main.cpp:97-99`; `src/app/logging`, see [Logging](#logging)) so every later
-   step's `qDebug/qWarning` lands in `denso.log` — the Windows GUI subsystem has
-   no console. Then `QLocale::setDefault(English/UnitedStates)`
-   forces Western Arabic digits in numeric widgets (`QSpinBox`/`QDoubleSpinBox`)
-   regardless of the OS regional format — without it a Thai-locale host renders
-   spin-box values as Thai numerals (๐–๙).
-2. `db::Db::open(db::default_path())` opens `denso.db` (next to the exe) in WAL
-   mode; `db::run_migrations` applies the `user_version`-gated chain.
-3. `settings::import_legacy` does a one-time import of any pre-SQLite
-   `settings.json` sitting beside the DB.
-4. `ui::sync_models` scans the `models/` dir beside the exe and upserts each into
+0. **Headless dispatch, before any Qt application object exists.** `cli::parse`
+   (pure, `src/core/cli/`) turns argv into a `Command`; if the mode is headless,
+   `main` constructs a **`QCoreApplication`** — never `QApplication` — and hands
+   off to `app::run_headless` (`src/app/cli/`). This ordering is the point:
+   `QApplication` loads the xcb platform plugin, so an installer running
+   `--check` from a display-less root shell would die before reaching it. See
+   [Headless modes](#headless-modes).
+1. `QApplication` is constructed for the GUI path. It must come first among the
+   GUI steps, because `paths::data_dir()`'s fallback needs `applicationDirPath()`.
+2. **The single-instance lock is acquired** (`instance::SingleInstance` over
+   `paths::lock_file()`) — *before* the DB, the log sink, or any camera. A second
+   instance prints to stderr, shows a message box, and exits **3**. The guard is
+   an automatic local, deliberately not `static`: it must be destroyed before the
+   `QApplication` above it and before the static log sink it may log through.
+3. The bounded file-logging handler is installed (`src/app/logging`, see
+   [Logging](#logging)) so every later step's `qDebug/qWarning` lands in
+   `denso.log` — the Windows GUI subsystem has no console. Then
+   `QLocale::setDefault(English/UnitedStates)` forces Western Arabic digits in
+   numeric widgets (`QSpinBox`/`QDoubleSpinBox`) regardless of the OS regional
+   format — without it a Thai-locale host renders spin-box values as Thai
+   numerals (๐–๙).
+4. `db::Db::open(paths::db_file())` opens `denso.db` **in the data dir** (see
+   [Mutable paths](#mutable-paths)) in WAL mode; `db::run_migrations` applies the
+   `user_version`-gated chain. Both failures `qCritical` + `return 1` rather than
+   `qFatal`: `qFatal` aborts without unwinding, which would strand the lock file
+   with a dead pid and make the operator's next attempt report "already running"
+   instead of the real cause.
+5. `settings::import_legacy` does a one-time import of any pre-SQLite
+   `settings.json` in the data dir (`paths::legacy_settings_json()`).
+6. `ui::sync_models` scans the data dir's `models/` (`paths::models_dir()`) and upserts each into
    the `model` catalog, so models dropped there become selectable in the camera
    wizard. **Platform-split** (`model_sync.cpp` — the ONNX branch is
    `#ifdef _WIN32`): Windows catalogs `*.onnx` with class names from the ONNX
    metadata; Linux/Jetson catalogs `*.engine` with class names from a
    `<stem>.names.json` sidecar, skipping any engine whose sidecar is missing or
    unparseable.
-5. `network::reassert` re-applies every saved interface config to the OS — the
+7. `network::reassert` re-applies every saved interface config to the OS — the
    app is the source of truth. Best-effort and non-fatal: failures are logged
    via `qWarning`, never block startup. It is **deferred to the first event-loop
    tick** (`QTimer::singleShot(0, …)`, exceptions swallowed) and runs *after*
    `ui::launch`, so the window shows first — a slow or stuck OS CLI (now bounded
    by the backend's `QProcess` timeout) can no longer keep startup from painting.
-6. `settings::load` seeds an in-memory `std::shared_ptr<Settings>`.
-7. `main` hands off to `ui::launch(app, conn, state)` (`src/app/ui/startup.cpp`),
+8. `settings::load` seeds an in-memory `std::shared_ptr<Settings>`.
+9. `main` hands off to `ui::launch(app, conn, state)` (`src/app/ui/startup.cpp`),
    which builds the shared `EngineRegistry`, then picks the launch UX via
    `ui/startup_mode`'s `cold_start_needs_splash` — which is **platform-split**,
    so the cold/warm split below is the *Windows* story:
@@ -101,6 +123,72 @@ A thin orchestrator:
 
 `Db` (an `optional<Db>` in `main`) outlives the window, so the connection it
 hands the UI stays valid for the whole run.
+
+## Mutable paths
+
+`denso::paths` (`src/core/paths/`) is the **only** place that decides where
+mutable state lives — database, log + rotated siblings, models, TRT cache, lock,
+legacy `settings.json`. It resolves `$DENSO_DATA_DIR` when set and non-empty,
+else falls back to `applicationDirPath()` (the historical behavior, so the
+Windows dev box and the test suite are unchanged), else `"."`.
+
+Why it exists: an installed build's program dir is root-owned and is **replaced
+on upgrade**, so state kept beside the executable would be unwritable at runtime
+and destroyed by every package upgrade. The deployment launcher points
+`DENSO_DATA_DIR` at `/opt/denso/data`. Derived paths use `QDir::filePath`, not
+concatenation — `QDir::cleanPath` keeps the separator on a filesystem root, so
+`"/" + "/denso.db"` would yield `"//denso.db"`.
+
+## Headless modes
+
+Four CLI modes, all dispatched **before** `QApplication` (step 0 above) and run
+under a `QCoreApplication`, so none needs a display. They are the gates the
+`.deb` installer and `denso-setup` call (see the deployment spec in
+`docs/superpowers/specs/`).
+
+| Mode | Contract |
+|---|---|
+| `--version` | prints `APP_VERSION`; takes no lock; no mutation |
+| `--check [--engine <file>]...` | validates the data dir + every model the DB references **and** each `--engine` named; does not mutate the primary database or app-managed state — see the ownership caveat below |
+| `--check-running` | liveness; **the sole mode that takes the lock** — answering requires `tryLock` |
+| `--check-migrations <db-path>` | runs the migration chain against **that path only** |
+
+Exit codes (Slice 2's maintainer scripts depend on these): **0** ok — and for
+`--check-running`, *an instance is running*; **1** failed — and for
+`--check-running`, *nothing is running*; **2** bad usage; **3** the GUI refused
+to start because another instance holds the lock; **4** (`--check-running`
+only) *cannot determine* — the lock file itself is unusable (missing dir,
+permissions, ...). This must never be reported as the clean 1 a caller like
+Slice 2's `prerm` needs to see before it will proceed with an upgrade.
+
+**Ownership caveat for `--check`:** "does not mutate the primary database or
+app-managed state" is deliberately narrower than "no mutation at all" — see
+`Db::open_read_only`'s contract in `src/core/db/db.h`: a WAL reader needs the
+`-shm` index and SQLite may create it, and that file can outlive an abnormal
+exit. Running `--check` as the target user bounds **ownership** of any such
+support file, not whether one gets created. Installer/setup callers MUST run
+`--check` as the target user, never as root — a root-owned `-shm` in an
+operator-owned data dir is exactly the poisoning the data-dir rules exist to
+prevent.
+
+`--check` deliberately does **not** reuse the normal startup path:
+`EngineRegistry::warm_up()` creates the TRT cache dir and `Db::open()` runs
+`PRAGMA journal_mode = WAL` — both mutations. It instead opens the DB read-only
+(`Db::open_read_only`, which never creates an absent file) and constructs
+`BackendEngine` **directly** against a throwaway `QTemporaryDir` cache, so
+`OrtEngine` cannot write the real `trt_cache` either. It validates names via
+`engine.class_names()` rather than parsing a sidecar, because the backends source
+them differently: `TrtEngine`'s ctor reads `<stem>.names.json` itself and throws
+without it, while a Windows `.onnx` has no sidecar at all (names live in the ONNX
+metadata). Note `TrtEngine::ok()` is a hardcoded `return true` — on the Jetson
+the ctor throwing is the only real signal, so both are checked.
+
+A **missing** database is an empty configured-model set (a fresh DB references no
+cameras, so it legitimately requires no engines) and is never created; a
+**present-but-unreadable** one is a hard failure. Keeping those distinct is why
+`detection::try_attached_model_filenames` returns an `optional` — the older
+`attached_model_filenames` returns `{}` for both, which would let a corrupt
+database pass as a fresh install.
 
 ## UI ↔ domain boundary (`src/core/ui/`)
 
@@ -584,7 +672,7 @@ box that runs for months must never fill the disk or lose the tail.
 - Deferred UI parity nits from the port: the Network cards don't dim while
   loading (only the Refresh label changes); re-clicking the already-active
   Network nav item doesn't re-trigger a refresh (the Refresh button does).
-- `denso.db` (+ `-wal`/`-shm`) is created next to the executable at runtime and
+- `denso.db` (+ `-wal`/`-shm`) is created in the data dir (`denso::paths`) at runtime and
   is git-ignored.
 - **Frame-pacing duration units:** `CameraStream`'s display-rate cap sleeps in
   chunks computed in the clock's own (nanosecond) `steady_clock::duration`, NOT

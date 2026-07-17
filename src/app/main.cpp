@@ -4,19 +4,25 @@
 // startup state → run. UI callback wiring lives in the window/dialog classes,
 // not here.
 #include "camera/repo.h"
+#include "cli/args.h"
+#include "cli/run_headless.h"
 #include "db/db.h"
+#include "instance/single_instance.h"
 #include "logging/log_sink.h"
 #include "network/backend.h"
+#include "paths/paths.h"
 #include "settings/repo.h"
 #include "settings/settings.h"
 #include "detection/model_sync.h"
 #include "ui/startup.h"
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
-#include <QFileInfo>
 #include <QLocale>
+#include <QLockFile>
+#include <QMessageBox>
 #include <QSqlQuery>
 #include <QString>
 #include <QSysInfo>
@@ -36,6 +42,16 @@ namespace {
 // The bounded rotating log sink (installed in main once the app dir is known).
 denso::logging::RotatingLogSink* g_sink = nullptr;
 int g_min_rank = 1;  // default: Info and above
+
+// Describes why QLockFile::tryLock() failed for a reason OTHER than another
+// process holding it (LockFailedError has its own message at the call site).
+const char* lock_error_reason(QLockFile::LockError e) {
+    switch (e) {
+        case QLockFile::PermissionError: return "permission denied";
+        case QLockFile::UnknownError:    return "unknown error creating the lock file";
+        default:                         return "cannot create the lock file";
+    }
+}
 
 int level_rank(QtMsgType t) {
     switch (t) {
@@ -81,7 +97,44 @@ void message_handler(QtMsgType type, const QMessageLogContext& ctx,
 } // namespace
 
 int main(int argc, char** argv) {
+    // ── Headless dispatch, BEFORE any QApplication exists. QApplication would
+    // load the xcb platform plugin and fail with no display — and the installer
+    // calls these modes from a root shell that has none.
+    QStringList raw;
+    raw.reserve(argc - 1);
+    for (int i = 1; i < argc; ++i) raw << QString::fromLocal8Bit(argv[i]);
+    const denso::cli::Command cmd = denso::cli::parse(raw);
+    if (denso::cli::is_headless(cmd.mode)) {
+        QCoreApplication app(argc, argv);  // no GUI; gives us applicationDirPath()
+        return denso::app::run_headless(cmd);
+    }
+
     QApplication app(argc, argv);
+
+    // ── Single instance, BEFORE the DB, the log sink, or any camera. Two
+    // processes would contend on one SQLite file and silently eat log data
+    // (rename-based rotation does not follow another process's open fd).
+    // Automatic, NOT static: it must outlive app.exec() (it does — main hasn't
+    // returned) while being destroyed BEFORE the QApplication above it and
+    // before the static log sink below, so releasing the lock can still log.
+    denso::instance::SingleInstance instance_guard(denso::paths::lock_file());
+    if (!instance_guard.acquire()) {
+        // The log sink does not exist yet — stderr is all we have.
+        if (instance_guard.last_error() == QLockFile::LockFailedError) {
+            // Another process genuinely holds the lock — the expected case.
+            std::fprintf(stderr, "denso: another instance is already running\n");
+            QMessageBox::information(nullptr, QStringLiteral("Denso DigitalReader"),
+                                     QStringLiteral("Denso DigitalReader is already running."));
+            return 3;
+        }
+        // The lock file itself could not be created (missing/read-only data
+        // dir, wrong ownership, ...). This is NOT "already running" — telling
+        // an operator that lie hides the real, fixable cause.
+        std::fprintf(stderr, "denso: cannot create the lock file at %s (%s)\n",
+                     qPrintable(denso::paths::lock_file()),
+                     lock_error_reason(instance_guard.last_error()));
+        return 1;
+    }
 
     // ── Logging: bounded rotating file sink + timestamped, level-filtered lines.
     g_min_rank = level_from_env();
@@ -94,8 +147,7 @@ int main(int argc, char** argv) {
         .arg(std::abs(off) % 3600 / 60, 2, 10, QLatin1Char('0'));
     qSetMessagePattern(QStringLiteral("%{time yyyy-MM-ddTHH:mm:ss.zzz}") + offset +
         QStringLiteral(" %{type} %{category} pid=%{pid} tid=%{threadid} %{message}"));
-    static denso::logging::RotatingLogSink sink(
-        QCoreApplication::applicationDirPath() + QStringLiteral("/denso.log"));
+    static denso::logging::RotatingLogSink sink(denso::paths::log_file());
     g_sink = &sink;
     qInstallMessageHandler(message_handler);
 
@@ -110,14 +162,27 @@ int main(int argc, char** argv) {
     // regardless of the OS regional format (e.g. Thai, which renders Thai numerals).
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
 
-    const QString db_path = denso::db::default_path();
+    const QString db_path = denso::paths::db_file();
     auto db = denso::db::Db::open(db_path);
     if (!db) {
-        qFatal("open database");
+        // NOT qFatal: it aborts without unwinding, so instance_guard's lock file
+        // would survive with a dead pid — and an operator retrying immediately
+        // after (say) a permissions error on the data dir would be told "already
+        // running" instead of the real cause. Expected startup failures exit
+        // cleanly; qFatal stays for genuinely unrecoverable aborts.
+        qCritical().noquote() << "[fatal] cannot open database:" << db_path;
+        // qCritical is filterable by DENSO_LOG_LEVEL=off (it is not
+        // QtFatalMsg — see message_handler above), so a genuinely fatal
+        // startup failure could otherwise exit 1 with zero output anywhere.
+        // stderr always gets it, same as the second-instance path above.
+        std::fprintf(stderr, "denso: fatal: cannot open database: %s\n", qPrintable(db_path));
+        return 1;
     }
     QSqlDatabase conn = db->handle();
     if (!denso::db::run_migrations(conn)) {
-        qFatal("run migrations");
+        qCritical().noquote() << "[fatal] cannot run migrations on:" << db_path;
+        std::fprintf(stderr, "denso: fatal: cannot run migrations on: %s\n", qPrintable(db_path));
+        return 1;
     }
 
     // ── Session marker: one line per boot to anchor field diagnosis. No
@@ -142,16 +207,17 @@ int main(int argc, char** argv) {
             << " schema=v" << schema << " backend=" << backend
             << " log_level=" << kLevel[g_min_rank]
             << " cameras=" << static_cast<int>(denso::camera::all(conn).size())
-            << " dir=" << QCoreApplication::applicationDirPath();
+            << " data=" << denso::paths::data_dir()
+            << " exe=" << QCoreApplication::applicationDirPath();
     }
 
     // One-time migration of any pre-SQLite settings.json sitting beside the DB.
-    const QString legacy_json = QFileInfo(db_path).absolutePath() + QStringLiteral("/settings.json");
+    const QString legacy_json = denso::paths::legacy_settings_json();
     denso::settings::import_legacy(conn, legacy_json);
 
     // Sync the detection-model catalog with the models/ folder beside the exe:
     // any *.onnx present becomes selectable in the camera Models step.
-    denso::ui::sync_models(conn, QCoreApplication::applicationDirPath() + QStringLiteral("/models"));
+    denso::ui::sync_models(conn, denso::paths::models_dir());
 
     // The app owns network config: reassert it to the OS shortly after the UI is
     // up (singleShot(0) → first event-loop tick), not before it. A slow or stuck

@@ -19,6 +19,8 @@ add_executable(denso_tests
     test_settings.cpp
     test_display.cpp
     test_db.cpp
+    test_paths.cpp
+    test_single_instance.cpp
     test_settings_repo.cpp
     test_network_repo.cpp
     test_nmcli.cpp
@@ -58,6 +60,7 @@ add_executable(denso_tests
     test_log_rotation.cpp
     test_log_sink.cpp
     test_log_throttle.cpp
+    test_cli_args.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),

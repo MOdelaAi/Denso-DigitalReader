@@ -179,7 +179,7 @@ constructs it first today, so this is a real refactor, not an added branch):
 | --- | --- |
 | `--version` | prints version; takes no lock; no mutation |
 | `--check` | validates runtime + engines; **no persistent mutation**; takes no lock |
-| `--check-running` | liveness; **takes the lock by design** — the sole exemption |
+| `--check-running` | liveness; **takes the lock by design** — the sole exemption. **Tri-state**: `0` running / `1` not running / `4` cannot determine (lock unusable). Callers proceed only on `1` — see D9's fail-safe contract |
 | `--check-migrations <db-path>` | runs the migration chain against the given path only |
 
 `--check` must not: construct `QApplication`; initialize the rotating log sink;
@@ -317,9 +317,42 @@ may re-invoke them during recovery):
 
 | Script | Does |
 | --- | --- |
-| `prerm` | **Refuse upgrade/removal while running** (`--check-running` as the target user). Failing here leaves the old package installed — exactly right. Never kills the app; never deletes or "repairs" the lock. |
+| `prerm` | **Proceed ONLY on exit code 1** from `--check-running` (as the target user) — see the fail-safe contract below. Failing here leaves the old package installed — exactly right. Never kills the app; never deletes or "repairs" the lock. |
 | `postinst` | Create + chown `/opt/denso/data{,/models}`; seed missing model pairs; cheap structural sanity only. Nothing that can reasonably fail after a successful package build. |
 | `postrm purge` | Remove `/opt/denso/data` behind a **resolved-path guard** (resolve symlinks, assert the canonical path, refuse anything else); revert autologin/autostart from install-state. Plain `remove` keeps all data. |
+
+**The `--check-running` fail-safe contract — `prerm` MUST get this exactly right.**
+`--check-running` is tri-state, because "I couldn't tell" is not the same answer
+as "nothing is running":
+
+| Code | Meaning | `prerm` must |
+| --- | --- | --- |
+| `0` | an instance IS running | **refuse** |
+| `1` | definitely NOT running | **proceed** |
+| `4` | **cannot determine** — the lock file is unusable (missing/read-only/root-owned data dir, wrong ownership) | **refuse** |
+| any other | unexpected | **refuse** |
+
+**Proceed only on exactly 1.** The obvious shell is wrong:
+```sh
+if denso --check-running; then refuse_upgrade; fi   # WRONG: proceeds on BOTH 1 and 4
+```
+That treats "couldn't tell" as "safe", which is precisely the unsafe upgrade —
+replacing a release under a live app — that the tri-state exists to prevent. Use:
+```sh
+set +e
+runuser -u "$user" -- /opt/denso/bin/denso --check-running
+rc=$?
+set -e
+case "$rc" in
+  1) ;;  # definitely not running — proceed
+  0) echo "Denso is running; refusing upgrade" >&2; exit 1 ;;
+  *) echo "Cannot establish Denso liveness; refusing upgrade" >&2; exit 1 ;;
+esac
+```
+Note `--check-running` is the one mode that takes the lock (answering requires
+`tryLock`), so it must run **as the target user** — as root it leaves a
+root-owned lock artifact in an operator-owned data dir, which then makes every
+later check return `4`.
 
 Validation lives in **`denso-setup verify`**, run by the human at the keyboard:
 apt-plan inspection (D2), host preflight (D7), engine deserialize via `--check`

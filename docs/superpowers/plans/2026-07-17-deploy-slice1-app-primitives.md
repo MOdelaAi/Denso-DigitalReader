@@ -805,14 +805,14 @@ TEST_CASE("every non-GUI mode is headless", "[cli]") {
     REQUIRE(is_headless(Mode::Error));
 }
 
-TEST_CASE("--check-migrations carries its db path", "[cli]") {
+TEST_CASE("parse: --check-migrations carries its db path", "[cli]") {
     const Command c = parse({QStringLiteral("--check-migrations"),
                              QStringLiteral("/tmp/copy.db")});
     REQUIRE(c.mode == Mode::CheckMigrations);
     REQUIRE(c.arg == QStringLiteral("/tmp/copy.db"));
 }
 
-TEST_CASE("--check-migrations without a path is an error, not a GUI launch", "[cli]") {
+TEST_CASE("parse: --check-migrations without a path is an error, not a GUI launch", "[cli]") {
     const Command c = parse({QStringLiteral("--check-migrations")});
     REQUIRE(c.mode == Mode::Error);
     REQUIRE_FALSE(c.error.isEmpty());
@@ -830,7 +830,7 @@ TEST_CASE("a trailing extra argument is an error", "[cli]") {
                    QStringLiteral("b")}).mode == Mode::Error);
 }
 
-TEST_CASE("--check takes zero or more --engine names", "[cli]") {
+TEST_CASE("parse: --check takes zero or more --engine names", "[cli]") {
     SECTION("none") {
         const Command c = parse({QStringLiteral("--check")});
         REQUIRE(c.mode == Mode::Check);
@@ -851,17 +851,24 @@ TEST_CASE("--check takes zero or more --engine names", "[cli]") {
     }
 }
 
-TEST_CASE("--engine without a value is an error", "[cli]") {
+TEST_CASE("parse: --engine without a value is an error", "[cli]") {
     REQUIRE(parse({QStringLiteral("--check"), QStringLiteral("--engine")}).mode == Mode::Error);
 }
 
-TEST_CASE("--engine only applies to --check", "[cli]") {
+TEST_CASE("parse: --engine only applies to --check", "[cli]") {
     REQUIRE(parse({QStringLiteral("--version"), QStringLiteral("--engine"),
                    QStringLiteral("a.engine")}).mode == Mode::Error);
 }
 ```
 
 Register `test_cli_args.cpp` in `tests/CMakeLists.txt`.
+
+**Test names must not START with `--`.** `catch_discover_tests` registers each
+case by its literal name and re-invokes the binary with that name as a positional
+selector; Catch2's own CLI parser then eats a leading `--` as an unrecognized
+option, and the case reports Failed under `ctest` while the code is fine. An
+earlier draft of this plan hit exactly that: 5 correct tests went red. Hence the
+`parse: ` prefix.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1049,12 +1056,15 @@ chk() { # chk <description> <expected-rc> <actual-rc>
 # instead of hanging the worker's terminal (timeout returns 124).
 run() { timeout 20 "$EXE" "$@" >/dev/null 2>&1; }
 
-TMP=$(mktemp -d)
+# The data dir must be its OWN directory, with the tmp/cuda sandboxes as
+# SIBLINGS -- not children. An earlier draft put TMPDIR inside the data dir and
+# mkdir'd it, so the "data dir is empty" assertions could never pass for any
+# implementation. Keep the caches redirected but out of the directory under test.
+SANDBOX=$(mktemp -d)
+TMP="$SANDBOX/data"; mkdir -p "$TMP"
 export DENSO_DATA_DIR="$TMP"
-# Keep backend/tmp caches inside the sandbox so a stray write can't land
-# somewhere the assertions below don't look.
-export TMPDIR="$TMP/tmp"; mkdir -p "$TMPDIR"
-export CUDA_CACHE_PATH="$TMP/cuda-cache"
+export TMPDIR="$SANDBOX/tmp"; mkdir -p "$TMPDIR"
+export CUDA_CACHE_PATH="$SANDBOX/cuda-cache"
 
 run --version;            chk "--version exits 0" 0 $?
 run --wat;                chk "unknown flag exits 2" 2 $?
@@ -1073,7 +1083,7 @@ for artifact in denso.db denso.log denso.lock models; do
                           || echo "ok   - --check-migrations created no $artifact"
 done
 
-rm -rf "$TMP"
+rm -rf "$SANDBOX"
 exit $fail
 ```
 

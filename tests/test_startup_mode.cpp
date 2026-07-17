@@ -32,7 +32,7 @@ struct TempDirs {
 };
 }  // namespace
 
-TEST_CASE("no models → not cold (nothing to warm)") {
+TEST_CASE("no models -> not cold (nothing to warm)") {
     TempDirs t("no_models");
     REQUIRE_FALSE(cold_start_needs_splash(t.models.string(), t.cache.string()));
 }
@@ -42,13 +42,13 @@ TEST_CASE("no models → not cold (nothing to warm)") {
 // Linux/Jetson native path keys off a prebuilt .engine and has no cache notion.
 #ifdef _WIN32
 
-TEST_CASE("win: models present, no engine cache → cold (splash)") {
+TEST_CASE("win: models present, no engine cache -> cold (splash)") {
     TempDirs t("win_no_cache");
     t.touch(t.models, "denso.onnx");
     REQUIRE(cold_start_needs_splash(t.models.string(), t.cache.string()));
 }
 
-TEST_CASE("win: models present, engine cached → warm (no splash)") {
+TEST_CASE("win: models present, engine cached -> warm (no splash)") {
     TempDirs t("win_warm");
     t.touch(t.models, "denso.onnx");
     t.touch(t.cache,
@@ -56,7 +56,7 @@ TEST_CASE("win: models present, engine cached → warm (no splash)") {
     REQUIRE_FALSE(cold_start_needs_splash(t.models.string(), t.cache.string()));
 }
 
-TEST_CASE("win: models present, only timing cache (no engine) → cold") {
+TEST_CASE("win: models present, only timing cache (no engine) -> cold") {
     TempDirs t("win_timing_only");
     t.touch(t.models, "denso.onnx");
     t.touch(t.cache, "TensorrtExecutionProvider_cache_sm89.timing");
@@ -71,7 +71,7 @@ TEST_CASE("win: onnx extension match is case-insensitive") {
 
 #else
 
-TEST_CASE("linux: prebuilt engine present → cold (splash)") {
+TEST_CASE("linux: prebuilt engine present -> cold (splash)") {
     TempDirs t("lin_engine");
     t.touch(t.models, "denso.engine");
     REQUIRE(cold_start_needs_splash(t.models.string(), t.cache.string()));
@@ -83,7 +83,7 @@ TEST_CASE("linux: engine extension match is case-insensitive") {
     REQUIRE(cold_start_needs_splash(t.models.string(), t.cache.string()));
 }
 
-TEST_CASE("linux: only .onnx present (no prebuilt engine) → not cold") {
+TEST_CASE("linux: only .onnx present (no prebuilt engine) -> not cold") {
     // The native path deserializes prebuilt .engine files; a stray .onnx is not
     // a warmable artifact on Linux, so it must not trigger the splash.
     TempDirs t("lin_onnx_only");
