@@ -6,34 +6,56 @@ set -e
 TARGET_USER_FILE=/opt/denso/install-state/user
 DENSO=/opt/denso/bin/denso
 
-if [ -x "$DENSO" ] && [ -r "$TARGET_USER_FILE" ]; then
-    user="$(cat "$TARGET_USER_FILE")"
-    # --check-running is TRI-STATE and MUST be read as such:
-    #   0 = running            -> refuse
-    #   1 = definitely not     -> proceed          <-- the ONLY safe-to-proceed code
-    #   4 = cannot determine   -> refuse
-    # `if denso --check-running; then refuse; fi` would be WRONG: it proceeds on
-    # BOTH 1 and 4, i.e. it treats "couldn't tell" as "safe", which is exactly
-    # the unsafe upgrade (replacing a release under a live app) the tri-state
-    # exists to prevent.
-    #
-    # Run as the target user: --check-running is the one mode that takes the lock
-    # (answering requires tryLock), and as root it would leave a root-owned lock
-    # artifact in an operator-owned data dir — after which every later check
-    # returns 4.
-    set +e
-    runuser -u "$user" -- env DENSO_DATA_DIR=/opt/denso/data "$DENSO" --check-running >/dev/null 2>&1
-    rc=$?
-    set -e
-    case "$rc" in
-        1) : ;;  # definitely not running — proceed
-        0) echo "denso: the application is running; close it before upgrading or removing." >&2
-           exit 1 ;;
-        *) echo "denso: cannot establish whether the application is running (rc=$rc); refusing." >&2
-           echo "denso: check /opt/denso/data ownership and permissions." >&2
-           exit 1 ;;
-    esac
-fi
+case "$1" in
+  remove|upgrade|deconfigure)
+    if [ -x "$DENSO" ] && [ -r "$TARGET_USER_FILE" ]; then
+        user="$(cat "$TARGET_USER_FILE")"
+        # --check-running is TRI-STATE and MUST be read as such:
+        #   0 = running            -> refuse
+        #   1 = definitely not     -> proceed          <-- the ONLY safe-to-proceed code
+        #   4 = cannot determine   -> refuse
+        # `if denso --check-running; then refuse; fi` would be WRONG: it proceeds on
+        # BOTH 1 and 4, i.e. it treats "couldn't tell" as "safe", which is exactly
+        # the unsafe upgrade (replacing a release under a live app) the tri-state
+        # exists to prevent.
+        #
+        # Run as the target user: --check-running is the one mode that takes the lock
+        # (answering requires tryLock), and as root it would leave a root-owned lock
+        # artifact in an operator-owned data dir — after which every later check
+        # returns 4.
+        set +e
+        runuser -u "$user" -- env DENSO_DATA_DIR=/opt/denso/data "$DENSO" --check-running >/dev/null 2>&1
+        rc=$?
+        set -e
+        case "$rc" in
+            1) : ;;  # definitely not running — proceed
+            0) echo "denso: the application is running; close it before upgrading or removing." >&2
+               exit 1 ;;
+            *) echo "denso: cannot establish whether the application is running (rc=$rc); refusing." >&2
+               echo "denso: check /opt/denso/data ownership and permissions." >&2
+               exit 1 ;;
+        esac
+    else
+        # The authoritative lock check is unavailable (never configured, or a
+        # half-broken install). Do NOT assume "not running": a process survives
+        # deletion of its own executable, so a missing $DENSO does not prove
+        # "not running" — that hole would let a live process outlive its own
+        # binary. Fall back to a process check, which needs neither the binary
+        # nor the recorded user — and unlike --check-running it never touches
+        # the lock, so it cannot leave a root-owned artifact in an
+        # operator-owned data dir.
+        #
+        # Refusing outright here would be worse: a package installed but never
+        # configured has no install-state/user, and would become unremovable
+        # forever.
+        if pgrep -f '^/opt/denso/bin/denso' >/dev/null 2>&1; then
+            echo "denso: the application appears to be running; close it before upgrading or removing." >&2
+            exit 1
+        fi
+        echo "denso: note — no configured instance to check; proceeding on a process check only." >&2
+    fi
+    ;;
+esac
 
 # ONLY NOW, having established that removal is safe, revert what we configured.
 # ORDER MATTERS: an earlier draft unconfigured FIRST, so a REFUSED removal had
@@ -47,10 +69,31 @@ fi
 case "$1" in
   remove)
     if [ -x /usr/bin/denso-setup ]; then
-        /usr/bin/denso-setup unconfigure || true   # never block a removal
+        # No `|| true` here: if unconfigure genuinely fails, autologin stays
+        # enabled and `postrm purge` will delete install-state/ next, destroying
+        # the recorded GDM originals permanently — the box then auto-logins
+        # forever with no record of what it used to be. That recreates the
+        # exact failure this placement was designed to prevent, so a real
+        # failure must refuse the removal instead of being swallowed.
+        #
+        # Contract this depends on (owed to denso-setup's author, Task 5):
+        # `denso-setup unconfigure` MUST return 0 for the handled case "an
+        # admin changed the GDM values, so we left them alone", and non-zero
+        # ONLY for real I/O/tool errors.
+        /usr/bin/denso-setup unconfigure || {
+            echo "denso: failed to revert autostart/autologin; refusing removal so the" >&2
+            echo "denso: recorded original GDM settings are not lost. Fix the cause, or" >&2
+            echo "denso: run 'denso-setup unconfigure' manually, then retry." >&2
+            exit 1
+        }
     fi
+    ;;
+  upgrade|deconfigure|failed-upgrade)
+    ;;
+  *)
+    echo "denso: unexpected maintainer-script argument: $1" >&2
+    exit 1
     ;;
 esac
 
-#DEBHELPER#
 exit 0

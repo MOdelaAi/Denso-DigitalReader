@@ -30,7 +30,10 @@ case "$1" in
     ;;
   remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
     ;;
+  *)
+    echo "denso: unexpected maintainer-script argument: $1" >&2
+    exit 1
+    ;;
 esac
 
-#DEBHELPER#
 exit 0

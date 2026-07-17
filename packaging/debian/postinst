@@ -13,17 +13,11 @@ case "$1" in
     mkdir -p "$DATA/models" "$STATE"
     chmod 0755 "$STATE"
 
-    # If denso-setup has already recorded a target user (i.e. this is an
-    # UPGRADE), keep the data dir owned by them. On a FIRST install nobody has
-    # chosen a user yet, so leave ownership alone — `denso-setup configure
-    # --user <u>` sets it. Guessing here (e.g. from SUDO_USER) is exactly the
-    # trust mistake the spec forbids.
-    if [ -r "$STATE/user" ]; then
-        user="$(cat "$STATE/user")"
-        if id "$user" >/dev/null 2>&1; then
-            chown -R "$user":"$user" "$DATA" || true
-        fi
-    fi
+    # Ownership is NOT set here, on purpose: this ran on every upgrade (dpkg
+    # never touches /opt/denso/data, so it was unnecessary), could be slow on
+    # a large data tree, assumed the primary group is named after the user
+    # (wrong — should be `id -gn`), and swallowed failure with `|| true`.
+    # `denso-setup configure` owns initial ownership and repair instead.
 
     echo "denso: installed. Next:"
     echo "  sudo denso-setup configure --user <username> [--autostart] [--enable-autologin]"
@@ -31,7 +25,10 @@ case "$1" in
     ;;
   abort-upgrade|abort-remove|abort-deconfigure)
     ;;
+  *)
+    echo "denso: unexpected maintainer-script argument: $1" >&2
+    exit 1
+    ;;
 esac
 
-#DEBHELPER#
 exit 0
