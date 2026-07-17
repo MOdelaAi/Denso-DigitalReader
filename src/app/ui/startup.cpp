@@ -2,6 +2,7 @@
 
 #include "detection/repo.h"
 #include "detection/engine_registry.h"
+#include "paths/paths.h"
 #include "ui/mainwindow.h"
 #include "ui/startup_mode.h"
 #include "ui/startup_screen.h"
@@ -9,7 +10,6 @@
 #include "ui/warmup_worker.h"
 
 #include <QApplication>
-#include <QCoreApplication>
 #include <QDebug>
 #include <QThread>
 
@@ -108,9 +108,8 @@ int launch_warm_ui_first(QApplication& app, QSqlDatabase db,
 
 int launch(QApplication& app, QSqlDatabase db,
            std::shared_ptr<settings::Settings> state) {
-    const std::string dir = QCoreApplication::applicationDirPath().toStdString();
-    const std::string models_dir = dir + "/models";
-    const std::string cache_dir = dir + "/models/trt_cache";
+    const std::string models_dir = denso::paths::models_dir().toStdString();
+    const std::string cache_dir = denso::paths::trt_cache_dir().toStdString();
     // The models configured cameras actually need — warm_up fails loud if any is
     // missing, instead of silently demoting the camera to no-detection.
     std::vector<std::string> required = detection::attached_model_filenames(db);

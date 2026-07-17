@@ -14,8 +14,8 @@
 
 namespace denso::db {
 
-/// Location of the database file: `denso.db` next to the executable, falling
-/// back to the current directory if the application dir is unavailable.
+/// The database file inside the data dir (see denso::paths). Prefer
+/// paths::db_file() directly in new code.
 QString default_path();
 
 /// Owns one uniquely-named QSqlDatabase connection, removing it on destruction
