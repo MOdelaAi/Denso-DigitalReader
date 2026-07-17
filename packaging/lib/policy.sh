@@ -177,11 +177,15 @@ gdm_set_autologin() (
     # remote box. Build beside the original, carry its ownership + mode onto
     # the replacement (the rename swaps the inode), flush, then atomically
     # rename over it, then flush the directory entry too.
-    chown --reference="$conf" "$tmp" 2>/dev/null || true
-    chmod --reference="$conf" "$tmp" 2>/dev/null || true
-    sync
+    # Fail HARD, never `|| true`: silently ignoring these would atomically
+    # install /etc/gdm3/custom.conf with the wrong ownership or mode — a
+    # correctly-shaped file that GDM may refuse, on the box whose desktop is the
+    # operator's only way in. Verified available on both Ubuntu and MSYS2.
+    chown --reference="$conf" "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod --reference="$conf" "$tmp" || { rm -f "$tmp"; return 1; }
+    sync || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$conf" || { rm -f "$tmp"; return 1; }
-    sync
+    sync || return 1
     return 0
 )
 
@@ -225,10 +229,14 @@ gdm_restore_autologin() (
     ' "$conf" > "$tmp" || { rm -f "$tmp"; return 1; }
 
     # Same atomic-replace as gdm_set_autologin — never expose a partial config.
-    chown --reference="$conf" "$tmp" 2>/dev/null || true
-    chmod --reference="$conf" "$tmp" 2>/dev/null || true
-    sync
+    # Fail HARD, never `|| true`: silently ignoring these would atomically
+    # install /etc/gdm3/custom.conf with the wrong ownership or mode — a
+    # correctly-shaped file that GDM may refuse, on the box whose desktop is the
+    # operator's only way in. Verified available on both Ubuntu and MSYS2.
+    chown --reference="$conf" "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod --reference="$conf" "$tmp" || { rm -f "$tmp"; return 1; }
+    sync || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$conf" || { rm -f "$tmp"; return 1; }
-    sync
+    sync || return 1
     return 0
 )
