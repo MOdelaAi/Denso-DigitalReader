@@ -41,6 +41,16 @@ smooth regardless of model speed.
 | Test | `ctest --test-dir build` |
 | Run | `./build/src/app/denso` (path varies by generator) |
 
+**Real-device testing** (Jetson Orin Nano — anything needing `sm_87`, real
+TensorRT, NVDEC, or a GDM session): host/credentials/AnyDesk + toolchain versions
+are in **`d:\workspace\devices.md`**, the shared registry outside this repo.
+Check there before re-deriving how to reach a box.
+
+**Catch2 test names are CLI arguments.** `catch_discover_tests` re-invokes the
+binary with each case's literal name, so names must be **ASCII** and must never
+start with `--`; a `→` or a leading dash arrives mangled and the case reports
+Failed while its logic is fine.
+
 Tests are Catch2 v3, fetched via `FetchContent` at configure time (needs net on
 first configure). Platform backend tests are compiled per-OS, so the passing
 count differs between Windows and Linux.

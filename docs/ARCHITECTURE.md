@@ -3,6 +3,12 @@
 Depth reference for Denso-DigitalReader (C++ / Qt Widgets / CMake). For the
 quick map and commands, see the root `CLAUDE.md`.
 
+**Verifying on real hardware:** the parts of this design that only exist on the
+target — native TensorRT on `sm_87`, NVDEC/GStreamer, the Linux network backend,
+and (for deployment) a real GDM session — cannot be proven on the Windows dev
+box. The shared device registry at **`d:\workspace\devices.md`** (outside this
+repo) has the Jetson's address, credentials, AnyDesk ID and toolchain versions.
+
 ## Project layout
 
 Split by concern, wired by a thin top-level `CMakeLists.txt` via

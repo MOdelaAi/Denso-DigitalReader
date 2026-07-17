@@ -107,6 +107,15 @@ Unit tests are Catch2 v3:
 ctest --test-dir build
 ```
 
+Testing on the real target (Jetson Orin Nano): connection details, credentials
+and the platform/toolchain versions live in **`d:\workspace\devices.md`**, the
+shared device registry outside this repo.
+
+> Catch2 test names are passed back to the binary by `catch_discover_tests` as
+> CLI arguments, so keep them **ASCII** and never start one with `--` — a name
+> like `--engine only applies to --check`, or one containing `→`, arrives
+> mangled and the case reports Failed while its logic is fine.
+
 The pure logic (parsers, formatters, the domain↔view converter, persistence) is
 covered off-device. Platform network backend tests are compiled per-OS, so the
 passing count differs between Windows and Linux.
