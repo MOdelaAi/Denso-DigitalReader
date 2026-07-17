@@ -48,11 +48,20 @@ case "$1" in
         # Refusing outright here would be worse: a package installed but never
         # configured has no install-state/user, and would become unremovable
         # forever.
-        if pgrep -f '^/opt/denso/bin/denso' >/dev/null 2>&1; then
-            echo "denso: the application appears to be running; close it before upgrading or removing." >&2
-            exit 1
-        fi
-        echo "denso: note — no configured instance to check; proceeding on a process check only." >&2
+        # pgrep is TRI-STATE too, and forgetting that is the same bug as reading
+        # --check-running with `if`: 0 = matched, 1 = no match, 2+ = ERROR.
+        # `if pgrep ...; then` would treat an error as "not running" and proceed.
+        set +e
+        pgrep -f '^/opt/denso/bin/denso' >/dev/null 2>&1
+        prc=$?
+        set -e
+        case "$prc" in
+            1) echo "denso: note — no configured instance to check; proceeding on a process check only." >&2 ;;
+            0) echo "denso: the application appears to be running; close it before upgrading or removing." >&2
+               exit 1 ;;
+            *) echo "denso: cannot check for a running instance (pgrep rc=$prc); refusing." >&2
+               exit 1 ;;
+        esac
     fi
     ;;
 esac
@@ -68,6 +77,21 @@ esac
 # `upgrade` must NOT revert: the new version keeps the same setup.
 case "$1" in
   remove)
+    # If we recorded ANY configuration, unconfiguring is mandatory — silently
+    # skipping it because the tool vanished has the same end state as the
+    # `|| true` removed above: autologin stays enabled, then `postrm purge`
+    # deletes install-state/ and the GDM originals are gone forever.
+    # An install that was never configured has no state and stays removable.
+    if [ -r "$TARGET_USER_FILE" ] || [ -f /opt/denso/install-state/autologin.orig ]; then
+        if [ ! -x /usr/bin/denso-setup ]; then
+            echo "denso: configuration state exists but /usr/bin/denso-setup is missing," >&2
+            echo "denso: so autostart/autologin cannot be reverted. Refusing removal —" >&2
+            echo "denso: purging now would destroy the recorded original GDM settings." >&2
+            echo "denso: reinstall the package, or revert /etc/gdm3/custom.conf by hand" >&2
+            echo "denso: using /opt/denso/install-state/, then retry." >&2
+            exit 1
+        fi
+    fi
     if [ -x /usr/bin/denso-setup ]; then
         # No `|| true` here: if unconfigure genuinely fails, autologin stays
         # enabled and `postrm purge` will delete install-state/ next, destroying
