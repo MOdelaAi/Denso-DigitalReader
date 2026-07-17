@@ -160,12 +160,50 @@ gdm_restore_autologin "$T/gdm.conf" modela "false" ""
 rc_is "gdm: restore succeeds" $? 0
 grep -q '^AutomaticLoginEnable=false$' "$T/gdm.conf" && ok "gdm: enable restored" || bad "gdm: enable restored"
 
-# If an admin changed the user AFTER us, restore must refuse rather than clobber.
+# Finding 1: gdm_restore_autologin must return THREE distinct codes, not a
+# boolean. denso-setup's cmd_unconfigure branches on 0 (restored) vs 2 (benign
+# admin divergence -- nothing changed, correct as-is) vs anything else (a REAL
+# failure it must refuse on, so it never lets prerm/postrm delete the only
+# record of the original GDM settings after a restore that never happened).
+
+# If an admin changed the user AFTER us, restore must refuse rather than
+# clobber -- and that refusal is the BENIGN divergence code (2), not a failure.
 gdm_set_autologin "$T/gdm.conf" modela
 sed -i 's/^AutomaticLogin=modela$/AutomaticLogin=someoneelse/' "$T/gdm.conf"
 gdm_restore_autologin "$T/gdm.conf" modela "false" ""
-rc_is "gdm: refuses to clobber an admin's later USER change" $? 1
+rc_is "gdm: refuses to clobber an admin's later USER change (rc=2, benign divergence)" $? 2
 grep -q '^AutomaticLogin=someoneelse$' "$T/gdm.conf" && ok "gdm: admin's value survives" || bad "gdm: admin's value survives"
+
+# Same divergence class, the OTHER key: an admin flipping ENABLE (not USER)
+# after us must also refuse with rc=2, not be silently overwritten.
+cat > "$T/gdm_en.conf" <<'EOF'
+[daemon]
+AutomaticLoginEnable=true
+AutomaticLogin=modela
+EOF
+sed -i 's/^AutomaticLoginEnable=true$/AutomaticLoginEnable=false/' "$T/gdm_en.conf"
+gdm_restore_autologin "$T/gdm_en.conf" modela "false" "olduser"
+rc_is "gdm: refuses to clobber an admin's later ENABLE-key change (rc=2, benign divergence)" $? 2
+grep -q '^AutomaticLoginEnable=false$' "$T/gdm_en.conf" && ok "gdm: admin's enable value survives" || bad "gdm: admin's enable value survives"
+
+# A genuine failure (unwritable conf) must be neither 0 (restored) nor the
+# benign-divergence 2 -- collapsing this into 2 is exactly the bug that let
+# denso-setup treat "I couldn't write the file" the same as "an admin changed
+# it on purpose", proceeding to delete the only recorded original state.
+cat > "$T/gdm_ro.conf" <<'EOF'
+[daemon]
+AutomaticLoginEnable=true
+AutomaticLogin=modela
+EOF
+chmod 444 "$T/gdm_ro.conf"
+gdm_restore_autologin "$T/gdm_ro.conf" modela "false" "olduser"
+RO_RC=$?
+chmod 644 "$T/gdm_ro.conf"
+if [ "$RO_RC" != "0" ] && [ "$RO_RC" != "2" ]; then
+    ok "gdm: unwritable conf is a real failure (rc=$RO_RC, not 0 and not benign-divergence 2)"
+else
+    bad "gdm: unwritable conf is a real failure (rc=$RO_RC, not 0 and not benign-divergence 2)"
+fi
 
 # Finding 1 regression: every function must run in a SUBSHELL so its locals
 # cannot leak into (or clobber) the caller's variables. denso-setup sources

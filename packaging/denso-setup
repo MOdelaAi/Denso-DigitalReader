@@ -72,7 +72,11 @@ cmd_configure() {
         # Decide on the PAIR, not the engine alone: an identical engine whose
         # sidecar is missing or corrupt is BROKEN, not "same" — TrtEngine's ctor
         # throws without a readable sidecar.
-        case "$(seed_decision_pair "$eng" "$side" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json")" in
+        # Capture into a variable first, not just `case "$(...)"`: a `*)` default
+        # needs the actual value to report, and a bare case-on-command-substitution
+        # has nowhere to put it.
+        d="$(seed_decision_pair "$eng" "$side" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json")"
+        case "$d" in
             seed)
                 # AS THE TARGET USER, not root-then-chown: a crash between the
                 # two leaves root-owned files in an operator-owned data dir —
@@ -83,14 +87,23 @@ cmd_configure() {
             same)    echo "denso-setup: $stem.engine already present (identical)" ;;
             differs) echo "denso-setup: $stem.engine present but DIFFERENT — keeping yours."
                      echo "             run 'denso-setup replace-model $stem' to overwrite." ;;
+            # No default before this fix: a policy/tool error producing an
+            # unexpected string skipped every branch and configuration silently
+            # continued as if the model were fine.
+            *) die "could not determine the seed policy for $stem (got '$d')" ;;
         esac
     done
 
     if [ "$autostart" = "1" ]; then
+        # Same class as the model-seeding bug: write-as-root-then-chown leaves a
+        # root-owned file in the user's home if interrupted between the two
+        # steps. `install -o -g` sets ownership as part of the atomic create, and
+        # uses $group (id -gn), not "$user":"$user" — a primary group need not
+        # share the username.
         dir="$home/.config/autostart"
-        mkdir -p "$dir"
-        cp "/usr/share/applications/$AUTOSTART_NAME" "$dir/$AUTOSTART_NAME"
-        chown -R "$user":"$user" "$home/.config/autostart"
+        install -d -o "$user" -g "$group" -m 0755 "$dir" || die "cannot create $dir"
+        install -o "$user" -g "$group" -m 0644 "/usr/share/applications/$AUTOSTART_NAME" \
+                "$dir/$AUTOSTART_NAME" || die "cannot install the autostart entry"
         echo "denso-setup: autostart enabled for $user ($dir/$AUTOSTART_NAME)"
         echo "denso-setup: NOTE — XDG autostart only fires AFTER a graphical login."
         echo "             Without --enable-autologin this box still stops at the"
@@ -107,17 +120,28 @@ cmd_configure() {
         # the CURRENT value would store our own 'true' as the "original", and
         # unconfigure could never restore the real prior state.
         if [ ! -f "$STATE/autologin.orig" ]; then
-            cp -p "$GDM_CONF" "$STATE/custom.conf.orig"
             oe="$(awk '/^\[daemon\]/{d=1;next} /^\[/{d=0} d&&/^AutomaticLoginEnable=/{sub(/^AutomaticLoginEnable=/,"");print;exit}' "$GDM_CONF")"
             ou="$(awk '/^\[daemon\]/{d=1;next} /^\[/{d=0} d&&/^AutomaticLogin=/{sub(/^AutomaticLogin=/,"");print;exit}' "$GDM_CONF")"
-            printf '%s\n' "${oe:-false}" > "$STATE/autologin.orig"
-            printf '%s\n' "${ou:-}"      > "$STATE/autologin.origuser"
+            # autologin.orig is the "already recorded" marker every retry checks
+            # above -- it must be the LAST thing written, as the commit marker.
+            # Writing it FIRST (the old order) left an incomplete-commit window:
+            # a failure between the marker and autologin.origuser would leave the
+            # marker present with no recorded original user, and every later
+            # retry would then skip recording — permanently, since the marker's
+            # mere presence is what "already recorded" means.
+            cp -p "$GDM_CONF" "$STATE/custom.conf.orig" || die "cannot snapshot $GDM_CONF"
+            printf '%s\n' "${ou:-}"      > "$STATE/autologin.origuser" || die "cannot record the original user"
+            printf '%s\n' "${oe:-false}" > "$STATE/autologin.orig.tmp" || die "cannot record the original enable"
+            sync
+            mv -f "$STATE/autologin.orig.tmp" "$STATE/autologin.orig" || die "cannot commit the original autologin state"
             echo "denso-setup: recorded original autologin state (enable='${oe:-false}' user='${ou:-}')"
         else
             echo "denso-setup: original autologin state already recorded — not rebasing"
         fi
-        printf '%s\n' "$user" > "$STATE/autologin.user"
         gdm_set_autologin "$GDM_CONF" "$user" || die "failed to edit $GDM_CONF"
+        # Record AFTER gdm_set_autologin succeeds, not before: recording first
+        # would claim we set autologin for $user even on a failed edit.
+        printf '%s\n' "$user" > "$STATE/autologin.user"
         echo "denso-setup: autologin ENABLED for $user"
         echo "denso-setup: WARNING — anyone with physical access now gets $user's desktop."
     fi
@@ -163,7 +187,13 @@ cmd_verify() {
     echo "== database backup (the remedy if a migration goes wrong)"
     if [ -f "$DATA/denso.db" ]; then
         bk="$DATA/denso.db.backup-$(date +%Y%m%d-%H%M%S)"
-        cp -p "$DATA/denso.db" "$bk" && chown "$user":"$group" "$bk"
+        cp -p "$DATA/denso.db" "$bk" || die "cannot back up the database to $bk"
+        # Carry the -wal too: a crash can leave COMMITTED transactions there, so
+        # denso.db alone is a stale snapshot. Safe to copy as a set only because
+        # we proved above that nothing is running -- no writer can race us.
+        [ -f "$DATA/denso.db-wal" ] && { cp -p "$DATA/denso.db-wal" "$bk-wal" || die "cannot back up the WAL"; }
+        chown "$user":"$group" "$bk" || die "cannot chown the backup to $user:$group"
+        [ -f "$bk-wal" ] && { chown "$user":"$group" "$bk-wal" || die "cannot chown the WAL backup"; }
         echo "  ok  backed up to $bk"
     else
         echo "  ok  no database yet (fresh install)"
@@ -172,9 +202,15 @@ cmd_verify() {
     echo "== migration smoke test (on a THROWAWAY copy — never the live DB)"
     tmp="$(mktemp -d)"; chown "$user":"$group" "$tmp"
     if [ -f "$DATA/denso.db" ]; then
-        # Safe to copy the main file alone: we established above that nothing is
-        # running, so there is no active WAL to be inconsistent with.
+        # Copy the WAL set (denso.db + denso.db-wal), not the main file alone —
+        # same reasoning as the backup above: a crash can leave committed
+        # transactions in -wal, so denso.db alone is a stale snapshot and this
+        # smoke test would validate the wrong state. Safe as a set because
+        # nothing is running (checked above).
         cp "$DATA/denso.db" "$tmp/copy.db"; chown "$user":"$group" "$tmp/copy.db"
+        if [ -f "$DATA/denso.db-wal" ]; then
+            cp "$DATA/denso.db-wal" "$tmp/copy.db-wal"; chown "$user":"$group" "$tmp/copy.db-wal"
+        fi
     fi
     # No live DB -> an empty temp file exercises the full v0 chain the app will
     # run on first launch.
@@ -191,7 +227,7 @@ cmd_verify() {
         [ -e "$eng" ] || continue
         engines="$engines --engine $(basename "$eng")"
     done
-    tmp="$(mktemp -d)"; chown "$user":"$user" "$tmp"
+    tmp="$(mktemp -d)"; chown "$user":"$group" "$tmp"
     # shellcheck disable=SC2086
     if as_user "$user" env HOME="$tmp" TMPDIR="$tmp" CUDA_CACHE_PATH="$tmp/cuda" "$DENSO" --check $engines; then
         echo "  ok  runtime + engines validate"
@@ -218,7 +254,10 @@ cmd_preflight() {
     fi
     if apt_plan_ok "$plan"; then
         echo "preflight: PASS — installing this package would not touch a protected JetPack package"
-        echo "preflight: now run:  sudo apt install $deb"
+        # Same options as the simulation above -- --no-install-recommends changes
+        # the transaction apt plans, so printing a different invocation here
+        # would tell the operator to run something we never actually vetted.
+        echo "preflight: now run:  sudo apt install --no-install-recommends $deb"
         rm -f "$plan"; return 0
     fi
     rm -f "$plan"; return 1
@@ -236,13 +275,31 @@ cmd_unconfigure() {
         oe="$(cat "$STATE/autologin.orig")"
         ou="$(cat "$STATE/autologin.origuser" 2>/dev/null || echo "")"
         du="$(cat "$STATE/autologin.user" 2>/dev/null || echo "")"
-        if gdm_restore_autologin "$GDM_CONF" "$du" "$oe" "$ou"; then
-            echo "denso-setup: autologin restored (enable='$oe' user='$ou')"
-        else
-            echo "denso-setup: autologin NOT restored — an admin changed it after us; leaving their setting." >&2
-        fi
+        # gdm_restore_autologin is three-way, not a boolean: 0 restored, 2 is a
+        # benign admin divergence (nothing was changed, correct as-is), anything
+        # else is a REAL failure. Collapsing 2 and a real failure into "non-zero
+        # -> benign" was the bug: prerm calls `denso-setup unconfigure` and
+        # refuses removal on non-zero, so treating a genuine write/permission
+        # failure as benign let the package (and postrm purge's deletion of
+        # $STATE -- the only record of the original GDM settings) proceed anyway,
+        # on a box that now auto-logins with no way to recover the prior state.
+        set +e
+        gdm_restore_autologin "$GDM_CONF" "$du" "$oe" "$ou"; grc=$?
+        set -e
+        case "$grc" in
+            0) echo "denso-setup: autologin restored (enable='$oe' user='$ou')" ;;
+            2) echo "denso-setup: autologin NOT restored — an admin changed it after us; leaving their setting." >&2 ;;
+            *) die "failed to restore autologin in $GDM_CONF (rc=$grc) — refusing, so the recorded originals in $STATE are not lost" ;;
+        esac
     fi
-    echo "denso-setup: unconfigured (data in $DATA kept)"
+    # Clear the configured-user + user-specific autologin markers so a later
+    # `configure --user other` is not permanently refused (the old refusal
+    # message told the operator to run unconfigure first, but unconfigure never
+    # cleared $STATE/user -- a dead end). Preserve the pre-Denso originals
+    # (autologin.orig, autologin.origuser, custom.conf.orig): they must never be
+    # rebased, and cmd_configure's "already recorded" check depends on them.
+    rm -f "$STATE/user" "$STATE/autologin.user"
+    echo "denso-setup: unconfigured (data in $DATA kept; original GDM state still recorded in $STATE)"
 }
 
 cmd_replace_model() {

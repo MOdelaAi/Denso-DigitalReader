@@ -194,6 +194,18 @@ gdm_set_autologin() (
 # If an admin changed either afterwards, refuse — a blind restore would silently
 # revert their intent.
 #
+# Three distinct return codes — collapsing them to a boolean is the bug this
+# fixes: the caller (denso-setup unconfigure) must never treat a genuine write
+# failure the same as a benign admin divergence, or it will happily delete
+# /opt/denso/install-state/ (the only record of the original GDM settings) after
+# a restore that never actually happened.
+#   0 = restored successfully
+#   2 = admin divergence — current [daemon] values are not the ones we set, so
+#       NOTHING was changed. Correct behavior, not a failure.
+#   any other non-zero = real failure (unwritable conf, awk failed, temp file
+#       or rename failed) — the caller must refuse to proceed on this, not
+#       shrug it off like case 2.
+#
 # <denso-user> is passed EXPLICITLY. An earlier draft secretly read
 # /opt/denso/install-state/autologin.user from inside this "pure" function; with
 # that file absent it fell back to the CURRENT value, which made the
@@ -209,7 +221,7 @@ gdm_restore_autologin() (
     # the ENABLE key be silently overwritten.
     if [ "$cur_user" != "$denso_user" ] || [ "$cur_en" != "true" ]; then
         echo "gdm: refusing to restore — [daemon] now has AutomaticLogin='$cur_user' Enable='$cur_en', not the '$denso_user'/true we set" >&2
-        return 1
+        return 2
     fi
 
     tmp="$conf.denso.$$"
