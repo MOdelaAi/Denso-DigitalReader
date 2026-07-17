@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Denso Digital Reader
+Comment=Read 4-digit 7-segment displays from live cameras
+Exec=/usr/bin/denso-digitalreader
+Icon=denso-digitalreader
+Terminal=false
+Categories=Utility;
+StartupNotify=true
