@@ -332,16 +332,7 @@ void CameraWizardController::save_areas(const std::vector<camera::CameraArea>& a
         return;
     }
     // Only now — the areas write landed, so the setup this finishes is real.
-    // If completion fails, STAY here: the operator pressed "Save areas & finish
-    // setup", and ejecting them to the list after warning that it did not finish
-    // turns their explicit Finish into a silent "leave unfinished". The areas are
-    // saved, so pressing it again just retries the completion.
-    if (!finish_setup(pages_.areas)) {
-        emit cameras_changed();  // the areas DID persist
-        return;
-    }
-    emit cameras_changed();
-    emit request_show_list();
+    finish_and_leave(pages_.areas);
 }
 
 bool CameraWizardController::finish_setup(QWidget* parent) {
@@ -412,13 +403,23 @@ void CameraWizardController::finish_whole_frame() {
         return;
     }
     draft_.areas_need_review = false;
-    // Stay on Models when completion fails: the selections are already saved, so
-    // the operator can just press Finish again rather than reopening the row.
-    if (!finish_setup(pages_.models)) {
-        return;
+    finish_and_leave(pages_.models);
+}
+
+void CameraWizardController::finish_and_leave(QWidget* parent) {
+    // The ONE owner of "a terminal action succeeded": complete, tell the app, and
+    // return to the list ONLY if the completion landed. Both terminal actions
+    // ("Finish — use whole frame", "Save areas & finish setup") had their own
+    // copy of this sequence and both got it wrong the same way — each warned that
+    // setup had NOT finished and then went back to the list anyway, turning an
+    // explicit Finish into a silent "leave it unfinished" and taking away the
+    // page where the operator could retry. Call this AFTER your write succeeds.
+    const bool completed = finish_setup(parent);
+    emit cameras_changed();  // the write landed either way
+    if (completed) {
+        emit request_show_list();
     }
-    emit cameras_changed();
-    emit request_show_list();
+    // else: stay put. The data is saved, so pressing the button again retries.
 }
 
 void CameraWizardController::areas_back() {

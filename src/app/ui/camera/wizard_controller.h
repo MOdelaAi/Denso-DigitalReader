@@ -81,6 +81,10 @@ private:
     /// succeeded — completing first would activate a camera whose setup didn't
     /// land. No-op when editing an already-finished camera.
     bool finish_setup(QWidget* parent);
+    /// Complete the setup, notify, and return to the list ONLY if completion
+    /// succeeded. The single owner of that sequence — call it after a terminal
+    /// action's own write has succeeded.
+    void finish_and_leave(QWidget* parent);
 
     QSqlDatabase db_;
     Pages pages_;
