@@ -189,8 +189,9 @@ immediately and each detection `CameraStream` starts only **after its model(s)
 finish warming**. Warm-up never lands on a capture thread.
 
 `denso_core` **never** links OpenCV/ORT/TensorRT — only `Qt6::Core`/`Sql`.
-`models/*.engine` and `models/trt_cache/` are git-ignored. **`models/*.names.json`
-is NOT ignored** — a sidecar dropped into `models/` shows up as untracked.
+`models/*.engine`, `models/*.names.json` and `models/trt_cache/` are git-ignored:
+a sidecar is generated on-device beside its engine and is exactly as
+device-specific as it is.
 
 ## Hard rules
 
