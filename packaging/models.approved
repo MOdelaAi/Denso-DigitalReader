@@ -13,4 +13,4 @@
 # Format: <stem> <sha256-of-.engine> <sha256-of-.names.json> <trtexec recipe used to build it>
 #
 # To approve a new engine: build it on-device, sha256sum both files, add the line.
-digitv2 29b24a69fcee995485b075715c0008e8e1ab938c4d0ace3c9d560bc3278a4356 47538d1023947674faffb92a905429bc9deaa0890f0549d4c1bed1d1a33f9026 trtexec --onnx=digitv2.onnx --saveEngine=digitv2.engine --fp16
+digitv3 5247c3f3a70ce1b09b8807b7ed4bb27f7badd972b8628f355baac3ec434cf45a 47538d1023947674faffb92a905429bc9deaa0890f0549d4c1bed1d1a33f9026 trtexec --onnx=digitv3.onnx --saveEngine=digitv3.engine --fp16
