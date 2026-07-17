@@ -79,11 +79,22 @@ A thin orchestrator:
 6. `settings::load` seeds an in-memory `std::shared_ptr<Settings>`.
 7. `main` hands off to `ui::launch(app, conn, state)` (`src/app/ui/startup.cpp`),
    which builds the shared `EngineRegistry`, then picks the launch UX via
-   `ui/startup_mode`'s `cold_start_needs_splash`. **Cold** (models present, no
-   cached `*.engine`): show the `StartupScreen` splash, warm every `models/*.onnx`
-   on the worker while it animates, and on `finished` build + show `MainWindow`
-   (with `warmup = nullptr`, so `CameraGrid` starts every camera immediately on
-   cache-hits). **Warm** (engine cached): build + show `MainWindow` immediately
+   `ui/startup_mode`'s `cold_start_needs_splash` — which is **platform-split**,
+   so the cold/warm split below is the *Windows* story:
+
+   - **Windows/ORT** (`startup_mode.cpp:36-40`): **Cold** = `*.onnx` present and
+     no cached `*.engine` → the first-run TensorRT build takes minutes, so show
+     the splash. **Warm** = engine cached → no splash.
+   - **Linux/Jetson** (`startup_mode.cpp:47-48`): engines are prebuilt, so
+     there's no multi-minute build — but deserialize + warm-up still costs a few
+     seconds per model, so it splashes **whenever a `*.engine` exists**. The
+     ORT-cache notion of "already warm" does not apply (`cache_dir` is ignored).
+     A Jetson with models configured therefore takes the splash path normally.
+
+   **Cold path:** show the `StartupScreen` splash, warm every model on the worker
+   while it animates, and on `finished` build + show `MainWindow` (with
+   `warmup = nullptr`, so `CameraGrid` starts every camera immediately on
+   cache-hits). **Warm path (UI-first):** build + show `MainWindow` immediately
    with a `WarmupState`, then `WarmupState::start()` warms in the background and
    `CameraGrid` starts model-less/ready cameras at once and each pending detection
    camera as its models come ready — no splash.
@@ -453,8 +464,10 @@ has a dormant seam for it: an optional `ReadingSink*` (plus a `camera_id`) on
 `DetectionProcessor`'s ctor — now 8 params (`degrees, pitch, roll, models, areas,
 camera_id, sink, zone_sink`), all passed at its sole call site
 (`ui/camera/grid/camera_grid.cpp:195-200`). When a sink is
-set, `process()` calls `sink->on_reading(camera_id, ts_ms, kept)` with the
-frame's post-ROI-confinement detections. **Threading contract:** `on_reading`
+set, `infer_loop()` calls `sink->on_reading(camera_id, ts_ms, kept)` with the
+frame's post-ROI-confinement detections — **not** `process()`, which only submits
+the latest frame and overlays the last snapshot. **Threading contract:**
+`on_reading`
 runs on the **inference worker thread** (`frame_processor.h:59`; the call site is
 in `infer_loop()`) — *not* the capture thread, since inference is decoupled from
 display. An implementation must not
@@ -477,6 +490,10 @@ Pipeline, all off the GUI thread until the final POST:
 ```
 capture thread (per camera)
   DetectionProcessor::process
+    → submit latest frame to the worker's slot (drop-oldest), overlay snapshot
+
+inference worker thread (per camera)
+  DetectionProcessor::infer_loop
     → kept digit boxes (existing detection)
     → group_into_zones(kept, areas, w, h)   [pure: assemble_zone_value sorts
                                              digits left-to-right → int, per zone]
@@ -499,8 +516,13 @@ exponential backoff) until the server 2xx-acks it — so a downed server no long
 drops the last value. New readings coalesce into the pending snapshot in real
 time; retry state is in-memory only (no outbox, no idempotency, no persistence —
 unlike the DeepStream sibling). Lifetime is safe by teardown order:
-`CameraGrid::clear()` stops/joins every capture thread (so none can still call the
-reporter) **before** resetting `reporter_` then `brazing_reporter_`; and each
+`CameraGrid::clear()` stops and **deletes** every `CameraStream` before resetting
+`reporter_` then `brazing_reporter_`. Joining the capture threads is *not* what
+makes this safe — capture threads never call the reporter. Deleting the stream
+destroys the `unique_ptr<FrameProcessor>` it owns (`camera_stream.h:51`), and
+`~DetectionProcessor` signals + joins its **inference worker**
+(`frame_processor.cpp:39`) — the thread that actually calls `on_zones`. That join
+is what guarantees no worker can reach the reporter afterwards. Each
 in-flight POST's completion callback is `QPointer`-guarded, so a POST that finishes
 after the reporter is torn down is dropped rather than calling into a destroyed
 object (it does not rely on transitive `QNetworkAccessManager`/reply ownership).
