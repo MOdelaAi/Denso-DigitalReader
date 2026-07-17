@@ -1,0 +1,26 @@
+# Local shlibs metadata for the libraries NVIDIA ships without any.
+#
+# Without this, `dpkg-shlibdeps` hard-errors:
+#   no dependency information found for /usr/local/cuda/lib64/libcudart.so.12
+# and the only workaround would be --ignore-missing-info, which DROPS the
+# dependency silently while still looking derived. Supplying the mapping keeps
+# the distro's own tool working, which is what the spec asks for.
+#
+# EVERY line here is verified at build time (build_package.sh asserts the named
+# package really owns a library with that SONAME on this box, and is installed).
+# That check is not ceremony: this file OVERRIDES authoritative package metadata
+# and dpkg-shlibdeps trusts it blindly — it will happily emit a dependency on a
+# package that does not exist. An earlier draft of this very file mapped libcudla
+# to `nvidia-l4t-cuda`; `dpkg -S` says the real owner is `libcudla-12-6`, so the
+# package would have declared a dependency nothing provides and `apt install`
+# would have failed on a correctly-provisioned box. Locally supplied metadata
+# needs an ownership invariant, not just successful generation.
+#
+# Format: <library-name> <soname-version> <dependency>
+libcudart 12 cuda-cudart-12-6
+libcudla 1 libcudla-12-6
+libopencv_core 408 libopencv (>= 4.8.0)
+libopencv_imgproc 408 libopencv (>= 4.8.0)
+libopencv_imgcodecs 408 libopencv (>= 4.8.0)
+libopencv_videoio 408 libopencv (>= 4.8.0)
+libopencv_dnn 408 libopencv (>= 4.8.0)
