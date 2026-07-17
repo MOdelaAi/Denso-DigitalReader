@@ -644,8 +644,11 @@ box that runs for months must never fill the disk or lose the tail.
 
 - **`models/` is git-ignored by pattern** (`*.onnx`, `*.pt`, `*.engine`,
   `*.names.json`, `trt_cache/`) — they are build/training artifacts, device- and
-  version-specific. `denso.onnx` is the one exception: tracked before that rule,
-  and gitignore cannot untrack it. This USED to be a `git add -A` landmine (the
+  version-specific. **NOTHING under `models/` is tracked** — `denso.onnx` was the
+  last exception (tracked before that rule, and gitignore cannot untrack an
+  already-tracked file) until it was `git rm`'d with the digitv2 family, so a
+  fresh clone has an EMPTY `models/`: see **Provisioning a model** in README.md.
+  This USED to be a `git add -A` landmine (the
   ignore list named `models/digitv2.onnx` *specifically*, so every new model was
   sweepable); the pattern closed it. It also stopped a subtler bug: an unignored
   new model permanently dirties the tree, and `tools/build_package.sh` refuses to

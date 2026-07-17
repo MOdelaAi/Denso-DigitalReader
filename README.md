@@ -85,6 +85,37 @@ cmake -S . -B build
 cmake --build build
 ```
 
+## Provisioning a model
+
+**No model is tracked in git** — everything under `models/` (`*.onnx`, `*.pt`,
+`*.engine`, `*.names.json`, `trt_cache/`) is a build/training artifact, device-
+and version-specific. A fresh clone has an **empty `models/`**, and the app then
+has an empty catalog. The current model family is **digitv3**; `denso.onnx` and
+the digitv2 family were removed.
+
+| Machine | Needs | Where it comes from |
+|---|---|---|
+| Windows/MSYS2 (dev) | `models/digitv3.onnx` | exported from `digitv3.pt` in the training venv at `d:\workspace\train_venv` — the ONNX is what ORT loads |
+| Jetson (dev + appliance) | `models/digitv3.engine` + `models/digitv3.names.json` | built **on-device** from that ONNX with the `trtexec` recipe recorded in `packaging/models.approved` (TRT 10.3 / `sm_87`; the app never builds one at runtime) |
+
+The `.pt` checkpoint is a training input, not a runtime asset — the Jetson has no
+torch/ultralytics, so the `.pt` → `.onnx` export happens on the training machine.
+The engine and its `.names.json` sidecar are a **pair**: `TrtEngine` reads class
+names from the sidecar, so a mismatched one silently changes what the app reads.
+
+Windows discovers models with a **configure-time** glob
+(`file(GLOB … models/*.onnx)` in `src/app/CMakeLists.txt`), so **re-run `cmake`
+after adding or replacing an ONNX** — a plain rebuild won't pick it up. Note the
+glob copies present inputs but does not delete stale ones already beside the exe;
+remove those by hand (or wipe `build/`). On Linux nothing is copied at build
+time — the operator places the engine + sidecar in the data dir's `models/`.
+
+`packaging/models.approved` is a **production-package** contract: it approves only
+the deployable `.engine` + `.names.json` pair by SHA-256, and
+`tools/build_package.sh --model` refuses anything not listed. It deliberately does
+not record an ONNX hash, so the package can be proven to carry an approved engine
+but the exact ONNX that produced it is not reconstructable from the manifest.
+
 ## Run
 
 ```sh
@@ -114,7 +145,7 @@ aarch64 Jetson** — there is no cross-toolchain, and the engines are `sm_87`/TR
 10.3 pinned:
 
 ```sh
-tools/build_package.sh --model models/digitv2.engine     # -> dist/
+tools/build_package.sh --model models/digitv3.engine     # -> dist/
 ```
 
 Then, on the target (the preflight is bound to that exact `.deb` by SHA-256 and

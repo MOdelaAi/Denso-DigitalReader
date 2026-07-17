@@ -2,7 +2,7 @@
 # Build the Denso .deb. MUST run on an aarch64 JetPack 6.2 Jetson — there is no
 # cross-toolchain, and the engines are sm_87/TRT-10.3 pinned.
 #
-#   tools/build_package.sh --model models/digitv2.engine [--allow-dirty]
+#   tools/build_package.sh --model models/digitv3.engine [--allow-dirty]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"

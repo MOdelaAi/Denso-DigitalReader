@@ -40,10 +40,12 @@ models/trt_cache/
 # tools/build_package.sh then refuses to package a dirty tree, so a new model
 # blocked the build until someone noticed. That happened for .names.json too.
 #
-# denso.onnx stays TRACKED (committed before this rule; gitignore does not untrack
-# an already-tracked file). Everything else under models/ is a build/training
-# artifact: .onnx exports, .pt checkpoints, TRT engines, sidecars, the cache.
+# NOTHING under models/ is tracked any more: .onnx exports, .pt checkpoints, TRT
+# engines, sidecars and the cache are all build/training artifacts. denso.onnx was
+# the last exception (committed before this rule, and gitignore cannot untrack an
+# already-tracked file) until it was git rm'd together with the digitv2 family.
+# A fresh clone therefore has an EMPTY models/ — see "Provisioning a model" in
+# README.md for how to populate it.
 note.txt
 models/*.onnx
 models/*.pt
-models/digitv2.engine.bak

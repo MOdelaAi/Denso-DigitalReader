@@ -82,7 +82,7 @@ Catch2 v3 is fetched at first configure (needs net once).
 ## Deployment — SHIPPED (`.deb`)
 
 Built **on an aarch64 Jetson** (no cross-toolchain; engines are `sm_87`/TRT 10.3
-pinned). `tools/build_package.sh --model models/digitv2.engine` → `dist/`.
+pinned). `tools/build_package.sh --model models/digitv3.engine` → `dist/`.
 Install: `sudo ./dist/preflight-denso-<ver>.sh <deb>` (bound to that exact `.deb`
 by SHA-256; guards the JetPack stack) → `sudo apt install --no-install-recommends
 ./dist/<deb>` → `sudo denso-setup configure --user <u>` → `denso-setup verify`.
@@ -136,15 +136,18 @@ Facts that will bite whoever touches this:
   docs/architecture.md` stages nothing.
 - Jetson is **gcc 11 / Qt 6.2**: include `<cstddef>` for bare `size_t`; the 3-arg
   `QTransform::rotate` is Qt 6.5+ (keep the version guard).
-- `denso.onnx` / `digitv2.onnx` are **static batch=1** — a dynamic `opt=4` engine
-  needs re-exporting the ONNX with `dynamic=True`.
+- `digitv3.onnx` is **static batch=1** — a dynamic `opt=4` engine needs
+  re-exporting the ONNX with `dynamic=True`.
 - Don't leak Qt Widgets / OpenCV / ORT / CUDA / TensorRT into `denso_core`.
 - Keep platform behavior behind the existing interfaces; the shared
   letterbox/decode must stay identical across backends.
 - **`models/` is git-ignored by pattern** (`*.onnx`, `*.pt`, `*.engine`,
   `*.names.json`, `trt_cache/`) — they are build/training artifacts, device- and
-  version-specific. `denso.onnx` is the one exception: tracked before that rule,
-  and gitignore cannot untrack it. This USED to be a `git add -A` landmine (the
+  version-specific. **NOTHING under `models/` is tracked** — `denso.onnx` was the
+  last exception (tracked before that rule, and gitignore cannot untrack an
+  already-tracked file) until it was `git rm`'d with the digitv2 family, so a
+  fresh clone has an EMPTY `models/`: see **Provisioning a model** in README.md.
+  This USED to be a `git add -A` landmine (the
   ignore list named `models/digitv2.onnx` *specifically*, so every new model was
   sweepable); the pattern closed it. It also stopped a subtler bug: an unignored
   new model permanently dirties the tree, and `tools/build_package.sh` refuses to
