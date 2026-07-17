@@ -20,6 +20,7 @@ add_executable(denso_tests
     test_display.cpp
     test_db.cpp
     test_paths.cpp
+    test_single_instance.cpp
     test_settings_repo.cpp
     test_network_repo.cpp
     test_nmcli.cpp
