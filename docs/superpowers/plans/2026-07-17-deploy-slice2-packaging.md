@@ -52,11 +52,34 @@ Copied verbatim from `docs/superpowers/specs/2026-07-17-build-package-deployment
 | Jetson halts at the **GDM greeter** on power-on; `systemctl get-default` = `graphical.target`; greeter `Type=x11` | `loginctl` |
 | `assets/icon.png` is force-tracked despite the `*.png` ignore rule | `.gitignore` |
 
-## DEVIATION FROM THE SPEC — read before Task 3
+## Dependency derivation — settled by measurement
 
-The spec's D2 says `Depends: ${shlibs:Depends}` + a manual block. **That substvar cannot be produced here**: `dpkg-shlibdeps` hard-errors on `libcudart.so.12` (no dependency information) and `libopencv` has no shlibs metadata, so the only way to make it run is `--ignore-missing-info` — which the spec explicitly forbids because it drops deps silently while *looking* derived.
+An earlier draft of this plan hand-declared `Depends:` and hand-rolled a
+verifier, on the grounds that `dpkg-shlibdeps` hard-errors on
+`/usr/local/cuda/lib64/libcudart.so.12` and `libopencv` ships no
+`.shlibs`/`.symbols`. **That was wrong** — Codex caught it, and the box settles it:
+`debian/shlibs.local` supplies exactly that missing metadata, after which
+`dpkg-shlibdeps -O` exits **0** and emits a complete, version-constrained list:
 
-This plan therefore **declares `Depends:` in full, by hand, and has `build_package.sh` VERIFY it mechanically**: for every `NEEDED` soname in the built exe, resolve the library, find its owning package, and **fail the build** if that package is not covered by the declared `Depends:`. This keeps the spec's actual requirement ("the build must fail, never paper over") while dropping a mechanism that cannot work on this platform. Same guarantee, reachable implementation.
+```
+shlibs:Depends=cuda-cudart-12-6, libc6 (>= 2.34), libgcc-s1 (>= 3.0),
+  libnvinfer10, libopencv (>= 4.8.0), libqt6core6 (>= 6.2.0), libqt6gui6 (>= 6.1.2),
+  libqt6multimedia6 (>= 6.2.1), libqt6network6 (>= 6.1.2), libqt6sql6 (>= 6.1.2),
+  libqt6widgets6 (>= 6.1.2), libstdc++6 (>= 12)
+```
+
+So we use the distro's tool, as the spec always said. `--ignore-missing-info`
+remains forbidden; `-l` only adds search directories and does **not** supply
+metadata; `-x` excludes packages and is wrong here.
+
+**Declare everything the exe links, including `libnvinfer10`, `libc6` and
+`libstdc++6`.** An earlier draft "exempted" the JetPack libs, reasoning that a
+dep on them invites apt to touch that stack. That reasoning was wrong: an
+**unversioned** (or already-satisfied) dependency does not force an upgrade —
+apt leaves an installed package that satisfies it alone. Omitting them buys
+nothing and lets dpkg configure a package whose executable cannot load.
+Protecting JetPack belongs in the **pre-install** apt-plan gate, not in lying to
+dpkg about what we link.
 
 ## File Structure
 
@@ -227,12 +250,17 @@ apt_plan_ok "$T/nvcv" >/dev/null; rc_is "apt: NVIDIA libopencv itself is NOT the
 
 # ── seed_decision: never silently overwrite an operator's engine.
 mkdir -p "$T/s" "$T/d"
-printf 'aaa' > "$T/s/m.engine"
-is "seed: absent at destination -> seed" "$(seed_decision "$T/s/m.engine" "$T/d/m.engine")" "seed"
-printf 'aaa' > "$T/d/m.engine"
-is "seed: identical -> leave it alone" "$(seed_decision "$T/s/m.engine" "$T/d/m.engine")" "same"
+printf 'aaa' > "$T/s/m.engine"; printf '{"0":"a"}' > "$T/s/m.names.json"
+SD() { seed_decision_pair "$T/s/m.engine" "$T/s/m.names.json" "$T/d/m.engine" "$T/d/m.names.json"; }
+is "seed: both absent -> seed" "$(SD)" "seed"
+printf 'aaa' > "$T/d/m.engine"; printf '{"0":"a"}' > "$T/d/m.names.json"
+is "seed: pair identical -> leave it alone" "$(SD)" "same"
 printf 'bbb' > "$T/d/m.engine"
-is "seed: DIFFERENT -> never overwrite silently" "$(seed_decision "$T/s/m.engine" "$T/d/m.engine")" "differs"
+is "seed: engine DIFFERENT -> never overwrite silently" "$(SD)" "differs"
+printf 'aaa' > "$T/d/m.engine"; printf '{"0":"WRONG"}' > "$T/d/m.names.json"
+is "seed: engine same but SIDECAR differs -> differs (not 'same')" "$(SD)" "differs"
+rm -f "$T/d/m.names.json"
+is "seed: PARTIAL pair (engine, no sidecar) -> differs, never 'same'" "$(SD)" "differs"
 
 # ── install_pair: the engine must appear LAST, so a newly visible engine always
 # has its sidecar (power can fail between two renames — this is ordering, not
@@ -270,15 +298,15 @@ gdm_set_autologin "$T/gdm.conf" modela
 is "gdm: idempotent (no duplicate keys)" "$(grep -c '^AutomaticLogin=' "$T/gdm.conf")" "1"
 
 # Restore puts back ONLY what we changed, and only if it still holds our value.
-gdm_restore_autologin "$T/gdm.conf" "false" ""
+gdm_restore_autologin "$T/gdm.conf" modela "false" ""
 rc_is "gdm: restore succeeds" $? 0
 grep -q '^AutomaticLoginEnable=false$' "$T/gdm.conf" && ok "gdm: enable restored" || bad "gdm: enable restored"
 
 # If an admin changed the user AFTER us, restore must refuse rather than clobber.
 gdm_set_autologin "$T/gdm.conf" modela
 sed -i 's/^AutomaticLogin=modela$/AutomaticLogin=someoneelse/' "$T/gdm.conf"
-gdm_restore_autologin "$T/gdm.conf" "false" ""
-rc_is "gdm: refuses to clobber an admin's later change" $? 1
+gdm_restore_autologin "$T/gdm.conf" modela "false" ""
+rc_is "gdm: refuses to clobber an admin's later USER change" $? 1
 grep -q '^AutomaticLogin=someoneelse$' "$T/gdm.conf" && ok "gdm: admin's value survives" || bad "gdm: admin's value survives"
 
 rm -rf "$T"
@@ -365,17 +393,25 @@ apt_plan_ok() {
     return 0
 }
 
-# --- seed_decision <src> <dst> ----------------------------------------------
-# absent -> seed | identical -> same | different -> differs (NEVER silently
-# overwrite: the operator may have installed their own engine).
-seed_decision() {
-    src="${1-}"; dst="${2-}"
-    if [ ! -e "$dst" ]; then echo "seed"; return 0; fi
-    if [ "$(sha256sum "$src" | cut -d' ' -f1)" = "$(sha256sum "$dst" | cut -d' ' -f1)" ]; then
-        echo "same"
-    else
-        echo "differs"
-    fi
+# --- seed_decision_pair <eng-src> <side-src> <eng-dst> <side-dst> ------------
+# The decision is about the PAIR, never the engine alone: an identical engine
+# whose sidecar is missing or corrupt is BROKEN, not "same" — TrtEngine's ctor
+# reads <stem>.names.json and throws without it, so classifying that as "same"
+# would leave a camera permanently unable to start.
+#
+#   both absent           -> seed
+#   both present+identical -> same
+#   anything else (partial pair, either side differing) -> differs
+#
+# "differs" NEVER overwrites silently: the operator may have built their own
+# engine, and only an explicit `denso-setup replace-model` may replace it.
+seed_decision_pair() {
+    esrc="${1-}"; ssrc="${2-}"; edst="${3-}"; sdst="${4-}"
+    if [ ! -e "$edst" ] && [ ! -e "$sdst" ]; then echo "seed"; return 0; fi
+    if [ ! -e "$edst" ] || [ ! -e "$sdst" ]; then echo "differs"; return 0; fi  # partial pair
+    e1="$(sha256sum "$esrc" | cut -d' ' -f1)"; e2="$(sha256sum "$edst" | cut -d' ' -f1)"
+    s1="$(sha256sum "$ssrc" | cut -d' ' -f1)"; s2="$(sha256sum "$sdst" | cut -d' ' -f1)"
+    if [ "$e1" = "$e2" ] && [ "$s1" = "$s2" ]; then echo "same"; else echo "differs"; fi
 }
 
 # --- install_pair <engine-src> <sidecar-src> <dst-dir> -----------------------
@@ -445,18 +481,26 @@ gdm_set_autologin() {
     return 0
 }
 
-# --- gdm_restore_autologin <conf> <orig-enable> <orig-user> ------------------
-# Restores ONLY our two keys, and ONLY if they still hold what we set. If an
-# admin changed them afterwards, refuse — a blind restore would silently revert
-# their intent.
+# --- gdm_restore_autologin <conf> <denso-user> <orig-enable> <orig-user> -----
+# Restores ONLY our two keys, and ONLY if BOTH still hold exactly what we set.
+# If an admin changed either afterwards, refuse — a blind restore would silently
+# revert their intent.
+#
+# <denso-user> is passed EXPLICITLY. An earlier draft secretly read
+# /opt/denso/install-state/autologin.user from inside this "pure" function; with
+# that file absent it fell back to the CURRENT value, which made the
+# admin-changed-it test compare a value to itself and pass — i.e. it would
+# happily overwrite the admin's new user. Impure and wrong.
 gdm_restore_autologin() {
-    conf="${1-}"; orig_enable="${2-}"; orig_user="${3-}"
+    conf="${1-}"; denso_user="${2-}"; orig_enable="${3-}"; orig_user="${4-}"
     [ -w "$conf" ] || return 1
 
     cur_user="$(awk '/^\[daemon\]/{d=1;next} /^\[/{d=0} d&&/^AutomaticLogin=/{sub(/^AutomaticLogin=/,"");print;exit}' "$conf")"
-    denso_user="$(cat /opt/denso/install-state/autologin.user 2>/dev/null || echo "$cur_user")"
-    if [ -n "$cur_user" ] && [ "$cur_user" != "$denso_user" ]; then
-        echo "gdm: refusing to restore — AutomaticLogin is now '$cur_user', not the '$denso_user' we set" >&2
+    cur_en="$(awk '/^\[daemon\]/{d=1;next} /^\[/{d=0} d&&/^AutomaticLoginEnable=/{sub(/^AutomaticLoginEnable=/,"");print;exit}' "$conf")"
+    # BOTH must still be ours. Checking only the user let an admin's change to
+    # the ENABLE key be silently overwritten.
+    if [ "$cur_user" != "$denso_user" ] || [ "$cur_en" != "true" ]; then
+        echo "gdm: refusing to restore — [daemon] now has AutomaticLogin='$cur_user' Enable='$cur_en', not the '$denso_user'/true we set" >&2
         return 1
     fi
 
@@ -515,19 +559,42 @@ sidecar is the guarantee we can actually offer."
 
 ---
 
-### Task 3: `debian/control.in` + the mechanical dependency check
+### Task 3: `debian/control.in` + `debian/shlibs.local`
 
 **Files:**
-- Create: `packaging/debian/control.in`
+- Create: `packaging/debian/control.in`, `packaging/debian/shlibs.local`
 - Test: exercised by Task 6's `build_package.sh` on the Jetson
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `packaging/debian/control.in` with `@VERSION@` / `@ARCH@` placeholders; Task 6 substitutes and verifies.
+- Produces: `control.in` with `@VERSION@` / `@ARCH@` / `@SHLIBS_DEPENDS@` placeholders (Task 6 substitutes all three), and the local shlibs metadata that makes derivation possible.
 
-**Read the DEVIATION section above first** — `${shlibs:Depends}` is not achievable here, so `Depends:` is hand-declared and `build_package.sh` verifies it mechanically.
+- [ ] **Step 1: Write `packaging/debian/shlibs.local`**
 
-- [ ] **Step 1: Write the control template**
+```
+# Local shlibs metadata for the libraries NVIDIA ships without any.
+#
+# Without this, `dpkg-shlibdeps` hard-errors:
+#   no dependency information found for /usr/local/cuda/lib64/libcudart.so.12
+# and the only workaround would be --ignore-missing-info, which DROPS the
+# dependency silently while still looking derived. Supplying the mapping keeps
+# the distro's own tool working, which is what the spec asks for.
+#
+# Format: <library-name> <soname-version> <dependency>
+libcudart 12 cuda-cudart-12-6
+libcudla 1 nvidia-l4t-cuda
+libopencv_core 408 libopencv (>= 4.8.0)
+libopencv_imgproc 408 libopencv (>= 4.8.0)
+libopencv_imgcodecs 408 libopencv (>= 4.8.0)
+libopencv_videoio 408 libopencv (>= 4.8.0)
+libopencv_dnn 408 libopencv (>= 4.8.0)
+```
+
+Verified on the Jetson: with this file, `dpkg-shlibdeps -O` exits 0 and derives
+`cuda-cudart-12-6, libc6 (>= 2.34), libgcc-s1 (>= 3.0), libnvinfer10,
+libopencv (>= 4.8.0), libqt6core6 (>= 6.2.0), …`.
+
+- [ ] **Step 2: Write the control template**
 
 Create `packaging/debian/control.in`:
 
@@ -538,16 +605,9 @@ Architecture: @ARCH@
 Maintainer: Modela AI <modela.common@gmail.com>
 Section: utils
 Priority: optional
-Depends: libqt6core6 (>= 6.2.4),
-         libqt6gui6 (>= 6.2.4),
-         libqt6widgets6 (>= 6.2.4),
-         libqt6network6 (>= 6.2.4),
-         libqt6sql6 (>= 6.2.4),
-         libqt6sql6-sqlite (>= 6.2.4),
-         libqt6multimedia6 (>= 6.2.4),
+Depends: @SHLIBS_DEPENDS@,
          qt6-qpa-plugins (>= 6.2.4),
-         libopencv (>= 4.8.0),
-         cuda-cudart-12-6,
+         libqt6sql6-sqlite (>= 6.2.4),
          gstreamer1.0-plugins-base,
          gstreamer1.0-plugins-good,
          gstreamer1.0-plugins-bad,
@@ -558,44 +618,42 @@ Description: Denso Digital Reader
  value to a backend. Qt Widgets GUI with per-camera TensorRT detection.
  .
  Requires a JetPack 6.2 (L4T R36.5) Jetson: CUDA 12.6, TensorRT 10.3 and
- NVIDIA's OpenCV 4.8 come from the JetPack image and are never installed or
- upgraded by this package.
+ NVIDIA's OpenCV 4.8 come from the JetPack image.
 ```
 
-Why each non-obvious entry:
-- `libopencv (>= 4.8.0)` and `cuda-cudart-12-6` — **hand-declared because they cannot be derived**: `libopencv` ships no `.shlibs`/`.symbols` and `dpkg-shlibdeps` hard-errors on `libcudart.so.12`.
-- `qt6-qpa-plugins`, `libqt6sql6-sqlite`, the `gstreamer1.0-*` set — **dlopened**, so no dependency scanner can ever see them: the xcb platform plugin, the Qt SQLite driver, and the GStreamer elements the capture ladder builds by name.
+`@SHLIBS_DEPENDS@` is everything the linker can see — Task 6 fills it from
+`dpkg-shlibdeps`. The hand-written block below it is **only** what no dependency
+scanner can ever see, because it is `dlopen`ed or shelled out to:
+- `qt6-qpa-plugins` — the xcb platform plugin;
+- `libqt6sql6-sqlite` — the Qt SQL driver;
+- `gstreamer1.0-*` — the elements the capture ladder builds **by name**
+  (`rtspsrc`, `nvv4l2decoder`, `nvvidconv`, `appsink`, `h264parse`), plus
+  `libav` for the FFMPEG fallback;
 - `network-manager` — the app shells out to `nmcli`.
-- **`libnvinfer10` is deliberately ABSENT** even though the exe links it: it is `cuda-*`/`libnvinfer*` family, i.e. JetPack-owned and on the protected list. Declaring a versioned dep on it invites apt to "satisfy" it by touching the JetPack stack — the exact thing the guard forbids. Task 6's check must special-case it: present on the box, never declared. **State this in the check's output so the exemption is visible, not silent.**
 
-- [ ] **Step 2: Sanity-check the template**
+- [ ] **Step 3: Sanity-check**
 
 ```sh
-grep -c '@VERSION@\|@ARCH@' packaging/debian/control.in   # expect 2
-awk '/^Depends:/,/^Description:/' packaging/debian/control.in | grep -c ','  # expect 14
+grep -c '@VERSION@\|@ARCH@\|@SHLIBS_DEPENDS@' packaging/debian/control.in   # expect 3
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add packaging/debian/control.in
-git commit -m "feat(packaging): debian control template with a hand-declared Depends
+git add packaging/debian/control.in packaging/debian/shlibs.local
+git commit -m "feat(packaging): control template + local shlibs metadata
 
-DEVIATION from the spec's \${shlibs:Depends}, and why: dpkg-shlibdeps hard-errors
-on libcudart.so.12 ('no dependency information found') and libopencv ships no
-shlibs/symbols, so the substvar can only be produced with --ignore-missing-info
--- which the spec forbids precisely because it drops deps silently while looking
-derived. Depends: is therefore declared in full and build_package.sh VERIFIES it
-mechanically (every NEEDED soname must map to a declared package, or the build
-fails). Same guarantee the spec asked for, via a mechanism that can actually run
-on this platform.
+Uses the distro's own dependency derivation, as the spec asked. dpkg-shlibdeps
+hard-errors on libcudart.so.12 and NVIDIA's libopencv (neither ships
+.shlibs/.symbols) -- but debian/shlibs.local supplies exactly that metadata, and
+with it shlibdeps exits 0 and derives the full version-constrained set including
+libnvinfer10 and libc6. --ignore-missing-info stays forbidden: it would drop
+those deps silently while still looking derived.
 
-libnvinfer10 is deliberately NOT declared despite being linked: it is
-JetPack-owned (protected family), and a versioned dep on it invites apt to touch
-the JetPack stack."
+The hand-written block is ONLY the dlopen/exec deps no scanner can see: the xcb
+platform plugin, the Qt SQLite driver, the GStreamer elements the capture ladder
+builds by name, and nmcli."
 ```
-
----
 
 ### Task 4: Maintainer scripts
 
@@ -620,17 +678,6 @@ set -e
 
 TARGET_USER_FILE=/opt/denso/install-state/user
 DENSO=/opt/denso/bin/denso
-
-# Revert autostart/autologin HERE, while our files still exist: on `remove`/
-# `purge` dpkg deletes /usr/bin/denso-setup before postrm runs, so postrm cannot
-# do it. `upgrade` must NOT revert — the new version keeps the same setup.
-case "$1" in
-  remove)
-    if [ -x /usr/bin/denso-setup ]; then
-        /usr/bin/denso-setup unconfigure || true   # never block a removal
-    fi
-    ;;
-esac
 
 if [ -x "$DENSO" ] && [ -r "$TARGET_USER_FILE" ]; then
     user="$(cat "$TARGET_USER_FILE")"
@@ -661,9 +708,30 @@ if [ -x "$DENSO" ] && [ -r "$TARGET_USER_FILE" ]; then
     esac
 fi
 
+# ONLY NOW, having established that removal is safe, revert what we configured.
+# ORDER MATTERS: an earlier draft unconfigured FIRST, so a REFUSED removal had
+# already torn down the operator's autostart/autologin.
+#
+# It belongs here rather than in postrm because by the time `postrm purge` runs,
+# dpkg has already deleted /usr/bin/denso-setup — the revert would silently never
+# happen and the box would auto-login forever after a purge.
+#
+# `upgrade` must NOT revert: the new version keeps the same setup.
+case "$1" in
+  remove)
+    if [ -x /usr/bin/denso-setup ]; then
+        /usr/bin/denso-setup unconfigure || true   # never block a removal
+    fi
+    ;;
+esac
+
 #DEBHELPER#
 exit 0
 ```
+
+**Consequence to document:** after `apt remove` + reinstall the operator must run
+`denso-setup configure` again — removal reverted it. `postinst` already prints the
+configure hint on every install, so the path back is in front of them.
 
 - [ ] **Step 2: Write `postinst`**
 
@@ -847,12 +915,23 @@ cmd_configure() {
     home="$(getent passwd "$user" | cut -d: -f6)"
     [ -n "$home" ] && [ -d "$home" ] || die "user $user has no valid home directory"
 
+    # Refuse a user CHANGE: a second `configure --user other` would overwrite the
+    # recorded user while orphaning the FORMER user's autostart entry and
+    # autologin record — unconfigure could then never clean them up. A full
+    # old->new transition isn't worth building for v1; refusal is correct.
+    prev="$(cat "$STATE/user" 2>/dev/null || echo "")"
+    if [ -n "$prev" ] && [ "$prev" != "$user" ]; then
+        die "already configured for user '$prev' — run 'denso-setup unconfigure' first to switch to '$user'"
+    fi
+
     mkdir -p "$STATE"
     printf '%s\n' "$user" > "$STATE/user"
 
+    # id -gn, NOT "$user":"$user" — a primary group need not share the username.
+    group="$(id -gn "$user")"
     mkdir -p "$DATA/models"
-    chown -R "$user":"$user" "$DATA"
-    echo "denso-setup: data dir $DATA owned by $user"
+    chown -R "$user":"$group" "$DATA"
+    echo "denso-setup: data dir $DATA owned by $user:$group"
 
     # Seed the packaged engines. Absent -> seed; identical -> leave; DIFFERENT ->
     # refuse (the operator may have built their own).
@@ -861,10 +940,16 @@ cmd_configure() {
         stem="$(basename "$eng" .engine)"
         side="$PKG_MODELS/$stem.names.json"
         [ -f "$side" ] || die "packaged engine $stem.engine has no $stem.names.json sidecar"
-        case "$(seed_decision "$eng" "$DATA/models/$stem.engine")" in
+        # Decide on the PAIR, not the engine alone: an identical engine whose
+        # sidecar is missing or corrupt is BROKEN, not "same" — TrtEngine's ctor
+        # throws without a readable sidecar.
+        case "$(seed_decision_pair "$eng" "$side" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json")" in
             seed)
-                install_pair "$eng" "$side" "$DATA/models" || die "failed to seed $stem"
-                chown "$user":"$user" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json"
+                # AS THE TARGET USER, not root-then-chown: a crash between the
+                # two leaves root-owned files in an operator-owned data dir —
+                # the exact poisoning the run-as-target-user rule prevents.
+                runuser -u "$user" -- sh -c '. /opt/denso/lib/policy.sh; install_pair "$1" "$2" "$3"' \
+                        _ "$eng" "$side" "$DATA/models" || die "failed to seed $stem"
                 echo "denso-setup: seeded $stem.engine" ;;
             same)    echo "denso-setup: $stem.engine already present (identical)" ;;
             differs) echo "denso-setup: $stem.engine present but DIFFERENT — keeping yours."
@@ -912,26 +997,55 @@ cmd_configure() {
 }
 
 cmd_verify() {
+    # Requires root: it chowns the throwaway dirs and runs `runuser`. An earlier
+    # draft documented a non-sudo invocation that could not have worked.
+    need_root
     rc=0
     user="$(cat "$STATE/user" 2>/dev/null || echo "")"
     [ -n "$user" ] || die "not configured yet — run 'denso-setup configure --user <u>' first"
+    group="$(id -gn "$user")"
 
     echo "== platform"
     [ "$(uname -m)" = "aarch64" ] || { echo "  FAIL arch is $(uname -m), expected aarch64"; rc=1; }
     l4t="$(sed -n 's/^# R\([0-9]*\).*REVISION: \([0-9.]*\).*/\1.\2/p' /etc/nv_tegra_release 2>/dev/null | head -1)"
-    echo "  L4T: ${l4t:-unknown} (supported baseline: 36.5)"
-    [ "$l4t" = "36.5.0" ] || echo "  WARN L4T is '${l4t:-unknown}', not the tested 36.5.0 — engines are TRT/arch-pinned"
+    echo "  L4T: ${l4t:-unknown} (supported baseline: 36.5.0)"
+    # FAIL, not WARN: the engines are pinned to TRT 10.3 / sm_87 and the whole
+    # compatibility contract is "exactly this image". A warning invites shipping
+    # onto an untested platform.
+    [ "$l4t" = "36.5.0" ] || { echo "  FAIL L4T is '${l4t:-unknown}', not the supported 36.5.0"; rc=1; }
 
-    echo "== apt plan (protected JetPack packages must not be touched)"
-    plan="$(mktemp)"
-    LC_ALL=C apt-get -s install --no-install-recommends denso-digitalreader > "$plan" 2>/dev/null || true
-    if apt_plan_ok "$plan"; then echo "  ok  apt would not touch a protected package"; else rc=1; fi
-    rm -f "$plan"
+    echo "== gstreamer elements the capture ladder builds by name"
+    for el in rtspsrc nvv4l2decoder nvvidconv appsink h264parse; do
+        if gst-inspect-1.0 "$el" >/dev/null 2>&1; then echo "  ok  $el"
+        else echo "  FAIL $el missing"; rc=1; fi
+    done
+
+    echo "== instance (FIRST: everything below reads the live DB)"
+    set +e
+    as_user "$user" "$DENSO" --check-running >/dev/null 2>&1; crc=$?
+    set -e
+    case "$crc" in
+        1) echo "  ok  not running" ;;
+        0) echo "  FAIL the app is RUNNING — close it: copying a live WAL database"
+           echo "       below would validate stale or inconsistent state"; return 1 ;;
+        *) echo "  FAIL cannot determine liveness (rc=$crc) — check $DATA ownership"; return 1 ;;
+    esac
+
+    echo "== database backup (the remedy if a migration goes wrong)"
+    if [ -f "$DATA/denso.db" ]; then
+        bk="$DATA/denso.db.backup-$(date +%Y%m%d-%H%M%S)"
+        cp -p "$DATA/denso.db" "$bk" && chown "$user":"$group" "$bk"
+        echo "  ok  backed up to $bk"
+    else
+        echo "  ok  no database yet (fresh install)"
+    fi
 
     echo "== migration smoke test (on a THROWAWAY copy — never the live DB)"
-    tmp="$(mktemp -d)"; chown "$user":"$user" "$tmp"
+    tmp="$(mktemp -d)"; chown "$user":"$group" "$tmp"
     if [ -f "$DATA/denso.db" ]; then
-        cp "$DATA/denso.db" "$tmp/copy.db"; chown "$user":"$user" "$tmp/copy.db"
+        # Safe to copy the main file alone: we established above that nothing is
+        # running, so there is no active WAL to be inconsistent with.
+        cp "$DATA/denso.db" "$tmp/copy.db"; chown "$user":"$group" "$tmp/copy.db"
     fi
     # No live DB -> an empty temp file exercises the full v0 chain the app will
     # run on first launch.
@@ -957,18 +1071,28 @@ cmd_verify() {
     fi
     rm -rf "$tmp"
 
-    echo "== instance"
-    set +e
-    as_user "$user" "$DENSO" --check-running >/dev/null 2>&1; crc=$?
-    set -e
-    case "$crc" in
-        0) echo "  note the app is currently RUNNING" ;;
-        1) echo "  ok  not running" ;;
-        *) echo "  FAIL cannot determine liveness (rc=$crc) — check $DATA ownership"; rc=1 ;;
-    esac
-
     [ "$rc" = "0" ] && echo "verify: PASS" || echo "verify: FAIL"
     return $rc
+}
+
+# preflight <path-to.deb> — run BEFORE `apt install`, because a guard that runs
+# afterwards guards nothing: by the time denso-setup exists on the box, the
+# transaction it was meant to veto has already happened.
+cmd_preflight() {
+    need_root
+    deb="${1-}"; [ -f "$deb" ] || die "usage: denso-setup preflight <path-to.deb>"
+    plan="$(mktemp)"
+    # No `|| true`: a simulation that fails to run is NOT a safe empty plan.
+    if ! LC_ALL=C apt-get -s install --no-install-recommends "$deb" > "$plan" 2>&1; then
+        echo "preflight: apt simulation FAILED — refusing:" >&2
+        cat "$plan" >&2; rm -f "$plan"; return 1
+    fi
+    if apt_plan_ok "$plan"; then
+        echo "preflight: PASS — installing this package would not touch a protected JetPack package"
+        echo "preflight: now run:  sudo apt install $deb"
+        rm -f "$plan"; return 0
+    fi
+    rm -f "$plan"; return 1
 }
 
 cmd_unconfigure() {
@@ -982,7 +1106,8 @@ cmd_unconfigure() {
     if [ -f "$STATE/autologin.orig" ] && [ -f "$GDM_CONF" ]; then
         oe="$(cat "$STATE/autologin.orig")"
         ou="$(cat "$STATE/autologin.origuser" 2>/dev/null || echo "")"
-        if gdm_restore_autologin "$GDM_CONF" "$oe" "$ou"; then
+        du="$(cat "$STATE/autologin.user" 2>/dev/null || echo "")"
+        if gdm_restore_autologin "$GDM_CONF" "$du" "$oe" "$ou"; then
             echo "denso-setup: autologin restored (enable='$oe' user='$ou')"
         else
             echo "denso-setup: autologin NOT restored — an admin changed it after us; leaving their setting." >&2
@@ -997,17 +1122,19 @@ cmd_replace_model() {
     user="$(cat "$STATE/user" 2>/dev/null)" || die "not configured"
     eng="$PKG_MODELS/$stem.engine"; side="$PKG_MODELS/$stem.names.json"
     [ -f "$eng" ] && [ -f "$side" ] || die "no packaged model '$stem'"
-    install_pair "$eng" "$side" "$DATA/models" || die "failed to install $stem"
-    chown "$user":"$user" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json"
+    # As the target user — never root-then-chown (see cmd_configure).
+    runuser -u "$user" -- sh -c '. /opt/denso/lib/policy.sh; install_pair "$1" "$2" "$3"' \
+            _ "$eng" "$side" "$DATA/models" || die "failed to install $stem"
     echo "denso-setup: replaced $stem.engine with the packaged one"
 }
 
 case "${1-}" in
+    preflight)     shift; cmd_preflight "$@" ;;
     configure)     shift; cmd_configure "$@" ;;
     verify)        shift; cmd_verify "$@" ;;
     unconfigure)   shift; cmd_unconfigure "$@" ;;
     replace-model) shift; cmd_replace_model "$@" ;;
-    *) echo "usage: denso-setup {configure --user <u> [--autostart] [--enable-autologin] | verify | unconfigure | replace-model <stem>}" >&2
+    *) echo "usage: denso-setup {preflight <deb> | configure --user <u> [--autostart] [--enable-autologin] | verify | unconfigure | replace-model <stem>}" >&2
        exit 2 ;;
 esac
 ```
@@ -1108,7 +1235,10 @@ cd "$HERE"
 APP_VERSION="$(sed -n 's/.*APP_VERSION="\([^"]*\)".*/\1/p' src/app/CMakeLists.txt | head -1)"
 SHA="$(git rev-parse --short HEAD)"
 DIRTY=""
-if ! git diff --quiet || ! git diff --cached --quiet; then
+# --porcelain, NOT `git diff --quiet`: diff ignores UNTRACKED files, so a tree
+# with an untracked source file would package as "clean" and the manifest would
+# lie about what was built.
+if [ -n "$(git status --porcelain)" ]; then
     [ "$ALLOW_DIRTY" = "1" ] || { echo "refusing to package a dirty tree (use --allow-dirty to override)" >&2; exit 1; }
     DIRTY="+dirty"
 fi
@@ -1158,43 +1288,42 @@ done
 for s in postinst prerm postrm; do install -m 0755 "packaging/debian/$s" "$STAGE/DEBIAN/$s"; done
 
 ARCH="$(dpkg --print-architecture)"
-sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/" packaging/debian/control.in > "$STAGE/DEBIAN/control"
 
-# ── DEPENDENCY VERIFICATION (the spec's "the build must fail, never paper over")
+# ── DEPENDENCY DERIVATION — the distro's own tool, as the spec asks.
 #
-# dpkg-shlibdeps cannot be used here: it hard-errors on
-# /usr/local/cuda/lib64/libcudart.so.12 ("no dependency information found") and
-# libopencv ships no .shlibs/.symbols, so the only way to run it is
-# --ignore-missing-info, which silently DROPS deps while looking derived.
-#
-# Instead: derive the owning-package set mechanically and assert the declared
-# Depends: covers it.
-echo ">> verifying declared Depends: against the exe's actual NEEDED sonames"
-DECLARED="$(awk '/^Depends:/,/^Description:/' "$STAGE/DEBIAN/control" | tr ',' '\n' | sed -e 's/^Depends://' -e 's/(.*)//' -e 's/[[:space:]]//g' | grep -v '^$' | grep -v '^Description:')"
-missing=0
-for soname in $(objdump -p "$EXE" | awk '/NEEDED/{print $2}'); do
-    lib="$(ldd "$EXE" | awk -v s="$soname" '$1==s {print $3}')"
-    [ -n "$lib" ] && [ -e "$lib" ] || { echo "  UNRESOLVED $soname" >&2; missing=1; continue; }
-    pkg="$(dpkg -S "$(readlink -f "$lib")" 2>/dev/null | cut -d: -f1 | head -1)"
-    if [ -z "$pkg" ]; then
-        echo "  UNOWNED    $soname -> $lib (no dpkg package owns it — review before shipping)" >&2
-        missing=1; continue
-    fi
-    case "$pkg" in
-        # JetPack-owned. Deliberately NOT declared: they are on the protected
-        # list, and a versioned dep invites apt to touch the JetPack stack. They
-        # ship with the image; --check proves they work at install time.
-        libnvinfer*|cuda-*|nvidia-l4t-*|libc6|libstdc++6|libgcc-s1|zlib1g)
-            echo "  exempt     $soname -> $pkg" ; continue ;;
-    esac
-    if echo "$DECLARED" | grep -qx "$pkg"; then
-        echo "  ok         $soname -> $pkg"
-    else
-        echo "  UNDECLARED $soname -> $pkg  (add it to packaging/debian/control.in)" >&2
-        missing=1
-    fi
-done
-[ "$missing" = "0" ] || { echo "dependency verification FAILED — refusing to build a package with undeclared deps" >&2; exit 1; }
+# dpkg-shlibdeps hard-errors on /usr/local/cuda/lib64/libcudart.so.12 and on
+# NVIDIA's libopencv (neither ships .shlibs/.symbols). The fix is NOT
+# --ignore-missing-info (that DROPS the dep silently while still looking
+# derived) — it is packaging/debian/shlibs.local, which supplies exactly that
+# missing metadata. Verified on the Jetson: with it, shlibdeps exits 0 and emits
+# the full version-constrained set including libnvinfer10 and libc6.
+echo ">> deriving Depends: with dpkg-shlibdeps"
+SHLIBDIR="$(mktemp -d)"
+mkdir -p "$SHLIBDIR/debian"
+cp packaging/debian/shlibs.local "$SHLIBDIR/debian/shlibs.local"
+printf 'Source: denso-digitalreader
+Package: denso-digitalreader
+Architecture: %s
+Depends: ${shlibs:Depends}
+Description: x
+' "$ARCH" > "$SHLIBDIR/debian/control"
+mkdir -p "$SHLIBDIR/debian/denso-digitalreader"
+cp "$EXE" "$SHLIBDIR/debian/denso-digitalreader/denso"
+# NO --ignore-missing-info: if this errors, a dependency is genuinely
+# underivable and shlibs.local needs a line — do not paper over it.
+SHLIBS_LINE="$( cd "$SHLIBDIR" && dpkg-shlibdeps -O debian/denso-digitalreader/denso )" || {
+    echo "dpkg-shlibdeps FAILED — add the missing SONAME to packaging/debian/shlibs.local" >&2
+    rm -rf "$SHLIBDIR"; exit 1; }
+rm -rf "$SHLIBDIR"
+SHLIBS_DEPENDS="${SHLIBS_LINE#shlibs:Depends=}"
+[ -n "$SHLIBS_DEPENDS" ] || { echo "shlibdeps produced an EMPTY Depends — refusing" >&2; exit 1; }
+echo "   derived: $SHLIBS_DEPENDS"
+
+sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$SHLIBS_DEPENDS|"     packaging/debian/control.in > "$STAGE/DEBIAN/control"
+
+# md5sums: `dpkg-deb --build` does NOT generate these, and without them
+# `dpkg -V` verifies nothing — the payload-integrity claim would be empty.
+( cd "$STAGE" && find . -type f ! -path './DEBIAN/*' -printf '%P\0'     | xargs -0 md5sum > DEBIAN/md5sums )
 
 # ── MANIFEST: what this artifact IS, for after-the-fact diagnosis.
 {
@@ -1249,12 +1378,13 @@ A models/*.engine glob would be accidental directory-content selection, and
 models/ is git-ignored, so a forgotten experimental engine with a valid sidecar
 would silently reach production. Hash mismatch is a hard failure.
 
-Dependency verification replaces \${shlibs:Depends}: dpkg-shlibdeps hard-errors on
-libcudart.so.12 and libopencv has no shlibs, so the substvar is only reachable
-via --ignore-missing-info -- which drops deps silently while looking derived. We
-instead walk the exe's NEEDED sonames, resolve each to its owning package, and
-FAIL the build on anything undeclared or unowned. JetPack-owned libs are exempt
-and the exemption is PRINTED, so it is visible rather than silent."
+Depends: is derived by dpkg-shlibdeps -- the distro's own tool -- using
+debian/shlibs.local for the two libraries NVIDIA ships without metadata.
+--ignore-missing-info stays forbidden; if shlibdeps errors, shlibs.local needs a
+line and the build FAILS rather than papering over it.
+
+Generates DEBIAN/md5sums: dpkg-deb --build does not, and without them dpkg -V
+verifies nothing."
 ```
 
 ---
