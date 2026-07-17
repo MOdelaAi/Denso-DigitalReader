@@ -1,0 +1,11 @@
+# Approved production models. build_package.sh --model <path> REFUSES anything
+# not listed here with a matching SHA-256.
+#
+# This is why model selection is not a models/*.engine glob: a glob is accidental
+# directory-content selection, and models/ is git-ignored, so a forgotten
+# experimental engine with a valid sidecar would silently reach production.
+#
+# Format: <stem> <sha256-of-.engine> <trtexec recipe used to build it>
+#
+# To approve a new engine: build it on-device, sha256sum it, add the line.
+digitv2 29b24a69fcee995485b075715c0008e8e1ab938c4d0ace3c9d560bc3278a4356 trtexec --onnx=digitv2.onnx --saveEngine=digitv2.engine --fp16

@@ -249,6 +249,59 @@ is "leak: e2 unchanged after seed_decision_pair"     "$e2"          "SENTINEL_e2
 is "leak: s1 unchanged after seed_decision_pair"     "$s1"          "SENTINEL_s1"
 is "leak: s2 unchanged after seed_decision_pair"     "$s2"          "SENTINEL_s2"
 
+# ── standalone preflight-denso.sh vs the library apt_plan_ok: prove they
+# cannot drift. `denso-setup preflight` cannot protect a FIRST install (it
+# doesn't exist on the box until the .deb containing it already is), so
+# build_package.sh also emits a standalone twin next to the .deb, generated
+# by the ONE shared emitter in packaging/lib/gen_preflight.sh. This proves
+# the standalone script and the library function agree on the SAME fixture
+# plans used above, without requiring a full `tools/build_package.sh` run
+# (which needs aarch64 + the Jetson toolchain).
+. "$HERE/../../packaging/lib/gen_preflight.sh"
+PF="$T/pf"
+mkdir -p "$PF/bin"
+emit_preflight_script "$HERE/../../packaging/lib/policy.sh" "$PF/preflight-denso.sh"
+[ -x "$PF/preflight-denso.sh" ] && ok "preflight: generated standalone script is executable" \
+    || bad "preflight: generated standalone script is executable"
+
+# Fake `id` (the standalone driver root-checks) and a fake `apt-get -s install`
+# that just replays a FIXTURE plan file's content -- this is how a plan file
+# (not a real .deb, per the task's "no full package build" guidance) drives
+# the standalone script through the SAME apt_plan_ok logic the library test
+# above already exercised on that exact file, making the two verdicts
+# directly comparable.
+cat > "$PF/bin/id" <<'EOF'
+#!/bin/sh
+echo 0
+EOF
+cat > "$PF/bin/apt-get" <<'EOF'
+#!/bin/sh
+# args: -s install --no-install-recommends <deb>  (deb is ignored: the
+# fixture plan named by $FAKE_APT_PLAN stands in for a real apt-get -s.)
+[ -n "${FAKE_APT_PLAN-}" ] && [ -f "$FAKE_APT_PLAN" ] || { echo "fake apt-get: FAKE_APT_PLAN not set" >&2; exit 1; }
+cat "$FAKE_APT_PLAN"
+exit 0
+EOF
+chmod +x "$PF/bin/id" "$PF/bin/apt-get"
+: > "$PF/fake.deb"
+
+compare_guards() {
+    label="$1"; fixture="$2"; want_rc="$3"
+    apt_plan_ok "$fixture" >/dev/null 2>&1; lib_rc=$?
+    FAKE_APT_PLAN="$fixture" PATH="$PF/bin:$PATH" "$PF/preflight-denso.sh" "$PF/fake.deb" >/dev/null 2>&1
+    standalone_rc=$?
+    # Each side is graded against the EXPECTED verdict independently -- a bug
+    # that made both guards agreeably wrong (e.g. both always exit 0) would
+    # still be caught here, not hidden by only checking mutual agreement.
+    rc_is "$label: library apt_plan_ok verdict"          "$lib_rc"        "$want_rc"
+    rc_is "$label: standalone preflight-denso.sh verdict" "$standalone_rc" "$want_rc"
+    is   "$label: both guards agree"                     "$lib_rc"        "$standalone_rc"
+}
+
+compare_guards "preflight-drift: plain install"       "$T/plain"  0
+compare_guards "preflight-drift: plan with a removal" "$T/remove" 1
+compare_guards "preflight-drift: plan touching cuda-*" "$T/cuda"  1
+
 rm -rf "$T"
 echo; echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]
