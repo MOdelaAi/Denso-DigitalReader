@@ -141,7 +141,7 @@ Facts that will bite whoever touches this:
 - Don't leak Qt Widgets / OpenCV / ORT / CUDA / TensorRT into `denso_core`.
 - Keep platform behavior behind the existing interfaces; the shared
   letterbox/decode must stay identical across backends.
-- **Never `git add -A` in this repo.** `denso/yolo26n/yolov8n.onnx` are tracked,
+- **Never `git add -A` in this repo.** `denso.onnx` is tracked,
   and the 37 MB `digitv2.onnx` + `note.txt` are now git-ignored — but `.gitignore`
   names `models/digitv2.onnx` **specifically**, not `models/*.onnx`. So a *new*
   model dropped into `models/` is untracked and unignored, and a blanket add

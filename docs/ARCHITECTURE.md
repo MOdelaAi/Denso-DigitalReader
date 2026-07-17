@@ -642,7 +642,7 @@ box that runs for months must never fill the disk or lose the tail.
 
 ## Gotchas
 
-- **Never `git add -A` in this repo.** `denso/yolo26n/yolov8n.onnx` are tracked,
+- **Never `git add -A` in this repo.** `denso.onnx` is tracked,
   and the 37 MB `digitv2.onnx` + `note.txt` are now git-ignored — but `.gitignore`
   names `models/digitv2.onnx` **specifically**, not `models/*.onnx`, so a *new*
   model dropped into `models/` is untracked and unignored. A blanket add still
