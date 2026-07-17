@@ -172,8 +172,14 @@ while read -r libname sover dep rest; do
         bad_map=1; continue
     fi
 
-    lib="$(ldconfig -p | awk -v s="$soname" '$1==s {print $NF; exit}')"
-    [ -n "$lib" ] || lib="$(ldd "$EXE" | awk -v s="$soname" '$1==s {print $3; exit}')"
+    # NO `exit` in these awks. With `set -o pipefail`, an awk that exits early
+    # closes the pipe, the producer (ldconfig/ldd) takes SIGPIPE, pipefail
+    # propagates 141 and `set -e` kills the build. It is also a RACE — it only
+    # fires when the match appears early enough that the producer is still
+    # writing, which is why libcudart passed and libopencv_core did not. Consume
+    # the whole stream and keep the first match instead.
+    lib="$(ldconfig -p | awk -v s="$soname" '$1==s && !f {print $NF; f=1}')"
+    [ -n "$lib" ] || lib="$(ldd "$EXE" | awk -v s="$soname" '$1==s && !f {print $3; f=1}')"
     if [ -z "$lib" ] || [ ! -e "$lib" ]; then
         echo "   BAD  $soname — not resolvable on this box" >&2; bad_map=1; continue
     fi
