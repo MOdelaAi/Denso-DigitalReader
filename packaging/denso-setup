@@ -212,8 +212,10 @@ cmd_verify() {
     # LOADS -- not that it is the one this package approved. Without this, verify
     # says PASS while the appliance runs an engine the MANIFEST does not describe.
     #
-    # WARN, not FAIL: bring-your-own-engine is deliberate (seed_decision_pair
-    # refuses to overwrite for exactly that reason).
+    # `differs` WARNs -- bring-your-own-engine is deliberate (seed_decision_pair
+    # refuses to overwrite for exactly that reason). `seed`/absent FAILs, because
+    # --check below validates every packaged engine by name and would fail on it
+    # anyway; warning here and failing there would be an incoherent contract.
     echo "== packaged models vs the data dir"
     for eng in "$PKG_MODELS"/*.engine; do
         [ -e "$eng" ] || continue
