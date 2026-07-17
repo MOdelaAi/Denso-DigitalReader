@@ -17,6 +17,7 @@ add_library(denso_core STATIC
     hardware/collect.cpp
     settings/settings.cpp
     settings/display.cpp
+    paths/paths.cpp
     db/db.cpp
     settings/repo.cpp
     camera/repo.cpp
