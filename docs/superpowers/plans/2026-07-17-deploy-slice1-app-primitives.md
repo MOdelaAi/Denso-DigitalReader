@@ -139,6 +139,13 @@ TEST_CASE("a trailing slash does not double up in derived paths", "[paths]") {
     REQUIRE(db_file() == QStringLiteral("/opt/denso/data/denso.db"));
 }
 
+TEST_CASE("a filesystem root does not double its separator", "[paths]") {
+    // cleanPath() keeps the separator on a root, so naive concatenation would
+    // produce "//denso.db". This is why the impl uses QDir::filePath.
+    EnvGuard g("/");
+    REQUIRE(db_file() == QStringLiteral("/denso.db"));
+}
+
 TEST_CASE("every derived path hangs off data_dir", "[paths]") {
     EnvGuard g("/opt/denso/data");
     REQUIRE(db_file()               == QStringLiteral("/opt/denso/data/denso.db"));
@@ -224,12 +231,15 @@ QString data_dir() {
     return dir;
 }
 
-QString db_file()              { return data_dir() + QStringLiteral("/denso.db"); }
-QString log_file()             { return data_dir() + QStringLiteral("/denso.log"); }
-QString models_dir()           { return data_dir() + QStringLiteral("/models"); }
-QString trt_cache_dir()        { return models_dir() + QStringLiteral("/trt_cache"); }
-QString lock_file()            { return data_dir() + QStringLiteral("/denso.lock"); }
-QString legacy_settings_json() { return data_dir() + QStringLiteral("/settings.json"); }
+// QDir::filePath, NOT string concatenation: cleanPath() strips a trailing
+// separator from every path EXCEPT a filesystem root, so "/" + "/denso.db" would
+// yield "//denso.db" (and "C:/" → "C://denso.db").
+QString db_file()              { return QDir(data_dir()).filePath(QStringLiteral("denso.db")); }
+QString log_file()             { return QDir(data_dir()).filePath(QStringLiteral("denso.log")); }
+QString models_dir()           { return QDir(data_dir()).filePath(QStringLiteral("models")); }
+QString trt_cache_dir()        { return QDir(models_dir()).filePath(QStringLiteral("trt_cache")); }
+QString lock_file()            { return QDir(data_dir()).filePath(QStringLiteral("denso.lock")); }
+QString legacy_settings_json() { return QDir(data_dir()).filePath(QStringLiteral("settings.json")); }
 
 } // namespace denso::paths
 ```
@@ -243,7 +253,7 @@ In `src/core/CMakeLists.txt`, add to the `add_library(denso_core STATIC ...)` so
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```sh
-cmake --build build && ctest --test-dir build -R "paths" -V
+cmake --build build && ./build/tests/denso_tests "[paths]"
 ```
 Expected: PASS — 6 test cases. Then run the full suite and confirm the baseline number from the header only went **up**:
 ```sh
@@ -262,15 +272,27 @@ tests are unchanged. Nothing is wired to it yet (Task 5)."
 
 ---
 
-### Task 2: `Db::open_read_only` — read configured models without touching the DB
+### Task 2: Honest DB inspection — `Db::open_read_only` + an error-preserving model query
 
 **Files:**
 - Modify: `src/core/db/db.h` (add `open_read_only`; retarget `default_path` docs), `src/core/db/db.cpp`
-- Test: `tests/test_db.cpp` (append)
+- Modify: `src/core/detection/repo.h`, `src/core/detection/repo.cpp` (add `try_attached_model_filenames`)
+- Test: `tests/test_db.cpp` (append), `tests/test_detection_repo.cpp` (append)
 
 **Interfaces:**
 - Consumes: `denso::paths::db_file()` (Task 1).
-- Produces: `static std::optional<Db> Db::open_read_only(const QString& path);` — Task 6 uses it. Returns `nullopt` when the file is absent or unreadable, **without creating it**.
+- Produces (both used by Task 6):
+  - `static std::optional<Db> Db::open_read_only(const QString& path);` — `nullopt` when the file is absent or unreadable, **never creates it**.
+  - `std::optional<std::vector<std::string>> denso::detection::try_attached_model_filenames(const QSqlDatabase& db);` — `nullopt` on **query failure**, an empty vector for **no attachments**.
+
+**Why the second one:** the existing `attached_model_filenames` (`src/core/detection/repo.cpp:48`) returns an empty vector *both* when the query succeeds with no rows *and* when `exec()` fails (`repo.cpp:53` — `if (!q.exec(...)) return out;`). A present-but-corrupt database would therefore pass `--check` as though it were a fresh install. A validation gate cannot conflate "nothing configured" with "I couldn't read it".
+
+**The `--check` mutation guarantee, stated precisely.** "No persistent mutation" is *not* unconditionally achievable against a WAL database, and the plan must not pretend otherwise:
+- `QSQLITE_OPEN_READONLY` maps to `SQLITE_OPEN_READONLY`, which fails rather than creating an absent primary DB. Good.
+- But a WAL reader needs the `-shm` shared-memory index. If it doesn't exist, SQLite may need to create it (requiring directory write access), and it can survive abnormal termination.
+- `immutable=1` is **not** a safe fix: it lets SQLite ignore WAL state and read a stale image — potentially missing the very camera-model rows `--check` exists to validate.
+
+So the guarantee is: **`--check` does not mutate the primary database and creates no root-owned artifacts; SQLite may create target-user-owned WAL support files.** That is why the run-as-target-user rule is mandatory and not merely tidy — it bounds ownership, not mutation.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -311,32 +333,82 @@ TEST_CASE("open_read_only reads but refuses writes", "[db][readonly]") {
         "INSERT INTO settings (key, value) VALUES ('k', 'v')")));
 }
 
-TEST_CASE("open_read_only does not rewrite the journal mode", "[db][readonly]") {
+TEST_CASE("open_read_only leaves the primary database byte-identical", "[db][readonly]") {
     QTemporaryDir dir;
     REQUIRE(dir.isValid());
     const QString path = dir.filePath(QStringLiteral("journal.db"));
 
-    QString before;
     {
         auto rw = Db::open(path);
         REQUIRE(rw.has_value());
-        QSqlQuery q(rw->handle());
-        REQUIRE(q.exec(QStringLiteral("PRAGMA journal_mode")));
-        REQUIRE(q.next());
-        before = q.value(0).toString();
+        REQUIRE(run_migrations(rw->handle()));
     }
 
+    // Hash the file itself rather than re-opening and asking PRAGMA
+    // journal_mode: Db::open() forces WAL again, which would mask exactly the
+    // mutation we're trying to detect.
+    const auto digest = [&path] {
+        QFile f(path);
+        REQUIRE(f.open(QIODevice::ReadOnly));
+        QCryptographicHash h(QCryptographicHash::Sha256);
+        REQUIRE(h.addData(&f));
+        return h.result();
+    };
+
+    const QByteArray before = digest();
     {
         auto ro = Db::open_read_only(path);
         REQUIRE(ro.has_value());
+        QSqlQuery q(ro->handle());
+        REQUIRE(q.exec(QStringLiteral("SELECT count(*) FROM camera")));
+        REQUIRE(q.next());
+    }
+    REQUIRE(digest() == before);
+}
+
+TEST_CASE("open_read_only sets query_only", "[db][readonly]") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("qo.db"));
+    {
+        auto rw = Db::open(path);
+        REQUIRE(rw.has_value());
+        REQUIRE(run_migrations(rw->handle()));
     }
 
-    auto after_db = Db::open(path);
-    REQUIRE(after_db.has_value());
-    QSqlQuery q(after_db->handle());
-    REQUIRE(q.exec(QStringLiteral("PRAGMA journal_mode")));
+    auto ro = Db::open_read_only(path);
+    REQUIRE(ro.has_value());
+    QSqlQuery q(ro->handle());
+    REQUIRE(q.exec(QStringLiteral("PRAGMA query_only")));
     REQUIRE(q.next());
-    REQUIRE(q.value(0).toString() == before);
+    REQUIRE(q.value(0).toInt() == 1);
+}
+```
+
+Add `#include <QCryptographicHash>` to the include block of `tests/test_db.cpp`.
+
+Also append to `tests/test_detection_repo.cpp` (match the includes and helpers already at the top of that file; it opens in-memory DBs via `Db::open_in_memory()` + `run_migrations`):
+
+```cpp
+TEST_CASE("try_attached_model_filenames distinguishes empty from unreadable",
+          "[detection][repo]") {
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db.has_value());
+
+    SECTION("valid schema with no attachments yields an empty vector, not nullopt") {
+        REQUIRE(denso::db::run_migrations(db->handle()));
+        const auto got = denso::detection::try_attached_model_filenames(db->handle());
+        REQUIRE(got.has_value());
+        REQUIRE(got->empty());
+    }
+
+    SECTION("a missing schema yields nullopt, NOT an empty vector") {
+        // No migrations: camera_model/model do not exist, so the query fails.
+        // The old attached_model_filenames() returns {} here, which would let a
+        // corrupt database pass --check as if it were a fresh install.
+        REQUIRE_FALSE(
+            denso::detection::try_attached_model_filenames(db->handle()).has_value());
+    }
 }
 ```
 
@@ -358,9 +430,14 @@ In `src/core/db/db.h`, add directly below the `open_in_memory` declaration:
     /// the file is absent or unreadable, and never creates it (the --check
     /// contract: a missing DB is an empty configured-model set).
     ///
-    /// Caveat: reading a WAL-mode database may still create a transient `-shm`
-    /// sidecar. That is why any root-side caller must drop to the target user
-    /// first — a root-owned `-shm` in an operator-owned data dir breaks the app.
+    /// Guarantee, stated precisely: this does not mutate the PRIMARY database.
+    /// It is NOT unconditionally side-effect-free — a WAL reader needs the `-shm`
+    /// index and SQLite may create it (and it can outlive an abnormal exit). So
+    /// any root-side caller MUST drop to the target user first: that bounds
+    /// OWNERSHIP, not mutation, and a root-owned `-shm` in an operator-owned data
+    /// dir breaks the app. Do not "fix" this with `immutable=1` — that lets
+    /// SQLite ignore WAL state and read a stale image, which could hide the very
+    /// camera-model rows a caller is validating.
     static std::optional<Db> open_read_only(const QString& path);
 ```
 
@@ -378,6 +455,11 @@ std::optional<Db> Db::open_read_only(const QString& path) {
         db.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
         ok = db.open();
         // Deliberately NO journal_mode pragma here (see the header).
+        if (ok) {
+            // Belt and braces: READONLY already rejects writes, but query_only
+            // makes the intent explicit and is what the spec calls for.
+            ok = QSqlQuery(db).exec(QStringLiteral("PRAGMA query_only = ON"));
+        }
     }
     if (!ok) {
         QSqlDatabase::removeDatabase(name);
@@ -387,24 +469,68 @@ std::optional<Db> Db::open_read_only(const QString& path) {
 }
 ```
 
+In `src/core/detection/repo.h`, add next to the existing `attached_model_filenames` declaration:
+
+```cpp
+/// Like attached_model_filenames, but distinguishes "no attachments" (an empty
+/// vector) from "the query failed" (nullopt) — attached_model_filenames returns
+/// {} for both, which would let a corrupt database look like a fresh install to
+/// a validation gate. Prefer this wherever the difference matters.
+std::optional<std::vector<std::string>>
+try_attached_model_filenames(const QSqlDatabase& db);
+```
+and add `#include <optional>` to that header's include block.
+
+In `src/core/detection/repo.cpp`, add beside the existing function, and re-express the old one in terms of it so the query lives in exactly one place:
+
+```cpp
+std::optional<std::vector<std::string>>
+try_attached_model_filenames(const QSqlDatabase& db) {
+    std::vector<std::string> out;
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral(
+            "SELECT DISTINCT m.filename FROM camera_model cm "
+            "JOIN model m ON m.id = cm.model_id ORDER BY m.filename"))) {
+        return std::nullopt;
+    }
+    while (q.next()) {
+        out.push_back(q.value(0).toString().toStdString());
+    }
+    return out;
+}
+
+std::vector<std::string> attached_model_filenames(const QSqlDatabase& db) {
+    return try_attached_model_filenames(db).value_or(std::vector<std::string>{});
+}
+```
+(Delete the old body of `attached_model_filenames`; its behavior is unchanged for every existing caller.)
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```sh
-cmake --build build && ctest --test-dir build -R "db" -V
+cmake --build build
+./build/tests/denso_tests "[db][readonly]"
+./build/tests/denso_tests "[detection][repo]"
 ```
-Expected: PASS, including the three new cases.
+Expected: PASS, including the four new cases. (Run the Catch2 binary with **tags** — `ctest -R "db"` filters on CTest *test names*, which are the `TEST_CASE` strings, so a tag is not a reliable filter.)
 
 If "refuses writes" fails: confirm the connect option string is exactly `QSQLITE_OPEN_READONLY` and that it is set **before** `db.open()`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/db/db.h src/core/db/db.cpp tests/test_db.cpp
-git commit -m "feat(core): add Db::open_read_only for non-mutating inspection
+git add src/core/db/db.h src/core/db/db.cpp src/core/detection/repo.h src/core/detection/repo.cpp tests/test_db.cpp tests/test_detection_repo.cpp
+git commit -m "feat(core): honest DB inspection for the --check gate
 
-open() runs PRAGMA journal_mode=WAL, which rewrites the file header -- so it
-cannot serve --check. open_read_only skips the pragma and never creates an
-absent file (a missing DB is an empty configured-model set)."
+Db::open_read_only: open() runs PRAGMA journal_mode=WAL (db.cpp:76), which
+rewrites the file header -- a mutation, so it cannot serve --check. The
+read-only path skips the pragma, sets query_only, and never creates an absent
+file (a missing DB is an empty configured-model set).
+
+try_attached_model_filenames: the existing attached_model_filenames returns {}
+BOTH for 'no attachments' and for 'the query failed' (repo.cpp:53), so a corrupt
+DB would pass --check as a fresh install. The new API preserves the difference;
+the old one now delegates to it, unchanged for existing callers."
 ```
 
 ---
@@ -609,11 +735,15 @@ In `src/core/CMakeLists.txt`, add to the `denso_core` source list after `paths/p
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```sh
-cmake --build build && ctest --test-dir build -R "instance" -V
+cmake --build build && ./build/tests/denso_tests "[instance]"
 ```
 Expected: PASS — 5 test cases.
 
-**If "a second acquire on the same lock fails" FAILS:** `QLockFile` is documented for *inter*-process use; verify what it does when the holder is the *same* pid. If Qt treats our own live pid as a valid owner the test passes as written. If it instead reclaims the lock, do **not** weaken the test — the guard is then not sound in-process, and you must add a process-local flag (a `static std::atomic_flag` keyed on the canonical path) checked before `tryLock`. Report this before changing the test.
+**If "a second acquire on the same lock fails" FAILS:** `QLockFile` is documented for *inter*-process use. The expected behavior is that the second one reads the recorded pid, sees our own live process, and refuses to reclaim — so the test should pass as written.
+
+If it does **not**: do **not** weaken the test. **Stop and report** — the guard is then unsound in-process and the fix is a design decision, not an improvisation. (For reference, the shape would be a file-scope `std::mutex` guarding a `std::set<QString>` of canonical held paths, consulted before `tryLock` and erased on release/destruction — *not* a single `atomic_flag`, which cannot be keyed by path.)
+
+**Coverage note:** these cases prove same-process behavior only. The real contract is *inter*-process and is proven by the Slice 1 exit criteria (launching a second `denso` while one runs) and by Slice 2's `prerm` refusing an upgrade under a live app.
 
 - [ ] **Step 5: Commit**
 
@@ -636,7 +766,9 @@ rename-rotated log silently eat data. Not wired up yet (Task 5)."
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `namespace denso::cli` — `enum class Mode { Gui, Version, Check, CheckRunning, CheckMigrations, Error }`, `struct Command { Mode mode = Mode::Gui; QString arg; QString error; }`, `Command parse(const QStringList& args)` (args **exclude** `argv[0]`), `bool is_headless(Mode m)`, `QString usage()`. Tasks 5 and 6 use these exact names.
+- Produces: `namespace denso::cli` — `enum class Mode { Gui, Version, Check, CheckRunning, CheckMigrations, Error }`, `struct Command { Mode mode = Mode::Gui; QString arg; QStringList engines; QString error; }`, `Command parse(const QStringList& args)` (args **exclude** `argv[0]`), `bool is_headless(Mode m)`, `QString usage()`. Tasks 5 and 6 use these exact names.
+
+**Why `--check` takes repeatable `--engine <filename>`:** on a **fresh install** there is no database, so the configured-model set is empty — and a `--check` that only validates configured models would load **zero engines** and pass, even with a corrupt packaged `digitv2.engine`. The spec makes package engines an activation blocker too. Scanning `models/*.engine` instead is wrong: an unrelated operator engine must not block an upgrade. So the caller names them, and Slice 2's `denso-setup` passes the ones from its tracked package manifest.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -697,6 +829,36 @@ TEST_CASE("a trailing extra argument is an error", "[cli]") {
     REQUIRE(parse({QStringLiteral("--check-migrations"), QStringLiteral("a"),
                    QStringLiteral("b")}).mode == Mode::Error);
 }
+
+TEST_CASE("--check takes zero or more --engine names", "[cli]") {
+    SECTION("none") {
+        const Command c = parse({QStringLiteral("--check")});
+        REQUIRE(c.mode == Mode::Check);
+        REQUIRE(c.engines.isEmpty());
+    }
+    SECTION("one") {
+        const Command c = parse({QStringLiteral("--check"), QStringLiteral("--engine"),
+                                 QStringLiteral("digitv2.engine")});
+        REQUIRE(c.mode == Mode::Check);
+        REQUIRE(c.engines == QStringList{QStringLiteral("digitv2.engine")});
+    }
+    SECTION("repeated") {
+        const Command c = parse({QStringLiteral("--check"),
+                                 QStringLiteral("--engine"), QStringLiteral("a.engine"),
+                                 QStringLiteral("--engine"), QStringLiteral("b.engine")});
+        REQUIRE(c.mode == Mode::Check);
+        REQUIRE(c.engines == QStringList{QStringLiteral("a.engine"), QStringLiteral("b.engine")});
+    }
+}
+
+TEST_CASE("--engine without a value is an error", "[cli]") {
+    REQUIRE(parse({QStringLiteral("--check"), QStringLiteral("--engine")}).mode == Mode::Error);
+}
+
+TEST_CASE("--engine only applies to --check", "[cli]") {
+    REQUIRE(parse({QStringLiteral("--version"), QStringLiteral("--engine"),
+                   QStringLiteral("a.engine")}).mode == Mode::Error);
+}
 ```
 
 Register `test_cli_args.cpp` in `tests/CMakeLists.txt`.
@@ -735,8 +897,9 @@ enum class Mode {
 
 struct Command {
     Mode mode = Mode::Gui;
-    QString arg;    ///< CheckMigrations: the db path to migrate
-    QString error;  ///< Error: the human-readable reason
+    QString arg;         ///< CheckMigrations: the db path to migrate
+    QStringList engines; ///< Check: extra engine filenames to validate (--engine)
+    QString error;       ///< Error: the human-readable reason
 };
 
 /// `args` EXCLUDES argv[0].
@@ -759,38 +922,65 @@ namespace denso::cli {
 
 QString usage() {
     return QStringLiteral(
-        "usage: denso [--version | --check | --check-running |\n"
-        "              --check-migrations <db-path>]\n"
+        "usage: denso [--version | --check [--engine <file>]... |\n"
+        "              --check-running | --check-migrations <db-path>]\n"
         "\n"
         "  (no flags)                 run the application\n"
         "  --version                  print the version and exit\n"
-        "  --check                    validate runtime + engines; no persistent mutation\n"
+        "  --check                    validate the data dir + every engine the DB\n"
+        "                             references, plus each --engine named here\n"
+        "                             (does not mutate the primary database)\n"
+        "  --engine <file>            repeatable; a models/ filename --check must\n"
+        "                             validate even when no DB references it\n"
         "  --check-running            exit 0 if an instance holds the lock, 1 if not\n"
         "  --check-migrations <db>    run the migration chain against <db> ONLY\n");
 }
 
 bool is_headless(Mode m) { return m != Mode::Gui; }
 
+namespace {
+
+Command error(const QString& why) { return Command{Mode::Error, {}, {}, why}; }
+
+/// --check [--engine <file>]...  — the only mode taking trailing options.
+Command parse_check(const QStringList& rest) {
+    Command c;
+    c.mode = Mode::Check;
+    for (int i = 0; i < rest.size(); ++i) {
+        if (rest.at(i) != QStringLiteral("--engine")) {
+            return error(QStringLiteral("unexpected argument after --check: %1")
+                             .arg(rest.at(i)));
+        }
+        if (i + 1 >= rest.size()) {
+            return error(QStringLiteral("--engine requires a models/ filename"));
+        }
+        c.engines << rest.at(++i);
+    }
+    return c;
+}
+
+} // namespace
+
 Command parse(const QStringList& args) {
-    if (args.isEmpty()) return Command{Mode::Gui, {}, {}};
+    if (args.isEmpty()) return Command{Mode::Gui, {}, {}, {}};
 
     const QString& flag = args.first();
+    const QStringList rest = args.mid(1);
+
+    if (flag == QStringLiteral("--check")) return parse_check(rest);
 
     if (flag == QStringLiteral("--check-migrations")) {
-        if (args.size() == 2) return Command{Mode::CheckMigrations, args.at(1), {}};
-        return Command{Mode::Error, {},
-                       QStringLiteral("--check-migrations requires exactly one "
-                                      "database path")};
+        if (rest.size() == 1) return Command{Mode::CheckMigrations, rest.first(), {}, {}};
+        return error(QStringLiteral("--check-migrations requires exactly one "
+                                    "database path"));
     }
 
-    if (args.size() == 1) {
-        if (flag == QStringLiteral("--version"))       return Command{Mode::Version, {}, {}};
-        if (flag == QStringLiteral("--check"))         return Command{Mode::Check, {}, {}};
-        if (flag == QStringLiteral("--check-running")) return Command{Mode::CheckRunning, {}, {}};
+    if (rest.isEmpty()) {
+        if (flag == QStringLiteral("--version"))       return Command{Mode::Version, {}, {}, {}};
+        if (flag == QStringLiteral("--check-running")) return Command{Mode::CheckRunning, {}, {}, {}};
     }
 
-    return Command{Mode::Error, {},
-                   QStringLiteral("unknown or malformed option: %1").arg(flag)};
+    return error(QStringLiteral("unknown or malformed option: %1").arg(flag));
 }
 
 } // namespace denso::cli
@@ -805,7 +995,7 @@ In `src/core/CMakeLists.txt`, add to the `denso_core` source list after `instanc
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```sh
-cmake --build build && ctest --test-dir build -R "cli" -V
+cmake --build build && ./build/tests/denso_tests "[cli]"
 ```
 Expected: PASS — 7 test cases.
 
@@ -854,22 +1044,34 @@ fail=0
 chk() { # chk <description> <expected-rc> <actual-rc>
   if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1 (want rc=$2, got rc=$3)"; fail=1; fi
 }
+# BEFORE the CLI dispatch exists, every one of these flags falls through and
+# opens the GUI, which blocks forever. Bound each run so the red test FAILS fast
+# instead of hanging the worker's terminal (timeout returns 124).
+run() { timeout 20 "$EXE" "$@" >/dev/null 2>&1; }
 
 TMP=$(mktemp -d)
 export DENSO_DATA_DIR="$TMP"
+# Keep backend/tmp caches inside the sandbox so a stray write can't land
+# somewhere the assertions below don't look.
+export TMPDIR="$TMP/tmp"; mkdir -p "$TMPDIR"
+export CUDA_CACHE_PATH="$TMP/cuda-cache"
 
-"$EXE" --version >/dev/null 2>&1;            chk "--version exits 0" 0 $?
-"$EXE" --wat >/dev/null 2>&1;                chk "unknown flag exits 2" 2 $?
-"$EXE" --check-migrations >/dev/null 2>&1;   chk "--check-migrations without path exits 2" 2 $?
-"$EXE" --check-running >/dev/null 2>&1;      chk "--check-running with nothing running exits 1" 1 $?
+run --version;            chk "--version exits 0" 0 $?
+run --wat;                chk "unknown flag exits 2" 2 $?
+run --check-migrations;   chk "--check-migrations without path exits 2" 2 $?
+run --check-running;      chk "--check-running with nothing running exits 1" 1 $?
+[ -f "$TMP/denso.lock" ] && { echo "FAIL - --check-running left a lock corpse"; fail=1; } || echo "ok   - --check-running left no lock"
 
 # --version must not create ANY state in the data dir.
 if [ -z "$(ls -A "$TMP")" ]; then echo "ok   - --version left the data dir empty"; else echo "FAIL - --version created: $(ls -A "$TMP")"; fail=1; fi
 
 # --check-migrations builds the chain in a throwaway db and touches nothing else.
-"$EXE" --check-migrations "$TMP/copy.db" >/dev/null 2>&1; chk "--check-migrations exits 0" 0 $?
+run --check-migrations "$TMP/copy.db"; chk "--check-migrations exits 0" 0 $?
 [ -f "$TMP/copy.db" ] && echo "ok   - migration ran against the given path" || { echo "FAIL - copy.db absent"; fail=1; }
-[ -f "$TMP/denso.db" ] && { echo "FAIL - --check-migrations touched the live denso.db"; fail=1; } || echo "ok   - live denso.db untouched"
+for artifact in denso.db denso.log denso.lock models; do
+  [ -e "$TMP/$artifact" ] && { echo "FAIL - --check-migrations created $artifact"; fail=1; } \
+                          || echo "ok   - --check-migrations created no $artifact"
+done
 
 rm -rf "$TMP"
 exit $fail
@@ -979,10 +1181,14 @@ int run_headless(const denso::cli::Command& cmd) {
 } // namespace denso::app
 ```
 
-**Until Task 6 lands**, add this stub above `run_headless` so the file compiles:
+**Until Task 6 lands**, `run_check()` does not exist. Add it as the **last function inside the existing anonymous namespace above** — i.e. directly after `run_check_migrations` and before the closing `} // namespace` — so it is declared before `run_headless` uses it. Do not open a second anonymous namespace:
 
 ```cpp
-namespace { int run_check() { std::fprintf(stderr, "check: not implemented\n"); return 1; } }
+// Placeholder — Task 6 replaces this with real engine validation.
+int run_check() {
+    std::fprintf(stderr, "check: not implemented\n");
+    return 1;
+}
 ```
 
 In `src/app/main.cpp`, add to the include block:
@@ -1109,8 +1315,13 @@ state off the (root-owned, upgrade-replaced) program dir. Default unchanged.
 - Test: `tests/manual/slice1_modes.sh` (extend), plus an on-device run
 
 **Interfaces:**
-- Consumes: `denso::paths::*` (Task 1); `denso::db::Db::open_read_only` (Task 2); `denso::detection::attached_model_filenames(const QSqlDatabase&)` (existing, `src/core/detection/repo.cpp:48`); **`denso::ui::read_names_sidecar(const std::filesystem::path&)`** (existing, `detection/class_names_sidecar.h`, namespace `denso::ui`, in the `denso_detection` lib); `denso::ui::BackendEngine` (existing alias in `detection/engine_registry.h` — `OrtEngine` on Windows, `TrtEngine` on Linux; both expose `ok()` and a `(path, cache_dir)` ctor, **but `TrtEngine::ok()` is a hardcoded `return true`** — on Linux the ctor throwing is the only real signal).
-- Produces: `int run_check()` — the final gate `denso-setup verify` calls in Slice 2.
+- Consumes: `denso::paths::*` (Task 1); `denso::db::Db::open_read_only` **and** `denso::detection::try_attached_model_filenames` (Task 2); `denso::cli::Command::engines` (Task 4); `denso::ui::BackendEngine` (existing alias in `detection/engine_registry.h` — `OrtEngine` on Windows, `TrtEngine` on Linux). All three engines expose `class_names()` (`inference_engine.h:29`) and a `(path, cache_dir)` ctor.
+- Produces: `int run_check(const QStringList& extra_engines)` — the final gate `denso-setup verify` calls in Slice 2.
+
+**Three traps this task exists to avoid** (all verified in the source):
+1. **`TrtEngine::ok()` is a hardcoded `return true`** (`trt_engine.h:42` — "ctor either succeeds or throws"), so on the Jetson the **try/catch** is the only real signal. `OrtEngine::ok()` (`ort_engine.h:26`) is a real check. Keep both.
+2. **Do not parse the sidecar here.** `TrtEngine`'s ctor already reads `<stem>.names.json` itself (`trt_engine.cpp:89`) and throws without it, while Windows models are `.onnx` with names from ONNX metadata and **no sidecar at all** — so an unconditional `read_names_sidecar` would fail every valid Windows model. Validate `engine.class_names()` instead and let each backend enforce its own rule.
+3. **`attached_model_filenames` cannot be used** — it returns `{}` on query failure (`repo.cpp:53`), so a corrupt DB would read as a fresh install. Use Task 2's `try_attached_model_filenames`.
 
 **What it must NOT do** (spec, verified): call `EngineRegistry::warm_up()` (`engine_registry.cpp:42` creates the cache dir); open the DB via `Db::open()` (`db.cpp:76` rewrites journal mode); call `sync_models`; run migrations; take the lock; construct `QApplication`.
 
@@ -1121,19 +1332,36 @@ state off the (root-owned, upgrade-replaced) program dir. Default unchanged.
 Append to `tests/manual/slice1_modes.sh`, before the `rm -rf "$TMP"` line:
 
 ```sh
-# --check on an empty data dir: no DB and no engines is a VALID fresh install
-# (a fresh DB references no cameras, so it requires no engines), and it must not
-# conjure a database or a trt_cache into existence.
-"$EXE" --check >/dev/null 2>&1; chk "--check on a fresh data dir exits 0" 0 $?
-[ -f "$TMP/denso.db" ] && { echo "FAIL - --check created denso.db"; fail=1; } || echo "ok   - --check created no denso.db"
-[ -d "$TMP/models/trt_cache" ] && { echo "FAIL - --check created trt_cache"; fail=1; } || echo "ok   - --check created no trt_cache"
-[ -f "$TMP/denso.log" ] && { echo "FAIL - --check initialized the log sink"; fail=1; } || echo "ok   - --check wrote no log"
-[ -f "$TMP/denso.lock" ] && { echo "FAIL - --check took the lock"; fail=1; } || echo "ok   - --check took no lock"
+# --check on an empty data dir: no DB and no engines is a VALID fresh install (a
+# fresh DB references no cameras, so it requires no engines).
+CHK=$(mktemp -d); export DENSO_DATA_DIR="$CHK"
+run --check; chk "--check on a fresh data dir exits 0" 0 $?
 
-# A data dir the app cannot write is a hard failure, not a warning.
-RO=$(mktemp -d); chmod 500 "$RO"
-DENSO_DATA_DIR="$RO" "$EXE" --check >/dev/null 2>&1; chk "--check fails on an unwritable data dir" 1 $?
-chmod 700 "$RO"; rm -rf "$RO"
+# Persistent-mutation INVENTORY, not a list of four guesses: after --check the
+# data dir must be byte-for-byte empty. Anything at all (denso.db, denso.log,
+# denso.lock, models/, trt_cache, a -wal/-shm, a leftover probe file) is a
+# contract violation, including artifacts we didn't think to name.
+LEFT=$(ls -A "$CHK")
+if [ -z "$LEFT" ]; then echo "ok   - --check left the data dir empty"
+else echo "FAIL - --check created: $LEFT"; fail=1; fi
+
+# A named package engine that isn't there must FAIL, even with no database --
+# this is the fresh-install case where configured-only checking would pass a
+# corrupt/absent packaged engine.
+run --check --engine absent.engine; chk "--check --engine <missing> exits 1" 1 $?
+
+# A present-but-corrupt database must FAIL, not read as "fresh".
+BAD=$(mktemp -d); export DENSO_DATA_DIR="$BAD"
+printf 'this is not a sqlite file' > "$BAD/denso.db"
+run --check; chk "--check on a corrupt database exits 1" 1 $?
+rm -rf "$BAD"
+
+export DENSO_DATA_DIR="$TMP"
+rm -rf "$CHK"
+
+# NOTE: the unwritable-data-dir case is NOT tested here. `chmod 500` does not
+# reliably make a directory unwritable to a Windows process under MSYS2, so the
+# test would fail despite correct behavior. It is covered on the Jetson below.
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1145,19 +1373,20 @@ Expected: FAIL — `--check` is the Task 5 stub, so it exits 1 with "check: not 
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/app/cli/run_headless.cpp`, delete the stub and add these includes:
+In `src/app/cli/run_headless.cpp`, delete the stub and add these includes (note: **no** `class_names_sidecar.h` — see `validate_model`'s comment):
 
 ```cpp
-#include "detection/class_names_sidecar.h"
-#include "detection/engine_registry.h"
+#include "detection/engine_registry.h"   // denso::ui::BackendEngine
 #include "detection/repo.h"
 
 #include <QDir>
 #include <QFileInfo>
+#include <QStringList>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 
-#include <filesystem>
+#include <algorithm>
+#include <exception>
 #include <optional>
 #include <string>
 #include <vector>
@@ -1184,15 +1413,17 @@ bool data_dir_writable() {
 
 /// The engines configured cameras actually need. A MISSING database is an empty
 /// set, never an error and never a reason to create one: a fresh DB references
-/// no cameras (detection::attached_model_filenames joins camera_model), so a
-/// clean install legitimately needs no engines at all.
+/// no cameras (the query joins camera_model), so a clean install legitimately
+/// needs no *configured* engines at all.
 ///
-/// Returns nullopt for "present but UNREADABLE", which is a hard failure and
-/// must never be confused with the empty (fresh-install) case.
+/// Returns nullopt for "present but UNREADABLE" — a hard failure that must never
+/// be confused with the empty fresh-install case. This is why it uses
+/// try_attached_model_filenames: the plain attached_model_filenames returns {}
+/// for a failed query too (repo.cpp:53).
 std::optional<std::vector<std::string>> configured_models() {
     const QString db_path = denso::paths::db_file();
     if (!QFileInfo::exists(db_path)) {
-        std::printf("check: no database yet (fresh install) — no engines required\n");
+        std::printf("check: no database yet (fresh install) — no configured engines\n");
         return std::vector<std::string>{};
     }
     auto db = denso::db::Db::open_read_only(db_path);
@@ -1200,35 +1431,47 @@ std::optional<std::vector<std::string>> configured_models() {
         std::fprintf(stderr, "check: cannot read database: %s\n", qPrintable(db_path));
         return std::nullopt;
     }
-    return denso::detection::attached_model_filenames(db->handle());
+    auto models = denso::detection::try_attached_model_filenames(db->handle());
+    if (!models) {
+        std::fprintf(stderr, "check: database is unreadable (bad schema?): %s\n",
+                     qPrintable(db_path));
+        return std::nullopt;
+    }
+    return models;
 }
 
-/// Load one engine the way the APP does — construct the backend directly, which
-/// reads the engine + sidecar and (on Linux) writes nothing. trtexec
-/// --loadEngine would only prove TensorRT can read the plan, not that this app
-/// can load and bind it.
-bool validate_engine(const std::string& filename, const QString& cache_dir) {
-    const QString path = denso::paths::models_dir() + QStringLiteral("/") +
-                         QString::fromStdString(filename);
+/// Load one model the way the APP does — construct the backend directly. That
+/// reads the file and, on Linux, writes nothing (trt_engine.cpp:87 ignores
+/// cache_dir). `trtexec --loadEngine` would only prove TensorRT can read the
+/// plan, not that THIS app can load and bind it.
+///
+/// Class names are validated via engine.class_names(), NOT by parsing a sidecar
+/// here: the backends source names differently and each already enforces its own
+/// rule — TrtEngine reads <stem>.names.json in its ctor (trt_engine.cpp:89) and
+/// throws without it; OrtEngine reads them from the ONNX metadata (there is no
+/// sidecar for a .onnx). Parsing a sidecar unconditionally would fail every
+/// valid Windows model.
+bool validate_model(const std::string& filename, const QString& cache_dir) {
+    const QString path =
+        QDir(denso::paths::models_dir()).filePath(QString::fromStdString(filename));
     if (!QFileInfo::exists(path)) {
-        std::fprintf(stderr, "check: FAIL %s — engine missing\n", filename.c_str());
+        std::fprintf(stderr, "check: FAIL %s — file missing from %s\n", filename.c_str(),
+                     qPrintable(denso::paths::models_dir()));
         return false;
     }
     try {
-        const auto names = denso::ui::read_names_sidecar(
-            std::filesystem::path(path.toStdString()));
-        if (!names || names->empty()) {
-            std::fprintf(stderr, "check: FAIL %s — missing/empty .names.json sidecar\n",
-                         filename.c_str());
-            return false;
-        }
-        // BOTH signals are needed, because the two backends fail differently:
+        // Both signals are needed — the backends fail differently.
         // TrtEngine::ok() is a hardcoded `return true` (trt_engine.h:42 — "ctor
         // either succeeds or throws"), so on the Jetson the try/catch IS the
-        // gate; OrtEngine::ok() is a real check (ort_engine.h:26). Keep both.
+        // gate; OrtEngine::ok() is a real check (ort_engine.h:26).
         denso::ui::BackendEngine engine(path.toStdString(), cache_dir.toStdString());
         if (!engine.ok()) {
-            std::fprintf(stderr, "check: FAIL %s — engine did not load\n", filename.c_str());
+            std::fprintf(stderr, "check: FAIL %s — did not load\n", filename.c_str());
+            return false;
+        }
+        if (engine.class_names().empty()) {
+            std::fprintf(stderr, "check: FAIL %s — no class names (missing sidecar / "
+                                 "ONNX metadata)\n", filename.c_str());
             return false;
         }
     } catch (const std::exception& e) {
@@ -1239,15 +1482,31 @@ bool validate_engine(const std::string& filename, const QString& cache_dir) {
     return true;
 }
 
-int run_check() {
+int run_check(const QStringList& extra_engines) {
     if (!data_dir_writable()) return 1;
 
-    const auto maybe_required = configured_models();
-    if (!maybe_required) return 1;  // present but unreadable — NOT the same as empty
-    const std::vector<std::string>& required = *maybe_required;
+    const auto configured = configured_models();
+    if (!configured) return 1;  // present but unreadable — NOT the same as empty
+
+    // Validate the UNION of what the DB references and what the caller named.
+    // Why the union: on a fresh install the DB is empty, so configured-only would
+    // load ZERO engines and pass even with a corrupt packaged engine — yet the
+    // spec makes package engines an activation blocker. Why not scan models/*:
+    // an unrelated operator engine must never block an upgrade. Slice 2's
+    // denso-setup passes --engine from its tracked package manifest.
+    std::vector<std::string> targets = *configured;
+    for (const QString& e : extra_engines) targets.push_back(e.toStdString());
+    std::sort(targets.begin(), targets.end());
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+
+    if (targets.empty()) {
+        std::printf("check: PASS (fresh install; no engines required)\n");
+        return 0;
+    }
 
     // Throwaway cache: TrtEngine ignores cache_dir (trt_engine.cpp:87) but
-    // OrtEngine uses it, so this keeps "no persistent mutation" true on both.
+    // OrtEngine uses it, so this keeps the real models/trt_cache untouched on
+    // BOTH platforms.
     QTemporaryDir cache;
     if (!cache.isValid()) {
         std::fprintf(stderr, "check: cannot create a temporary cache dir\n");
@@ -1255,12 +1514,18 @@ int run_check() {
     }
 
     bool ok = true;
-    for (const std::string& m : required) ok = validate_engine(m, cache.path()) && ok;
+    for (const std::string& m : targets) ok = validate_model(m, cache.path()) && ok;
 
-    std::printf("check: %s (%zu engine(s) required)\n", ok ? "PASS" : "FAIL",
-                required.size());
+    std::printf("check: %s (%zu model(s) validated)\n", ok ? "PASS" : "FAIL",
+                targets.size());
     return ok ? 0 : 1;
 }
+```
+
+and change the dispatch line in `run_headless` (added in Task 5) from `case Mode::Check: return run_check();` to:
+
+```cpp
+        case Mode::Check:           return run_check(cmd.engines);
 ```
 
 - [ ] **Step 4: Run it to verify it passes**
@@ -1270,38 +1535,59 @@ cmake --build build && ./tests/manual/slice1_modes.sh
 ```
 Expected: every line `ok`.
 
-Then the real gate — **on the Jetson**, where a genuine TensorRT engine exists (`--check` cannot validate an engine on the Windows box; there is no `.engine` for `sm_87` there):
+Then the real gate — **on the Jetson** (192.168.1.15), where a genuine `sm_87` TensorRT engine exists. The Windows box has no `.engine`, so it can never prove this path:
+
 ```sh
-# on 192.168.1.15, after building there
+# on the Jetson, after building there
 export DENSO_DATA_DIR=$HOME/project/Denso-DigitalReader/build/src/app
-./build/src/app/denso --check      # expect: "check: ok digitv2.engine" then "check: PASS"
-ls $DENSO_DATA_DIR/models/trt_cache 2>/dev/null   # must be unchanged/absent — no mutation
+
+# 1. the packaged engine validates by name, with no DB involvement
+./build/src/app/denso --check --engine digitv2.engine
+#    expect: "check: ok   digitv2.engine" then "check: PASS (1 model(s) validated)"
+
+# 2. no mutation: trt_cache must be untouched (record before/after)
+ls -la $DENSO_DATA_DIR/models/trt_cache
+
+# 3. the unwritable-data-dir case, which MSYS2 cannot test honestly
+sudo install -d -o root -g root -m 555 /tmp/denso-ro
+DENSO_DATA_DIR=/tmp/denso-ro ./build/src/app/denso --check; echo "rc=$?"   # expect rc=1
+sudo rmdir /tmp/denso-ro
+
+# 4. a real corrupt-engine failure (the whole point of the gate)
+cp $DENSO_DATA_DIR/models/digitv2.engine /tmp/good.engine
+printf 'corrupt' >> $DENSO_DATA_DIR/models/digitv2.engine
+./build/src/app/denso --check --engine digitv2.engine; echo "rc=$?"   # expect rc=1
+cp /tmp/good.engine $DENSO_DATA_DIR/models/digitv2.engine             # RESTORE IT
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/app/cli/run_headless.cpp tests/manual/slice1_modes.sh
-git commit -m "feat(app): implement --check — validate engines via the real backend
+git commit -m "feat(app): implement --check — validate models via the real backend
 
 Constructs BackendEngine directly rather than calling EngineRegistry::warm_up
 (engine_registry.cpp:42 creates trt_cache) and reads the DB via open_read_only
-(db.cpp:76's WAL pragma is a mutation). A missing DB is an empty configured-model
-set, never created. Writability is a real create-and-remove probe. The cache dir
-is a QTemporaryDir so OrtEngine can't write the real trt_cache on Windows either."
+(db.cpp:76's WAL pragma is a mutation). Validates the UNION of DB-referenced
+models and --engine names: on a fresh install the DB is empty, so a
+configured-only check would load ZERO engines and pass even with a corrupt
+packaged engine. Class names come from engine.class_names(), not a sidecar parse
+-- Windows .onnx models have no sidecar, and TrtEngine already reads its own.
+The cache dir is a QTemporaryDir so OrtEngine can't write the real trt_cache on
+Windows either."
 ```
 
 ---
 
 ## Slice 1 exit criteria
 
-- [ ] `ctest --test-dir build` ≥ the baseline recorded in the header, with the ~18 new cases passing.
+- [ ] `ctest --test-dir build` ≥ the baseline recorded in the header, with the ~27 new cases passing.
 - [ ] `./tests/manual/slice1_modes.sh` all `ok` on the Windows box.
 - [ ] With `DENSO_DATA_DIR` **unset**, the GUI behaves exactly as before (db/log/models beside the exe) — this is what keeps Windows dev and the test suite unchanged.
 - [ ] With `DENSO_DATA_DIR` set, the GUI puts db/log/models there and nothing in the program dir.
-- [ ] Launching a second `denso` while one runs shows "already running" and exits 3.
-- [ ] On the Jetson: `denso --check` passes against the real `digitv2.engine` and creates no `trt_cache`.
+- [ ] **Inter-process** guard (the contract the Catch2 cases can't prove): launching a second `denso` while one runs shows "already running" and exits 3.
 - [ ] `denso --check-running` exits 0 while the GUI runs, 1 when it does not.
+- [ ] On the Jetson, all four on-device checks from Task 6 Step 4: the real `digitv2.engine` validates by `--engine` name; `trt_cache` is unchanged; an unwritable data dir exits 1; and a **deliberately corrupted engine exits 1** (restore it afterwards).
 
 ## What Slice 1 deliberately does NOT do
 
