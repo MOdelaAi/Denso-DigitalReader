@@ -198,7 +198,17 @@ cmd_verify() {
 
     echo "== database backup (the remedy if a migration goes wrong)"
     if [ -f "$DATA/denso.db" ]; then
-        bk="$DATA/denso.db.backup-$(date +%Y%m%d-%H%M%S)"
+        # A UNIQUE DIRECTORY, not a timestamped filename. `date +%H%M%S` has
+        # one-second resolution, so two verifies in the same second collide —
+        # and the dangerous case is subtle: a leftover `<name>-wal` from an
+        # earlier run pairing with a NEWER denso.db that has no WAL gives a
+        # MISMATCHED recovery set, which is worse than having no backup at all,
+        # because it looks restorable. mktemp -d makes each pair unique and
+        # self-contained, and the names inside stay canonical so SQLite
+        # associates them.
+        bkdir="$(runuser -u "$user" -- mktemp -d "$DATA/backup-$(date +%Y%m%d-%H%M%S)-XXXXXX")" \
+            || die "cannot create a backup directory under $DATA"
+        bk="$bkdir/denso.db"
         # As the target user, not root-then-chown: a failed WAL copy, a failed
         # chown, or power loss between them would strand root-owned files in an
         # operator-owned data dir -- files the app then cannot write. Same class
