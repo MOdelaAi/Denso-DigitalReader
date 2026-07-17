@@ -68,9 +68,11 @@ void CameraGrid::clear() {
         delete t;
     }
     tiles_.clear();
-    // Streams (and their DetectionProcessors that reference the reporter) are
-    // stopped/joined above, so no capture thread can still call the reporter —
-    // safe to tear it down, then the client it posts to.
+    // Safe to tear down now: deleting each stream above destroyed the
+    // FrameProcessor it owns, and ~DetectionProcessor joins its INFERENCE worker
+    // — the thread that actually calls on_zones (capture threads never do). That
+    // join, not the capture-thread stop, is what guarantees no worker can still
+    // reach the reporter. Tear down the reporter, then the client it posts to.
     reporter_.reset();
     brazing_reporter_.reset();
     rows_ = 0;
