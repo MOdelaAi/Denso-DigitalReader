@@ -1,4 +1,5 @@
-// SQLite persistence base. One file, `denso.db`, next to the executable — the
+// SQLite persistence base. One file, `denso.db`, in the data dir (denso::paths —
+// beside the executable unless $DENSO_DATA_DIR says otherwise) — the
 // single durable store. Connection setup lives here; the schema and its
 // version-gated migrations live in run_migrations(). Ported 1:1 from the Rust
 // `db` module (rusqlite → Qt6::Sql / QSQLITE driver).

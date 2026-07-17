@@ -2,7 +2,8 @@
 
 Desktop app (C++ / Qt Widgets / CMake) for reading a 4-digit 7-segment display,
 with a settings UI for display resolution, theme, hardware spec, and network
-configuration. Single SQLite store (`denso.db`) next to the executable.
+configuration. Single SQLite store (`denso.db`) in the data dir — beside the
+executable by default, or wherever `$DENSO_DATA_DIR` points (see `denso::paths`).
 
 Ported 1:1 from a Rust + Slint original. The port has landed — `main` **is** the
 C++/Qt app; the `port/cpp-qt` branch no longer exists.
