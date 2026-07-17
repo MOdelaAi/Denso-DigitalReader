@@ -307,6 +307,12 @@ cmd_preflight() {
     deb="${1-}"; [ -f "$deb" ] || die "usage: denso-setup preflight <path-to.deb>"
     plan="$(mktemp)"
     # No `|| true`: a simulation that fails to run is NOT a safe empty plan.
+    # apt needs a PATH, not a bare name: `apt-get install foo.deb` treats foo.deb as
+    # a PACKAGE NAME and fails with "Unable to locate package foo.deb". Only an
+    # argument containing a slash is read as a local file. Normalise to an absolute
+    # path so the operator can pass `x.deb`, `./x.deb` or a full path and get the
+    # same behaviour -- and so the command we PRINT is one that actually works.
+    deb="$(cd "$(dirname "$deb")" && pwd)/$(basename "$deb")"
     if ! LC_ALL=C apt-get -s install --no-install-recommends "$deb" > "$plan" 2>&1; then
         echo "preflight: apt simulation FAILED — refusing:" >&2
         cat "$plan" >&2; rm -f "$plan"; return 1
