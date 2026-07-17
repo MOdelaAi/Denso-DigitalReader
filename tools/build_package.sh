@@ -48,14 +48,23 @@ else
     echo "   FAIL L4T is '${L4T:-unknown}', expected exactly 36.5.0 -- the shipped engines are TRT 10.3/sm_87 pinned to this image" >&2
     CONTRACT_FAIL=1
 fi
-for pkg in libnvinfer10 cuda-cudart-12-6; do
-    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
-        echo "   ok   $pkg installed"
-    else
-        echo "   FAIL $pkg is not installed" >&2
-        CONTRACT_FAIL=1
+# Presence is NOT the contract: the package name `libnvinfer10` pins only the
+# SONAME major, so it can hold ANY 10.x -- while the shipped engines are built
+# for TRT 10.3 exactly and a 10.x mismatch fails at deserialize, on the
+# appliance, not here. Assert the declared baseline (TRT 10.3 / CUDA 12.6) by
+# version, and PRINT it, so the manifest's claim is one the build verified.
+check_version() {  # <pkg> <expected-prefix> <human>
+    _v="$(dpkg-query -W -f='${Version}' "$1" 2>/dev/null || echo "")"
+    if [ -z "$_v" ]; then
+        echo "   FAIL $1 is not installed (need $3)" >&2; CONTRACT_FAIL=1; return
     fi
-done
+    case "$_v" in
+        "$2"*) echo "   ok   $1: $_v" ;;
+        *) echo "   FAIL $1 is $_v, expected $3 (engines are pinned to it)" >&2; CONTRACT_FAIL=1 ;;
+    esac
+}
+check_version libnvinfer10     "10.3."   "TensorRT 10.3"
+check_version cuda-cudart-12-6 "12.6."   "CUDA 12.6"
 [ "$CONTRACT_FAIL" = "0" ] || { echo "build-host platform contract not satisfied -- refusing to build a package that would misrepresent its target platform" >&2; exit 1; }
 
 # ── version: 0.1.0+g<sha>, dirty-marked. It becomes a dpkg field AND a path.
@@ -288,5 +297,12 @@ emit_preflight_script "packaging/lib/policy.sh" "$PREFLIGHT_OUT" "$DEB_SHA256"
 echo
 echo ">> built $OUT"
 dpkg-deb --info "$OUT" | sed -n '1,12p'
-echo ">> install with:  sudo apt install ./$OUT     (NEVER dpkg -i — it does not resolve deps)"
-echo ">> or verify first with the standalone guard:  sudo ./$PREFLIGHT_OUT $OUT"
+# Print ONLY the guarded sequence. Advertising a bare `apt install` first --
+# with preflight as an optional extra -- invites the operator to skip the
+# protected-stack guard entirely, which is the same as not having one. The
+# preflight is bound to THIS .deb by its SHA-256 and refuses any other.
+echo ">> install with (both steps, in this order):"
+echo "     sudo ./$PREFLIGHT_OUT $OUT"
+echo "     sudo apt install --no-install-recommends ./$OUT"
+echo ">>   (never 'dpkg -i' — it does not resolve dependencies)"
+echo ">> checksums: $OUT.sha256"
