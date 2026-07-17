@@ -642,13 +642,14 @@ box that runs for months must never fill the disk or lose the tail.
 
 ## Gotchas
 
-- **Never `git add -A` in this repo.** `denso.onnx` is tracked,
-  and the 37 MB `digitv2.onnx` + `note.txt` are now git-ignored — but `.gitignore`
-  names `models/digitv2.onnx` **specifically**, not `models/*.onnx`, so a *new*
-  model dropped into `models/` is untracked and unignored. A blanket add still
-  sweeps a multi-MB blob into a commit and then blocks `git pull` on the Jetson
-  (the untracked file conflicts with the incoming one). Use explicit
-  `git add <files>` / `git add -u`.
+- **`models/` is git-ignored by pattern** (`*.onnx`, `*.pt`, `*.engine`,
+  `*.names.json`, `trt_cache/`) — they are build/training artifacts, device- and
+  version-specific. `denso.onnx` is the one exception: tracked before that rule,
+  and gitignore cannot untrack it. This USED to be a `git add -A` landmine (the
+  ignore list named `models/digitv2.onnx` *specifically*, so every new model was
+  sweepable); the pattern closed it. It also stopped a subtler bug: an unignored
+  new model permanently dirties the tree, and `tools/build_package.sh` refuses to
+  package a dirty tree — so dropping in `digitv3.onnx` silently blocked the build.
 - **QSQLITE keeps a read cursor alive until the `QSqlQuery` is finished or
   destroyed.** A live read cursor (e.g. an un-scoped `PRAGMA user_version`
   query) makes a later schema change on the same connection fail with

@@ -141,12 +141,14 @@ Facts that will bite whoever touches this:
 - Don't leak Qt Widgets / OpenCV / ORT / CUDA / TensorRT into `denso_core`.
 - Keep platform behavior behind the existing interfaces; the shared
   letterbox/decode must stay identical across backends.
-- **Never `git add -A` in this repo.** `denso.onnx` is tracked,
-  and the 37 MB `digitv2.onnx` + `note.txt` are now git-ignored — but `.gitignore`
-  names `models/digitv2.onnx` **specifically**, not `models/*.onnx`. So a *new*
-  model dropped into `models/` is untracked and unignored, and a blanket add
-  still sweeps a multi-MB blob into a commit, which then blocks `git pull` on the
-  Jetson. Use explicit `git add <files>` / `git add -u`.
+- **`models/` is git-ignored by pattern** (`*.onnx`, `*.pt`, `*.engine`,
+  `*.names.json`, `trt_cache/`) — they are build/training artifacts, device- and
+  version-specific. `denso.onnx` is the one exception: tracked before that rule,
+  and gitignore cannot untrack it. This USED to be a `git add -A` landmine (the
+  ignore list named `models/digitv2.onnx` *specifically*, so every new model was
+  sweepable); the pattern closed it. It also stopped a subtler bug: an unignored
+  new model permanently dirties the tree, and `tools/build_package.sh` refuses to
+  package a dirty tree — so dropping in `digitv3.onnx` silently blocked the build.
 - The DB migration chain is at **v11** (`camera.areas_need_review`, added for the
   editable-source / ROI-quarantine feature). Add a new migration — never edit a
   shipped one.

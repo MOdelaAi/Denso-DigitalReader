@@ -34,7 +34,16 @@ models/*.engine
 models/*.names.json
 models/trt_cache/
 
-# untracked local scratch + custom model (added by mistake once)
+# Local scratch + MODEL ARTIFACTS. Ignore them by PATTERN, not by name: naming
+# `models/digitv2.onnx` specifically meant every NEW model (digitv3.onnx, a .pt
+# checkpoint) landed untracked-and-unignored, permanently dirtying the tree — and
+# tools/build_package.sh then refuses to package a dirty tree, so a new model
+# blocked the build until someone noticed. That happened for .names.json too.
+#
+# denso.onnx stays TRACKED (committed before this rule; gitignore does not untrack
+# an already-tracked file). Everything else under models/ is a build/training
+# artifact: .onnx exports, .pt checkpoints, TRT engines, sidecars, the cache.
 note.txt
-models/digitv2.onnx
+models/*.onnx
+models/*.pt
 models/digitv2.engine.bak
