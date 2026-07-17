@@ -8,12 +8,12 @@
 
 using namespace denso::ui;
 
-TEST_CASE("no required models → nothing missing", "[engine_requirements]") {
+TEST_CASE("no required models -> nothing missing", "[engine_requirements]") {
     CHECK(missing_required_models({}, {}).empty());
     CHECK(missing_required_models({}, {"a.engine"}).empty());
 }
 
-TEST_CASE("all required models warmed → nothing missing", "[engine_requirements]") {
+TEST_CASE("all required models warmed -> nothing missing", "[engine_requirements]") {
     const std::vector<std::string> required{"a.engine", "b.engine"};
     const std::set<std::string> warmed{"a.engine", "b.engine", "extra.engine"};
     CHECK(missing_required_models(required, warmed).empty());
