@@ -30,7 +30,20 @@ bool remove(const QSqlDatabase& db, int64_t id);
 std::optional<Camera> get(const QSqlDatabase& db, int64_t id);
 
 /// Every camera, ordered by id.
+/// EVERY camera row, finished or not — the management list, duplicate-source
+/// detection, edit and delete. Not what the runtime should stream.
 std::vector<Camera> all(const QSqlDatabase& db);
+
+/// The cameras the RUNTIME may stream: enabled AND finished. The one source of
+/// truth for that decision — callers must not re-derive it with their own
+/// `if (active)`, and it is filtered in SQL so an unfinished camera cannot eat
+/// one of the grid's four tile slots.
+std::vector<Camera> runtime(const QSqlDatabase& db);
+
+/// Mark the add wizard finished for `id`. Call only AFTER the models/areas write
+/// it completes has itself succeeded: completing first would let a failed write
+/// leave a live camera whose setup never actually landed.
+bool mark_setup_complete(const QSqlDatabase& db, int64_t id);
 
 // ─── ROI areas (`camera_area`) ───────────────────────────────────────────────
 

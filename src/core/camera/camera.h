@@ -18,6 +18,21 @@ struct Camera {
     std::string camera_type;  // "usb" | "ip"
     bool active = false;
 
+    // Has the operator FINISHED the add wizard for this camera? Distinct from
+    // `active` (enabled/disabled): the wizard must insert the row at the
+    // Configure step because attaching models needs a real id, so a camera can
+    // exist while its setup is still in progress. Only `active && setup_complete`
+    // rows reach the runtime (camera::runtime) — an abandoned wizard leaves an
+    // inert row the list shows as unfinished rather than a live, model-less
+    // camera reporting nothing.
+    //
+    // Defaults FALSE while the DB column defaults TRUE, and the mismatch is
+    // deliberate: the column's DEFAULT 1 grandfathers pre-existing rows on
+    // upgrade, whereas a freshly constructed in-memory Camera is a NEW one, and
+    // the fail-safe for a forgotten assignment is a dark camera (visible in the
+    // list, recoverable) rather than a live half-configured one.
+    bool setup_complete = false;
+
     // USB only
     std::optional<uint32_t> index;
 

@@ -82,6 +82,9 @@ QString style_sheet(const Palette& p) {
         QLabel { background: transparent; color: %(txt); }
         QLabel[dim="true"] { color: %(txtDim); }
         QLabel[faint="true"] { color: %(txtFaint); }
+        /* A state the operator must act on, not decoration. Always paired with
+           text — colour alone can't carry state on a factory panel. */
+        QLabel[warn="true"] { color: %(warn); font-weight: 600; }
         #goldUnderline { background: %(gold); border-radius: 2px; }
 
         QPushButton {
@@ -176,6 +179,7 @@ QString style_sheet(const Palette& p) {
         .replace(QStringLiteral("%(panel)"), css(p.panel))
         .replace(QStringLiteral("%(gold300)"), css(p.gold_300))
         .replace(QStringLiteral("%(gold500)"), css(p.gold_500))
+        .replace(QStringLiteral("%(warn)"), css(p.status_warning))
         .replace(QStringLiteral("%(gold)"), css(p.gold));
 }
 

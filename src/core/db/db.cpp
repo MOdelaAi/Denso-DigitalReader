@@ -14,7 +14,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 11;
+constexpr int SCHEMA_VERSION = 12;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -363,6 +363,26 @@ bool run_migrations(const QSqlDatabase& db) {
         // re-verifies them (Areas → "Verify & save"). Additive; default 0.
         if (!run("ALTER TABLE camera ADD COLUMN areas_need_review "
                  "INTEGER NOT NULL DEFAULT 0")) {
+            return false;
+        }
+    }
+
+    if (version < 12) {
+        // "Setup finished", NOT "enabled" — `active` already means the latter
+        // (operator-facing enable/disable) and the two must not be conflated.
+        // The wizard inserts the camera at the Configure step because attaching
+        // models needs a real id, so an operator who backs out at Models used to
+        // leave a LIVE, model-less camera behind. New cameras are now inserted
+        // incomplete and only completed by an explicit finish action; the runtime
+        // ignores incomplete rows, while the management list still shows them so
+        // they can be resumed or deleted.
+        //
+        // DEFAULT 1 grandfathers every existing camera as complete. That is what
+        // makes this upgrade-safe unconditionally rather than by inference: an
+        // old version could not have recorded incompleteness, so there is no
+        // signal to recover and every pre-existing row must be treated as done.
+        if (!run("ALTER TABLE camera ADD COLUMN setup_complete "
+                 "INTEGER NOT NULL DEFAULT 1")) {
             return false;
         }
     }

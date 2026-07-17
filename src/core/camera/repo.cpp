@@ -17,7 +17,7 @@ namespace {
 const QString COLUMNS = QStringLiteral(
     "id, name, camera_type, active, cam_index, ip, rtsp, username, "
     "width, height, fps, pitch, roll, rotation, password, "
-    "channel, stream, manufacturer, areas_need_review");
+    "channel, stream, manufacturer, areas_need_review, setup_complete");
 
 QVariant bind_str(const std::optional<std::string>& v) {
     return v ? QVariant(QString::fromStdString(*v)) : QVariant(QMetaType(QMetaType::QString));
@@ -56,6 +56,7 @@ void bind_fields(QSqlQuery& q, const Camera& c) {
     q.addBindValue(bind_uint(c.stream));
     q.addBindValue(bind_str(c.manufacturer));
     q.addBindValue(c.areas_need_review ? 1 : 0);
+    q.addBindValue(c.setup_complete ? 1 : 0);
 }
 
 Camera from_row(const QSqlQuery& q) {
@@ -79,6 +80,7 @@ Camera from_row(const QSqlQuery& q) {
     c.stream = col_uint(q.value(16));
     c.manufacturer = col_str(q.value(17));
     c.areas_need_review = q.value(18).toInt() != 0;
+    c.setup_complete = q.value(19).toInt() != 0;
     return c;
 }
 
@@ -89,8 +91,8 @@ std::optional<int64_t> insert(const QSqlDatabase& db, const Camera& c) {
     q.prepare(QStringLiteral(
         "INSERT INTO camera (name, camera_type, active, cam_index, ip, rtsp, username, "
         "width, height, fps, pitch, roll, rotation, password, channel, stream, manufacturer, "
-        "areas_need_review) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "areas_need_review, setup_complete) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     bind_fields(q, c);
     if (!q.exec()) {
         return std::nullopt;
@@ -103,7 +105,7 @@ bool update(const QSqlDatabase& db, const Camera& c) {
     q.prepare(QStringLiteral(
         "UPDATE camera SET name=?, camera_type=?, active=?, cam_index=?, ip=?, rtsp=?, "
         "username=?, width=?, height=?, fps=?, pitch=?, roll=?, rotation=?, password=?, "
-        "channel=?, stream=?, manufacturer=?, areas_need_review=? "
+        "channel=?, stream=?, manufacturer=?, areas_need_review=?, setup_complete=? "
         "WHERE id=?"));
     bind_fields(q, c);
     q.addBindValue(static_cast<qlonglong>(c.id));
@@ -166,6 +168,38 @@ std::vector<Camera> all(const QSqlDatabase& db) {
         out.push_back(from_row(q));
     }
     return out;
+}
+
+std::vector<Camera> runtime(const QSqlDatabase& db) {
+    std::vector<Camera> out;
+    QSqlQuery q(db);
+    // Filtered in SQL, BEFORE the grid's "first 4 by id" truncation — an
+    // unfinished camera used to consume one of the four tile slots and hide a
+    // real one behind it.
+    if (!q.exec(QStringLiteral("SELECT %1 FROM camera "
+                               "WHERE active = 1 AND setup_complete = 1 "
+                               "ORDER BY id")
+                    .arg(COLUMNS))) {
+        return out;
+    }
+    while (q.next()) {
+        out.push_back(from_row(q));
+    }
+    return out;
+}
+
+bool mark_setup_complete(const QSqlDatabase& db, int64_t id) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral("UPDATE camera SET setup_complete = 1 WHERE id = ?"));
+    q.addBindValue(static_cast<qlonglong>(id));
+    if (!q.exec()) {
+        return false;
+    }
+    // exec() succeeds on an UPDATE that matched NOTHING — valid SQL, zero rows.
+    // For a method whose whole job is "this camera is now finished", that is a
+    // lie: a stale or concurrently-deleted id would report success and the caller
+    // would believe the camera is live. Require the row to exist.
+    return q.numRowsAffected() == 1;
 }
 
 std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id) {

@@ -37,7 +37,13 @@ public:
 
 signals:
     void back_requested();
-    void finish_requested();
+    /// Persist selections and go on to the Areas step. NOT a finish — the camera
+    /// stays unfinished until areas are saved or whole-frame is chosen.
+    void next_requested();
+    /// Terminal: persist selections, finish setup, and detect on the whole frame
+    /// (no ROI areas). Named for what it DOES, unlike the old finish_requested,
+    /// which only advanced a step.
+    void finish_whole_frame_requested();
 
 private:
     void rebuild_class_list();  // union of the checked models' class names

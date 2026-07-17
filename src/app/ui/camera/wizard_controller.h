@@ -59,7 +59,8 @@ public slots:
     void configure_back();         // Configure Back → Source step
 
     // Models flow.
-    void save_models();            // persist attachments → advance to Areas step
+    void save_models();            // "Next: Detection areas" — persist, advance
+    void finish_whole_frame();     // terminal: no ROIs = whole-frame detection
 
     // Areas flow.
     void begin_areas_direct(const camera::Camera& cam);  // per-row Areas button
@@ -75,6 +76,11 @@ private:
     /// True only when a live frame exists AND it still matches draft_'s aspect —
     /// the two conditions for confirming quarantined ROIs against the view.
     bool preview_verifies_draft() const;
+    bool save_models_only();       // persist model attachments; false = failed
+    /// Mark the add wizard finished. ONLY after the write it completes has
+    /// succeeded — completing first would activate a camera whose setup didn't
+    /// land. No-op when editing an already-finished camera.
+    bool finish_setup(QWidget* parent);
 
     QSqlDatabase db_;
     Pages pages_;

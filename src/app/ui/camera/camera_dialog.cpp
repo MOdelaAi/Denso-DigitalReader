@@ -90,8 +90,10 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
 
     // ── Models page signals ───────────────────────────────────────────────
     connect(models_page_, &ModelsPage::back_requested, this, [this] { show_page(2); });
-    connect(models_page_, &ModelsPage::finish_requested, controller_,
+    connect(models_page_, &ModelsPage::next_requested, controller_,
             &CameraWizardController::save_models);
+    connect(models_page_, &ModelsPage::finish_whole_frame_requested, controller_,
+            &CameraWizardController::finish_whole_frame);
 
     // ── Areas page signals ────────────────────────────────────────────────
     connect(areas_page_, &CameraAreasPage::back_requested, controller_,
