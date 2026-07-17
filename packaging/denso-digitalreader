@@ -1,0 +1,21 @@
+#!/bin/sh
+# Launcher for the packaged app. The ONE entry point: the menu entry, the XDG
+# autostart entry, and an operator shell all go through this, so the environment
+# is identical however it starts.
+#
+# DENSO_DATA_DIR is why this exists: /opt/denso/bin is root-owned and dpkg
+# REPLACES it on upgrade, so mutable state (denso.db, denso.log, models/) must
+# live outside it or be destroyed on every upgrade.
+#
+# No LD_LIBRARY_PATH: verified unnecessary — the only RUNPATH in the exe is the
+# absolute /usr/local/cuda/lib64, and /usr/local/lib is in the ld cache via
+# ld.so.conf.d/libc.conf. Copying the exe out of the build tree resolves every
+# library with zero "not found".
+#
+# QT_QPA_PLATFORM is deliberately NOT set: the GDM greeter is X11, but that does
+# not prove the autologin USER session is Xorg. Pin it only after observing a
+# real power-on session.
+set -eu
+DENSO_DATA_DIR="${DENSO_DATA_DIR:-/opt/denso/data}"
+export DENSO_DATA_DIR
+exec /opt/denso/bin/denso "$@"

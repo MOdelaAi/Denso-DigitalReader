@@ -79,32 +79,56 @@ Jetson runtime deps: `qt6-base-dev`, `qt6-multimedia-dev`, `libqt6sql6-sqlite`,
 `gstreamer1.0-libav` (avdec fallback), OpenCV 4.8, TensorRT 10.3, CUDA 12.6.
 Catch2 v3 is fetched at first configure (needs net once).
 
-## Deployment (designed, NOT built)
+## Deployment — SHIPPED (`.deb`)
 
-There is **no packaging or install flow yet** — the app is run from its build dir
-on the Jetson. The design is specced at
-`docs/superpowers/specs/2026-07-17-build-package-deployment-design.md`: a `.deb`
-installed with `apt`, `/opt/denso/data` for mutable state via `$DENSO_DATA_DIR`,
-a `QLockFile` single-instance guard, four headless modes (`--version`,
-`--check`, `--check-running`, `--check-migrations`), and `denso-setup` for
-autostart/autologin. Do not document any of it as working until it lands.
+Built **on an aarch64 Jetson** (no cross-toolchain; engines are `sm_87`/TRT 10.3
+pinned). `tools/build_package.sh --model models/digitv2.engine` → `dist/`.
+Install: `sudo ./dist/preflight-denso-<ver>.sh <deb>` (bound to that exact `.deb`
+by SHA-256; guards the JetPack stack) → `sudo apt install --no-install-recommends
+./dist/<deb>` → `sudo denso-setup configure --user <u>` → `denso-setup verify`.
+**Never `dpkg -i`** — no dependency resolution.
 
-Verified facts that will bite whoever implements it:
-- **`libopencv` (NVIDIA's OpenCV) ships no `.shlibs`/`.symbols`**, and
-  `dpkg-shlibdeps` errors on `/usr/local/cuda/lib64/libcudart.so.12`. `Depends:`
-  must be mixed: `${shlibs:Depends}` + hand-declared `libopencv`,
-  `cuda-cudart-12-6`, and the dlopened set (`qt6-qpa-plugins`,
-  `libqt6sql6-sqlite`, `gstreamer1.0-*`). Never pass `--ignore-missing-info` — it
-  drops deps silently and looks derived while being wrong.
-- **Debian policy forbids a package installing to `/usr/local`** — the launcher
-  goes in `/usr/bin`.
-- The exe is **relocatable**: the only RUNPATH is the absolute
-  `/usr/local/cuda/lib64`, so no `LD_LIBRARY_PATH` is needed after copying it out
-  of the build tree.
-- The Jetson **halts at the GDM greeter on power-on** (no active graphical user
-  session), so autostart is inert without autologin.
-- `Db::open()` runs `PRAGMA journal_mode = WAL` and `EngineRegistry::warm_up()`
-  creates `trt_cache` — so neither can be used by a "non-mutating" check path.
+Layout: `/opt/denso/bin/denso` (package-owned) · `/opt/denso/data` (**operator**-
+owned: db, log, models, lock) · `/usr/bin/denso-digitalreader` (the launcher —
+the stable public command; it exports `DENSO_DATA_DIR`) · `/usr/bin/denso-setup`.
+
+**Verified on hardware** (192.168.1.15, 2026-07-17): build → preflight → install
+→ configure → `verify: PASS` → `apt remove` keeps data → upgrade keeps data →
+`apt purge` removes it. **NOT verified:** `denso-setup configure --autostart
+--enable-autologin` and `unconfigure`'s GDM restore — the XDG/GDM path has never
+run on a real box. Do not represent it as working.
+
+Facts that will bite whoever touches this:
+- **Dependencies are DERIVED**, not hand-written: `packaging/debian/shlibs.local`
+  supplies the metadata NVIDIA omits (`libcudart`, `libopencv` ship no
+  `.shlibs`/`.symbols`), after which `dpkg-shlibdeps` exits 0 and emits the full
+  version-constrained set. **`--ignore-missing-info` is forbidden** — it drops
+  deps silently while still looking derived. Only dlopen/exec deps are declared by
+  hand in `control.in` (`qt6-qpa-plugins`, `libqt6sql6-sqlite`, `gstreamer1.0-*`,
+  `network-manager`, `procps`).
+- `shlibs.local` maps ONLY directly-`NEEDED` sonames, and `build_package.sh`
+  verifies every mapping against `dpkg -S` — the file overrides authoritative
+  metadata and shlibdeps trusts it blindly (a wrong mapping was written once —
+  `libcudla` → `nvidia-l4t-cuda`, when `dpkg -S` says `libcudla-12-6` — which
+  would have declared a dependency nothing provides; caught before shipping).
+- **Debian policy forbids `/usr/local` for packages** → the launcher is `/usr/bin`.
+- **`--check-running` is TRI-STATE**: `0` running / `1` definitely not / `4` cannot
+  determine. `prerm` proceeds ONLY on exactly `1`. `if denso --check-running; then
+  …` is WRONG — it treats "couldn't tell" as safe.
+- Anything touching `/opt/denso/data` runs **as the target user** (`runuser`);
+  root-owned artifacts there make the app unable to write, and a root-owned lock
+  makes every later `--check-running` return `4`.
+- **`| head`/`grep -q`/`awk {exit}` under `set -o pipefail`**: an early-exiting
+  consumer can SIGPIPE a producer that hasn't finished, killing the script. Large
+  output made this deterministic for `ldconfig -p` (172KB, over the ~64KB pipe
+  buffer, so it blocks mid-write). The other current producers are safe because
+  they complete in a **single write** (231/91/42 bytes) — **not** because
+  sub-64KB output is universally safe: a small producer doing multiple writes can
+  still be caught between them. Check the producer, don't assume a size rule.
+- `models/*.engine`, `*.names.json` and `trt_cache/` are git-ignored: a sidecar is
+  generated on-device beside its engine. Build outputs go to `dist/` (ignored) —
+  writing them in the repo root made the build dirty its own tree and refuse the
+  next run.
 
 ## Gotchas
 

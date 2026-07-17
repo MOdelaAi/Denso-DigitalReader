@@ -1,5 +1,25 @@
 # Deployment Slice 2: Packaging & Appliance Integration — Implementation Plan
 
+> ## ⚠ HISTORICAL — DO NOT COPY CODE FROM THIS FILE
+>
+> **Executed and merged.** The code blocks below are the *pre-review* drafts. They
+> were changed substantially during execution — ~30 review findings plus three
+> bugs that only first contact with the Jetson found — so several snippets here
+> are **known-wrong** and would reintroduce fixed bugs if pasted:
+>
+> - `shlibs.local` still lists `libcudla` and `libopencv_imgcodecs` — **dead
+>   mappings**, removed because they are not directly `NEEDED`.
+> - the preflight/install snippets predate the `.deb`-path normalisation (`apt`
+>   reads a bare filename as a *package name*) and the artifact SHA-256 binding.
+> - `postinst` here chowns and seeds; the shipped one does **neither** (both moved
+>   to `denso-setup configure`, which knows the target user).
+> - the `shlibs.local` lookup here uses `awk '…{exit}'`, which SIGPIPEs the
+>   producer under `pipefail` and killed the build.
+>
+> **The authoritative sources are the code itself, `AGENTS.md`'s Deployment
+> section, and the design spec** (`docs/superpowers/specs/2026-07-17-build-package-deployment-design.md`).
+> This file is kept for the reasoning and the task order, not as a template.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn the built app into a `.deb` the operator `scp`s to a Jetson and installs with `apt`, after which it behaves like a normal Ubuntu application — menu entry, icon, launcher on PATH, listed in `dpkg -l`, upgradable, and starting unattended on power-on.
@@ -1494,6 +1514,18 @@ sudo apt remove -y denso-digitalreader; echo "remove rc=$?"
 ```
 Expected: `remove rc` is **non-zero**, apt reports the prerm failure, and the message is `denso: the application is running; close it before upgrading or removing.`
 **Postconditions — check all three:** the app is **still running**; `dpkg -l denso-digitalreader` still shows `ii`; and `ls ~/.config/autostart/` still contains the entry (the ordering fix — a *refused* removal must not have unconfigured anything).
+
+**Also exercise the FALLBACK path** — the steps above only prove the authoritative
+lock check. With the app still running, temporarily hide the recorded user so
+`prerm` must fall back to `pgrep`:
+```sh
+sudo mv /opt/denso/install-state/user /opt/denso/install-state/user.bak
+sudo apt remove -y denso-digitalreader; echo "remove rc=$?"     # expect NON-ZERO
+sudo mv /opt/denso/install-state/user.bak /opt/denso/install-state/user
+```
+Expected: still refused, with `denso: the application appears to be running` (the
+pgrep path), the app still running, and the package still `ii`. This is the only
+on-device test of the fallback branch — without it, a bug there ships unseen.
 
 Then close the app and confirm removal now works:
 ```sh

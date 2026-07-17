@@ -109,10 +109,30 @@ Only one instance may run at a time; a second exits 3.
 
 ## Deploy
 
-Not implemented yet — today the app runs from its build directory. A `.deb`
-package (installed with `apt`, with an app-menu entry, autostart, and mutable
-state in `/opt/denso/data`) is designed in
-`docs/superpowers/specs/2026-07-17-build-package-deployment-design.md`.
+Ships as a `.deb` for the Jetson (JetPack 6.2 / L4T R36.5.0). Build it **on an
+aarch64 Jetson** — there is no cross-toolchain, and the engines are `sm_87`/TRT
+10.3 pinned:
+
+```sh
+tools/build_package.sh --model models/digitv2.engine     # -> dist/
+```
+
+Then, on the target (the preflight is bound to that exact `.deb` by SHA-256 and
+guards the JetPack stack — run it first):
+
+```sh
+sudo ./dist/preflight-denso-<version>.sh ./dist/denso-digitalreader_<version>_arm64.deb
+sudo apt install --no-install-recommends ./dist/denso-digitalreader_<version>_arm64.deb
+sudo denso-setup configure --user <username>
+sudo denso-setup verify                                   # expect: verify: PASS
+```
+
+Never `dpkg -i` — it does not resolve dependencies. `apt remove` keeps
+`/opt/denso/data` (database, engines); `apt purge` removes it.
+
+**Autostart is not configured by default.** `denso-setup configure --autostart
+--enable-autologin` exists and is designed, but its GDM/XDG path has **not** been
+verified on hardware — see `docs/superpowers/specs/2026-07-17-build-package-deployment-design.md`.
 
 ## Test
 

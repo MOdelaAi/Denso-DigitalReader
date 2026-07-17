@@ -318,8 +318,8 @@ may re-invoke them during recovery):
 | Script | Does |
 | --- | --- |
 | `prerm` | **Proceed ONLY on exit code 1** from `--check-running` (as the target user) — see the fail-safe contract below. Failing here leaves the old package installed — exactly right. Never kills the app; never deletes or "repairs" the lock. |
-| `postinst` | Create + chown `/opt/denso/data{,/models}`; seed missing model pairs; cheap structural sanity only. Nothing that can reasonably fail after a successful package build. |
-| `postrm purge` | Remove `/opt/denso/data` behind a **resolved-path guard** (resolve symlinks, assert the canonical path, refuse anything else); revert autologin/autostart from install-state. Plain `remove` keeps all data. |
+| `postinst` | Create `/opt/denso/data{,/models}` + `install-state`; print the next steps. **Structural only — it does NOT chown and does NOT seed** (both moved to `denso-setup configure`, AS IMPLEMENTED): `postinst` must not guess the target user (`$SUDO_USER` is untrusted), and a recursive chown on every upgrade is slow, wrong (group ≠ username) and unnecessary since dpkg never touches the data dir. Nothing here can reasonably fail after a successful build. |
+| `postrm purge` | Remove `/opt/denso/data` behind a **resolved-path guard** (resolve symlinks, assert the canonical path, refuse anything else). **It does NOT revert autologin/autostart** — that happens in `prerm remove` (AS IMPLEMENTED), because by the time `postrm purge` runs dpkg has already deleted `/usr/bin/denso-setup`, so the revert would silently never happen and the box would auto-login forever. Plain `remove` keeps all data. |
 
 **The `--check-running` fail-safe contract — `prerm` MUST get this exactly right.**
 `--check-running` is tri-state, because "I couldn't tell" is not the same answer
@@ -361,9 +361,18 @@ target-user-owned dir and run `--check-migrations` against the copy (no existing
 DB → an empty temp DB, exercising the full v0 chain the app runs on first
 launch). Mutation stays confined to the copy.
 
-**Model seeding** (postinst, idempotent): absent → seed; present with same hash →
-leave; **present with a different hash → never overwrite silently** (require an
-explicit `denso-setup replace-model <stem>`). Engine + sidecar are **ordered and
+**Model seeding** (**`denso-setup configure`**, not `postinst` — as implemented;
+seeding needs the target user, which `postinst` must not guess): absent → seed;
+present with same hash → leave; **present with a different hash → never overwrite
+silently** (require an explicit `denso-setup replace-model <stem>`). The decision
+is made on the **pair** (engine + `.names.json`): an identical engine whose
+sidecar is missing or corrupt is broken, not "same". Because seeding is not in
+`postinst`, an upgrade carrying a NEW approved engine leaves the operator's
+existing one in place — so **`denso-setup verify` reports packaged-vs-data-dir
+drift**: `differs` is a **WARN** (bring-your-own-engine is deliberate) naming
+`denso-setup replace-model <stem>`; an **absent** packaged model is a **FAIL**,
+because `--check` validates every packaged engine by name and would fail on it
+anyway — warning there and failing here would be an incoherent contract. Engine + sidecar are **ordered and
 crash-resistant, NOT atomic** — two flat files cannot be made atomic with two
 renames. The engine's appearance is the commit marker: write+fsync sidecar temp →
 rename sidecar → write+fsync engine temp → rename engine **last** → fsync the

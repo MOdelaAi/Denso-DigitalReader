@@ -1,3 +1,8 @@
+# Packaging output (.deb + its checksum + the artifact-bound preflight guard).
+# Ignored so a build cannot dirty its own tree and make the NEXT build refuse.
+/dist
+/build-pkg
+
 # CMake out-of-source build dirs
 /build
 /build-*
@@ -19,9 +24,14 @@ third_party/onnxruntime/
 # and copied beside the exe at build time — see docs/GPU_SETUP.md. Not tracked.
 third_party/gpu_ep/
 
-# TensorRT engines + the ORT TensorRT-EP engine cache — built locally and
-# specific to the GPU architecture and TensorRT version, so never tracked.
+# TensorRT engines + their class-name sidecars + the ORT TensorRT-EP engine
+# cache — all built locally and specific to the GPU architecture and TensorRT
+# version, so never tracked. The .names.json is generated ON-DEVICE beside its
+# engine (TRT plans carry no name metadata), so it is exactly as untrackable as
+# the engine: leaving it unignored made every Jetson checkout permanently dirty,
+# which tools/build_package.sh correctly refuses to package.
 models/*.engine
+models/*.names.json
 models/trt_cache/
 
 # untracked local scratch + custom model (added by mistake once)

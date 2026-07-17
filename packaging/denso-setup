@@ -1,0 +1,426 @@
+#!/bin/sh
+# Denso appliance setup: everything `apt install` cannot do.
+#
+#   denso-setup preflight <path-to.deb>
+#   denso-setup configure --user <u> [--autostart] [--enable-autologin]
+#   denso-setup verify
+#   denso-setup unconfigure
+#   denso-setup replace-model <stem>
+set -eu
+
+. /opt/denso/lib/policy.sh
+
+DENSO=/opt/denso/bin/denso
+DATA=/opt/denso/data
+STATE=/opt/denso/install-state
+PKG_MODELS=/opt/denso/models
+GDM_CONF=/etc/gdm3/custom.conf
+AUTOSTART_NAME=com.denso.DigitalReader.desktop
+
+die() { echo "denso-setup: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" = "0" ] || die "must run as root (sudo denso-setup ...)"; }
+
+# Run the app as the target user, never root: anything touching $DATA as root
+# leaves root-owned artifacts (trt_cache, log, lock) that the app then cannot
+# write — and a root-owned lock makes every --check-running return 4.
+as_user() {
+    u="$1"; shift
+    runuser -u "$u" -- env DENSO_DATA_DIR="$DATA" "$@"
+}
+
+cmd_configure() {
+    need_root
+    user=""; autostart=0; autologin=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --user) user="${2-}"; shift 2 ;;
+            --autostart) autostart=1; shift ;;
+            --enable-autologin) autologin=1; shift ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
+    # $SUDO_USER is NOT trusted: absent under automation, wrong from a root shell.
+    [ -n "$user" ] || die "--user <username> is required"
+    id "$user" >/dev/null 2>&1 || die "no such user: $user"
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [ -n "$home" ] && [ -d "$home" ] || die "user $user has no valid home directory"
+
+    # Refuse a user CHANGE: a second `configure --user other` would overwrite the
+    # recorded user while orphaning the FORMER user's autostart entry and
+    # autologin record — unconfigure could then never clean them up. A full
+    # old->new transition isn't worth building for v1; refusal is correct.
+    prev="$(cat "$STATE/user" 2>/dev/null || echo "")"
+    if [ -n "$prev" ] && [ "$prev" != "$user" ]; then
+        die "already configured for user '$prev' — run 'denso-setup unconfigure' first to switch to '$user'"
+    fi
+
+    mkdir -p "$STATE"
+    printf '%s\n' "$user" > "$STATE/user"
+
+    # id -gn, NOT "$user":"$user" — a primary group need not share the username.
+    group="$(id -gn "$user")"
+    mkdir -p "$DATA/models"
+    chown -R "$user":"$group" "$DATA"
+    echo "denso-setup: data dir $DATA owned by $user:$group"
+
+    # Seed the packaged engines. Absent -> seed; identical -> leave; DIFFERENT ->
+    # refuse (the operator may have built their own).
+    for eng in "$PKG_MODELS"/*.engine; do
+        [ -e "$eng" ] || continue
+        stem="$(basename "$eng" .engine)"
+        side="$PKG_MODELS/$stem.names.json"
+        [ -f "$side" ] || die "packaged engine $stem.engine has no $stem.names.json sidecar"
+        # Decide on the PAIR, not the engine alone: an identical engine whose
+        # sidecar is missing or corrupt is BROKEN, not "same" — TrtEngine's ctor
+        # throws without a readable sidecar.
+        # Capture into a variable first, not just `case "$(...)"`: a `*)` default
+        # needs the actual value to report, and a bare case-on-command-substitution
+        # has nowhere to put it.
+        d="$(seed_decision_pair "$eng" "$side" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json")"
+        case "$d" in
+            seed)
+                # AS THE TARGET USER, not root-then-chown: a crash between the
+                # two leaves root-owned files in an operator-owned data dir —
+                # the exact poisoning the run-as-target-user rule prevents.
+                runuser -u "$user" -- sh -c '. /opt/denso/lib/policy.sh; install_pair "$1" "$2" "$3"' \
+                        _ "$eng" "$side" "$DATA/models" || die "failed to seed $stem"
+                echo "denso-setup: seeded $stem.engine" ;;
+            same)    echo "denso-setup: $stem.engine already present (identical)" ;;
+            differs) echo "denso-setup: $stem.engine present but DIFFERENT — keeping yours."
+                     echo "             run 'denso-setup replace-model $stem' to overwrite." ;;
+            # No default before this fix: a policy/tool error producing an
+            # unexpected string skipped every branch and configuration silently
+            # continued as if the model were fine.
+            *) die "could not determine the seed policy for $stem (got '$d')" ;;
+        esac
+    done
+
+    if [ "$autostart" = "1" ]; then
+        # Same class as the model-seeding bug: write-as-root-then-chown leaves a
+        # root-owned file in the user's home if interrupted between the two
+        # steps. `install -o -g` sets ownership as part of the atomic create, and
+        # uses $group (id -gn), not "$user":"$user" — a primary group need not
+        # share the username.
+        dir="$home/.config/autostart"
+        install -d -o "$user" -g "$group" -m 0755 "$dir" || die "cannot create $dir"
+        install -o "$user" -g "$group" -m 0644 "/usr/share/applications/$AUTOSTART_NAME" \
+                "$dir/$AUTOSTART_NAME" || die "cannot install the autostart entry"
+        echo "denso-setup: autostart enabled for $user ($dir/$AUTOSTART_NAME)"
+        echo "denso-setup: NOTE — XDG autostart only fires AFTER a graphical login."
+        echo "             Without --enable-autologin this box still stops at the"
+        echo "             GDM greeter on power-on and the app will NOT start."
+    fi
+
+    if [ "$autologin" = "1" ]; then
+        [ -f "$GDM_CONF" ] || die "$GDM_CONF not found — is GDM the display manager?"
+        [ "$(systemctl get-default)" = "graphical.target" ] || \
+            die "systemctl get-default is not graphical.target; refusing to change it (do it explicitly)"
+        systemctl is-enabled gdm3 >/dev/null 2>&1 || die "gdm3 is not enabled; refusing to change display managers"
+
+        # Record the ORIGINAL values ONCE. Never rebase on upgrade: re-recording
+        # the CURRENT value would store our own 'true' as the "original", and
+        # unconfigure could never restore the real prior state.
+        if [ ! -f "$STATE/autologin.orig" ]; then
+            oe="$(awk '/^\[daemon\]/{d=1;next} /^\[/{d=0} d&&/^AutomaticLoginEnable=/{sub(/^AutomaticLoginEnable=/,"");print;exit}' "$GDM_CONF")"
+            ou="$(awk '/^\[daemon\]/{d=1;next} /^\[/{d=0} d&&/^AutomaticLogin=/{sub(/^AutomaticLogin=/,"");print;exit}' "$GDM_CONF")"
+            # autologin.orig is the "already recorded" marker every retry checks
+            # above -- it must be the LAST thing written, as the commit marker.
+            # Writing it FIRST (the old order) left an incomplete-commit window:
+            # a failure between the marker and autologin.origuser would leave the
+            # marker present with no recorded original user, and every later
+            # retry would then skip recording — permanently, since the marker's
+            # mere presence is what "already recorded" means.
+            cp -p "$GDM_CONF" "$STATE/custom.conf.orig" || die "cannot snapshot $GDM_CONF"
+            printf '%s\n' "${ou:-}"      > "$STATE/autologin.origuser" || die "cannot record the original user"
+            printf '%s\n' "${oe:-false}" > "$STATE/autologin.orig.tmp" || die "cannot record the original enable"
+            sync
+            mv -f "$STATE/autologin.orig.tmp" "$STATE/autologin.orig" || die "cannot commit the original autologin state"
+            # Durability, not just atomicity: this file's mere presence is the
+            # "already recorded" marker every retry above checks. Losing it to a
+            # power cut right after the rename (before the directory entry hits
+            # disk) would make a later `configure` re-derive "originals" from
+            # OUR already-modified custom.conf and rebase over the real ones.
+            sync
+            echo "denso-setup: recorded original autologin state (enable='${oe:-false}' user='${ou:-}')"
+        else
+            echo "denso-setup: original autologin state already recorded — not rebasing"
+        fi
+        # Record BEFORE gdm_set_autologin, not after: if the GDM edit succeeds
+        # and THIS write then fails, autologin is enabled with no record of whom
+        # to restore -- unconfigure can never fix it and the box auto-logins
+        # forever. Recording first is strictly safer: if the edit then fails,
+        # the stale marker is harmless, because gdm_restore_autologin compares
+        # the CURRENT GDM values against what we claim we set, sees they aren't
+        # ours (the edit never landed), and returns 2 -- benign divergence,
+        # leave whatever is there alone.
+        printf '%s\n' "$user" > "$STATE/autologin.user" || die "cannot record the autologin user"
+        gdm_set_autologin "$GDM_CONF" "$user" || die "failed to edit $GDM_CONF"
+        echo "denso-setup: autologin ENABLED for $user"
+        echo "denso-setup: WARNING — anyone with physical access now gets $user's desktop."
+    fi
+
+    echo "denso-setup: configured. Run 'denso-setup verify' next."
+}
+
+cmd_verify() {
+    # Requires root: it chowns the throwaway dirs and runs `runuser`. An earlier
+    # draft documented a non-sudo invocation that could not have worked.
+    need_root
+    rc=0
+    user="$(cat "$STATE/user" 2>/dev/null || echo "")"
+    [ -n "$user" ] || die "not configured yet — run 'denso-setup configure --user <u>' first"
+    group="$(id -gn "$user")"
+
+    echo "== platform"
+    [ "$(uname -m)" = "aarch64" ] || { echo "  FAIL arch is $(uname -m), expected aarch64"; rc=1; }
+    l4t="$(sed -n 's/^# R\([0-9]*\).*REVISION: \([0-9.]*\).*/\1.\2/p' /etc/nv_tegra_release 2>/dev/null | head -1)"
+    echo "  L4T: ${l4t:-unknown} (supported baseline: 36.5.0)"
+    # FAIL, not WARN: the engines are pinned to TRT 10.3 / sm_87 and the whole
+    # compatibility contract is "exactly this image". A warning invites shipping
+    # onto an untested platform.
+    [ "$l4t" = "36.5.0" ] || { echo "  FAIL L4T is '${l4t:-unknown}', not the supported 36.5.0"; rc=1; }
+
+    # Assert the VERSIONS, not just presence: the package name `libnvinfer10`
+    # pins only the SONAME major, so it can hold any 10.x — while the shipped
+    # engines are built for TRT 10.3 exactly. Without this, a modified stack
+    # reaches engine deserialization with no baseline diagnosis: the operator
+    # sees a cryptic TensorRT error instead of "your CUDA/TRT is not the one
+    # this package was built for". build_package.sh asserts the same baseline on
+    # the build host; this is the target-side half of that contract.
+    for pv in "libnvinfer10:10.3.:TensorRT 10.3" "cuda-cudart-12-6:12.6.:CUDA 12.6"; do
+        p="${pv%%:*}"; rest="${pv#*:}"; want="${rest%%:*}"; human="${rest##*:}"
+        v="$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null || echo "")"
+        if [ -z "$v" ]; then
+            echo "  FAIL $p is not installed (need $human)"; rc=1
+        else
+            case "$v" in
+                "$want"*) echo "  ok  $p: $v" ;;
+                *) echo "  FAIL $p is $v, expected $human — the shipped engines are pinned to it"; rc=1 ;;
+            esac
+        fi
+    done
+
+    echo "== gstreamer elements the capture ladder builds by name"
+    for el in rtspsrc nvv4l2decoder nvvidconv appsink h264parse; do
+        if gst-inspect-1.0 "$el" >/dev/null 2>&1; then echo "  ok  $el"
+        else echo "  FAIL $el missing"; rc=1; fi
+    done
+
+    # Seeding lives in `configure`, NOT postinst (postinst must not guess the
+    # target user). So an UPGRADE carrying a new approved engine leaves the
+    # operator's existing one in place, and --check below only proves an engine
+    # LOADS -- not that it is the one this package approved. Without this, verify
+    # says PASS while the appliance runs an engine the MANIFEST does not describe.
+    #
+    # `differs` WARNs -- bring-your-own-engine is deliberate (seed_decision_pair
+    # refuses to overwrite for exactly that reason). `seed`/absent FAILs, because
+    # --check below validates every packaged engine by name and would fail on it
+    # anyway; warning here and failing there would be an incoherent contract.
+    echo "== packaged models vs the data dir"
+    for eng in "$PKG_MODELS"/*.engine; do
+        [ -e "$eng" ] || continue
+        stem="$(basename "$eng" .engine)"
+        side="$PKG_MODELS/$stem.names.json"
+        [ -f "$side" ] || continue
+        case "$(seed_decision_pair "$eng" "$side" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json")" in
+            same) echo "  ok   $stem matches the packaged model" ;;
+            # FAIL, not WARN: --check below validates every packaged engine by
+            # name, so an absent one fails verify anyway. Warning here and then
+            # failing there would be an incoherent contract.
+            seed) echo "  FAIL $stem is packaged but ABSENT from $DATA/models — run 'denso-setup configure --user <u>'"; rc=1 ;;
+            differs) echo "  WARN $stem in $DATA/models DIFFERS from the packaged one."
+                     echo "       The appliance is NOT running the model this package approved."
+                     echo "       Keep yours, or adopt the packaged one: denso-setup replace-model $stem" ;;
+        esac
+    done
+
+    echo "== instance (FIRST: everything below reads the live DB)"
+    set +e
+    as_user "$user" "$DENSO" --check-running >/dev/null 2>&1; crc=$?
+    set -e
+    case "$crc" in
+        1) echo "  ok  not running" ;;
+        0) echo "  FAIL the app is RUNNING — close it: copying a live WAL database"
+           echo "       below would validate stale or inconsistent state"; return 1 ;;
+        *) echo "  FAIL cannot determine liveness (rc=$crc) — check $DATA ownership"; return 1 ;;
+    esac
+
+    echo "== database backup (the remedy if a migration goes wrong)"
+    if [ -f "$DATA/denso.db" ]; then
+        # A UNIQUE DIRECTORY, not a timestamped filename. `date +%H%M%S` has
+        # one-second resolution, so two verifies in the same second collide —
+        # and the dangerous case is subtle: a leftover `<name>-wal` from an
+        # earlier run pairing with a NEWER denso.db that has no WAL gives a
+        # MISMATCHED recovery set, which is worse than having no backup at all,
+        # because it looks restorable. mktemp -d makes each pair unique and
+        # self-contained, and the names inside stay canonical so SQLite
+        # associates them.
+        bkdir="$(runuser -u "$user" -- mktemp -d "$DATA/backup-$(date +%Y%m%d-%H%M%S)-XXXXXX")" \
+            || die "cannot create a backup directory under $DATA"
+        bk="$bkdir/denso.db"
+        # As the target user, not root-then-chown: a failed WAL copy, a failed
+        # chown, or power loss between them would strand root-owned files in an
+        # operator-owned data dir -- files the app then cannot write. Same class
+        # of bug as the model-seeding fix above; the DB dir is the one whose
+        # ownership contract everything else protects, so this must never be
+        # transiently root-owned either.
+        #
+        # Copying the WAL SET (db + -wal) is consistent ONLY because the
+        # liveness check above proved nothing is running: no writer can race us.
+        # A crash can leave COMMITTED transactions in -wal, so denso.db alone is
+        # a stale snapshot. -shm is transient and SQLite reconstructs it.
+        # The "$bk-wal" naming is required for SQLite to associate them.
+        runuser -u "$user" -- sh -c '
+            set -eu
+            cp -p "$1" "$2"
+            if [ -f "$1-wal" ]; then cp -p "$1-wal" "$2-wal"; fi
+        ' _ "$DATA/denso.db" "$bk" || die "cannot back up the database to $bk"
+        echo "  ok  backed up to $bk"
+    else
+        echo "  ok  no database yet (fresh install)"
+    fi
+
+    echo "== migration smoke test (on a THROWAWAY copy — never the live DB)"
+    tmp="$(mktemp -d)"; chown "$user":"$group" "$tmp"
+    if [ -f "$DATA/denso.db" ]; then
+        # Copy the WAL set (denso.db + denso.db-wal), not the main file alone —
+        # same reasoning as the backup above: a crash can leave committed
+        # transactions in -wal, so denso.db alone is a stale snapshot and this
+        # smoke test would validate the wrong state. Safe as a set because
+        # nothing is running (checked above).
+        #
+        # AS THE TARGET USER, not root-then-chown: $tmp is already chowned to
+        # $user above, but the COPY itself must still run as them -- a failure
+        # or power loss between a root-made copy and its chown would strand
+        # root-owned files even in this throwaway dir (the app process that
+        # reads it next runs as $user).
+        runuser -u "$user" -- sh -c '
+            set -eu
+            cp "$1" "$2"
+            if [ -f "$1-wal" ]; then cp "$1-wal" "$2-wal"; fi
+        ' _ "$DATA/denso.db" "$tmp/copy.db" || die "cannot copy the database into $tmp"
+    fi
+    # No live DB -> an empty temp file exercises the full v0 chain the app will
+    # run on first launch.
+    if as_user "$user" env HOME="$tmp" TMPDIR="$tmp" "$DENSO" --check-migrations "$tmp/copy.db"; then
+        echo "  ok  migrations apply cleanly"
+    else
+        echo "  FAIL migrations would fail on this database — do NOT launch"; rc=1
+    fi
+    rm -rf "$tmp"
+
+    echo "== runtime + engines (--check, as $user)"
+    engines=""
+    for eng in "$PKG_MODELS"/*.engine; do
+        [ -e "$eng" ] || continue
+        engines="$engines --engine $(basename "$eng")"
+    done
+    tmp="$(mktemp -d)"; chown "$user":"$group" "$tmp"
+    # shellcheck disable=SC2086
+    if as_user "$user" env HOME="$tmp" TMPDIR="$tmp" CUDA_CACHE_PATH="$tmp/cuda" "$DENSO" --check $engines; then
+        echo "  ok  runtime + engines validate"
+    else
+        echo "  FAIL --check did not pass"; rc=1
+    fi
+    rm -rf "$tmp"
+
+    [ "$rc" = "0" ] && echo "verify: PASS" || echo "verify: FAIL"
+    return $rc
+}
+
+# preflight <path-to.deb> — run BEFORE `apt install`, because a guard that runs
+# afterwards guards nothing: by the time denso-setup exists on the box, the
+# transaction it was meant to veto has already happened.
+cmd_preflight() {
+    need_root
+    deb="${1-}"; [ -f "$deb" ] || die "usage: denso-setup preflight <path-to.deb>"
+    plan="$(mktemp)"
+    # No `|| true`: a simulation that fails to run is NOT a safe empty plan.
+    # apt needs a PATH, not a bare name: `apt-get install foo.deb` treats foo.deb as
+    # a PACKAGE NAME and fails with "Unable to locate package foo.deb". Only an
+    # argument containing a slash is read as a local file. Normalise to an absolute
+    # path so the operator can pass `x.deb`, `./x.deb` or a full path and get the
+    # same behaviour -- and so the command we PRINT is one that actually works.
+    deb="$(cd "$(dirname "$deb")" && pwd)/$(basename "$deb")"
+    if ! LC_ALL=C apt-get -s install --no-install-recommends "$deb" > "$plan" 2>&1; then
+        echo "preflight: apt simulation FAILED — refusing:" >&2
+        cat "$plan" >&2; rm -f "$plan"; return 1
+    fi
+    if apt_plan_ok "$plan"; then
+        echo "preflight: PASS — installing this package would not touch a protected JetPack package"
+        # Same options as the simulation above -- --no-install-recommends changes
+        # the transaction apt plans, so printing a different invocation here
+        # would tell the operator to run something we never actually vetted.
+        echo "preflight: now run:  sudo apt install --no-install-recommends $deb"
+        rm -f "$plan"; return 0
+    fi
+    rm -f "$plan"; return 1
+}
+
+cmd_unconfigure() {
+    need_root
+    user="$(cat "$STATE/user" 2>/dev/null || echo "")"
+    if [ -n "$user" ]; then
+        home="$(getent passwd "$user" | cut -d: -f6 || echo "")"
+        [ -n "$home" ] && rm -f "$home/.config/autostart/$AUTOSTART_NAME" && \
+            echo "denso-setup: autostart removed for $user"
+    fi
+    if [ -f "$STATE/autologin.orig" ]; then
+        # A missing $GDM_CONF here is a real failure, not a no-op: if we
+        # recorded originals, something DEPENDS on being able to restore them.
+        # The old `[ -f "$STATE/autologin.orig" ] && [ -f "$GDM_CONF" ]` guard
+        # silently skipped restoration and returned 0 when the conf file was
+        # absent -- so prerm proceeded and postrm purge deleted $STATE,
+        # destroying the only record of the original autologin state.
+        [ -f "$GDM_CONF" ] || die "recorded original autologin state exists but $GDM_CONF is missing — refusing, so $STATE is not lost. Restore or recreate $GDM_CONF (a snapshot is at $STATE/custom.conf.orig), then retry."
+        oe="$(cat "$STATE/autologin.orig")"
+        ou="$(cat "$STATE/autologin.origuser" 2>/dev/null || echo "")"
+        du="$(cat "$STATE/autologin.user" 2>/dev/null || echo "")"
+        # gdm_restore_autologin is three-way, not a boolean: 0 restored, 2 is a
+        # benign admin divergence (nothing was changed, correct as-is), anything
+        # else is a REAL failure. Collapsing 2 and a real failure into "non-zero
+        # -> benign" was the bug: prerm calls `denso-setup unconfigure` and
+        # refuses removal on non-zero, so treating a genuine write/permission
+        # failure as benign let the package (and postrm purge's deletion of
+        # $STATE -- the only record of the original GDM settings) proceed anyway,
+        # on a box that now auto-logins with no way to recover the prior state.
+        set +e
+        gdm_restore_autologin "$GDM_CONF" "$du" "$oe" "$ou"; grc=$?
+        set -e
+        case "$grc" in
+            0) echo "denso-setup: autologin restored (enable='$oe' user='$ou')" ;;
+            2) echo "denso-setup: autologin NOT restored — an admin changed it after us; leaving their setting." >&2 ;;
+            *) die "failed to restore autologin in $GDM_CONF (rc=$grc) — refusing, so the recorded originals in $STATE are not lost" ;;
+        esac
+    fi
+    # Clear the configured-user + user-specific autologin markers so a later
+    # `configure --user other` is not permanently refused (the old refusal
+    # message told the operator to run unconfigure first, but unconfigure never
+    # cleared $STATE/user -- a dead end). Preserve the pre-Denso originals
+    # (autologin.orig, autologin.origuser, custom.conf.orig): they must never be
+    # rebased, and cmd_configure's "already recorded" check depends on them.
+    rm -f "$STATE/user" "$STATE/autologin.user"
+    echo "denso-setup: unconfigured (data in $DATA kept; original GDM state still recorded in $STATE)"
+}
+
+cmd_replace_model() {
+    need_root
+    stem="${1-}"; [ -n "$stem" ] || die "usage: denso-setup replace-model <stem>"
+    user="$(cat "$STATE/user" 2>/dev/null)" || die "not configured"
+    eng="$PKG_MODELS/$stem.engine"; side="$PKG_MODELS/$stem.names.json"
+    [ -f "$eng" ] && [ -f "$side" ] || die "no packaged model '$stem'"
+    # As the target user — never root-then-chown (see cmd_configure).
+    runuser -u "$user" -- sh -c '. /opt/denso/lib/policy.sh; install_pair "$1" "$2" "$3"' \
+            _ "$eng" "$side" "$DATA/models" || die "failed to install $stem"
+    echo "denso-setup: replaced $stem.engine with the packaged one"
+}
+
+case "${1-}" in
+    preflight)     shift; cmd_preflight "$@" ;;
+    configure)     shift; cmd_configure "$@" ;;
+    verify)        shift; cmd_verify "$@" ;;
+    unconfigure)   shift; cmd_unconfigure "$@" ;;
+    replace-model) shift; cmd_replace_model "$@" ;;
+    *) echo "usage: denso-setup {preflight <deb> | configure --user <u> [--autostart] [--enable-autologin] | verify | unconfigure | replace-model <stem>}" >&2
+       exit 2 ;;
+esac

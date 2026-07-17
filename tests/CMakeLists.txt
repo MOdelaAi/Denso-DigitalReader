@@ -82,3 +82,16 @@ target_link_libraries(denso_tests PRIVATE ${OpenCV_LIBS} Qt6::Gui)
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 catch_discover_tests(denso_tests)
+
+# The packaging policy harness (pure POSIX sh, no deps) behind the SAME gate as
+# the C++ tests. It was 339 lines that only ran when someone remembered to — and
+# it covers the decisions that run as ROOT on the appliance (apt-plan guard, GDM
+# [daemon] editing, model seeding, the preflight drift check). Deliberately
+# dependency-free so it runs unchanged on MSYS2 and on the Jetson.
+# FATAL, not a soft skip: a missing bash silently dropping this test would
+# recreate the very failure this wiring exists to fix — "green because nobody ran
+# it". bash is present in every supported environment here (MSYS2 and the
+# Jetson), so its absence is a broken toolchain, not a reason to quietly test less.
+find_program(BASH_EXECUTABLE bash REQUIRED)
+add_test(NAME packaging_policy
+         COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/packaging/run.sh)

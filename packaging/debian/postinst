@@ -1,0 +1,34 @@
+#!/bin/sh
+# Structural only, and idempotent: dpkg may re-invoke this during recovery, and
+# a failure here leaves the package unconfigured and blocks later apt runs.
+# Everything with judgement (target user, autostart, autologin, validation)
+# lives in `denso-setup`, which the operator runs explicitly afterwards.
+set -e
+
+case "$1" in
+  configure)
+    DATA=/opt/denso/data
+    STATE=/opt/denso/install-state
+
+    mkdir -p "$DATA/models" "$STATE"
+    chmod 0755 "$STATE"
+
+    # Ownership is NOT set here, on purpose: this ran on every upgrade (dpkg
+    # never touches /opt/denso/data, so it was unnecessary), could be slow on
+    # a large data tree, assumed the primary group is named after the user
+    # (wrong — should be `id -gn`), and swallowed failure with `|| true`.
+    # `denso-setup configure` owns initial ownership and repair instead.
+
+    echo "denso: installed. Next:"
+    echo "  sudo denso-setup configure --user <username> [--autostart] [--enable-autologin]"
+    echo "  denso-setup verify"
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+  *)
+    echo "denso: unexpected maintainer-script argument: $1" >&2
+    exit 1
+    ;;
+esac
+
+exit 0
