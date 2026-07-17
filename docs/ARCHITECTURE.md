@@ -249,7 +249,7 @@ the modal internals (the five page widgets + `page_util`, plus the dialog-only
 `wizard_stepper`, `roi_canvas`, and the source scanners `camera_devices`,
 `ip_scan`). **`shared/`** is now just `roi_geometry` (the last cross-cutting UI
 primitive). The **non-widget runtime** — `frame_processor`, `fps_meter`,
-`stream_pacing`, `warmup_gate`, `zone_assembly`, `safe_process.h`, `snapshot`,
+`stream_pacing`, `warmup_gate`, `preview_gate`, `zone_assembly`, `safe_process.h`, `snapshot`,
 `frame_convert`, `rtsp_templates`, `gst_pipeline` — moved to the sibling
 `src/app/camera/` dir (the `denso_camera` lib); `camera_stream` (a `QObject`)
 also moved there in path but stays compiled into `denso`. Dependencies flow one
@@ -262,7 +262,8 @@ them, never on each other; the root entry points compose all three.
   same USB device); `reload()` rebuilds + restarts when the modal closes.
 - `camera_grid.{h,cpp}` / `camera_tile.{h,cpp}` / `camera_stream.{h,cpp}` —
   the live 1–4 feed grid. `CameraGrid` lays out one `CameraTile` + one
-  `CameraStream` per camera (first four by id; `grid_dims` picks 1 / 1×2 / 2×2).
+  `CameraStream` per **`camera::runtime()`** camera — enabled AND finished, filtered
+  in SQL (first four by id; `grid_dims` picks 1 / 1×2 / 2×2).
   Each `CameraStream` runs a `cv::VideoCapture` read loop on its **own
   `std::thread`**, converts each frame (`mat_to_qimage`), runs it through a
   `FrameProcessor` (wrapped in `safe_process` so a throw from a malformed frame

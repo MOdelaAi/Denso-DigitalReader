@@ -152,7 +152,8 @@ Facts that will bite whoever touches this:
   sweepable); the pattern closed it. It also stopped a subtler bug: an unignored
   new model permanently dirties the tree, and `tools/build_package.sh` refuses to
   package a dirty tree — so dropping in `digitv3.onnx` silently blocked the build.
-- The DB migration chain is at **v11** (`camera.areas_need_review`, added for the
+- The DB migration chain is at **v12** (`camera.setup_complete`; **v11** was
+  `camera.areas_need_review`, added for the
   editable-source / ROI-quarantine feature). Add a new migration — never edit a
   shipped one.
 - Logging is a bounded rotating file sink (`src/app/logging/`, ~25 MiB cap) meant

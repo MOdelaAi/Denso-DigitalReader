@@ -196,7 +196,7 @@ both the exe and the tests, and `denso_tests`:
 ```
 src/
 ├─ core/   → denso_core  (library; Qt Core/Sql + std)
-│  ├─ db/        SQLite base + version-gated migrations (currently v11)
+│  ├─ db/        SQLite base + version-gated migrations (currently v12)
 │  ├─ hardware/  host spec (QSysInfo / QStorageInfo)
 │  ├─ network/   domain + persistence + OS backends
 │  │  ├─ windows/  netsh / parse / wifi + Windows backend
