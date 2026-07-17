@@ -5,7 +5,9 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QStringList>
 #include <QVBoxLayout>
 
 #include <cstdint>
@@ -78,8 +80,39 @@ void CameraListPage::reload() {
         auto* del = new QPushButton(QStringLiteral("Delete"));
         del->setProperty("flatText", true);
         const int64_t id = cam.id;
-        connect(del, &QPushButton::clicked, this, [this, id] {
-            camera::remove(db_, id);
+        const QString cam_name = QString::fromStdString(cam.name);
+        connect(del, &QPushButton::clicked, this, [this, id, cam_name] {
+            // Confirm with the CONSEQUENCE, not a generic "are you sure": this
+            // destroys the hand-drawn ROI polygons and silently stops whatever
+            // zones they reported. Matches how the Areas page confirms a delete.
+            const std::vector<camera::CameraArea> areas = camera::areas_for(db_, id);
+            QString msg = QStringLiteral("Delete camera \"%1\"?").arg(cam_name);
+            if (!areas.empty()) {
+                QStringList zones;
+                for (const camera::CameraArea& a : areas) {
+                    if (a.zone) zones << QString::number(*a.zone);
+                }
+                msg += QStringLiteral("\n\nIts %1 detection area(s) are deleted too.")
+                           .arg(areas.size());
+                if (!zones.isEmpty()) {
+                    msg += QStringLiteral(" Zone %1 will stop being reported.")
+                               .arg(zones.join(QStringLiteral(", ")));
+                }
+            }
+            if (QMessageBox::question(this, QStringLiteral("Delete camera"), msg,
+                                      QMessageBox::Yes | QMessageBox::No,
+                                      QMessageBox::No) != QMessageBox::Yes) {
+                return;
+            }
+            // Honour the result: reporting success on a failed delete leaves the
+            // camera on screen and the operator believing it is gone.
+            if (!camera::remove(db_, id)) {
+                QMessageBox::warning(
+                    this, QStringLiteral("Delete failed"),
+                    QStringLiteral("Could not delete \"%1\". It is unchanged.")
+                        .arg(cam_name));
+                return;
+            }
             emit changed();
             reload();
         });

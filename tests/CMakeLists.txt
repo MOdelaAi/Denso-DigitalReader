@@ -46,6 +46,7 @@ add_executable(denso_tests
     test_merge_detections.cpp
     test_names_metadata.cpp
     test_frame_convert.cpp
+    test_preview_gate.cpp
     test_stream_pacing.cpp
     test_safe_process.cpp
     test_frame_processor.cpp
