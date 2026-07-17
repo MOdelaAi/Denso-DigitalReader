@@ -88,10 +88,10 @@ catch_discover_tests(denso_tests)
 # it covers the decisions that run as ROOT on the appliance (apt-plan guard, GDM
 # [daemon] editing, model seeding, the preflight drift check). Deliberately
 # dependency-free so it runs unchanged on MSYS2 and on the Jetson.
-find_program(BASH_EXECUTABLE bash)
-if(BASH_EXECUTABLE)
-    add_test(NAME packaging_policy
-             COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/packaging/run.sh)
-else()
-    message(STATUS "bash not found — the packaging policy harness will not run under ctest")
-endif()
+# FATAL, not a soft skip: a missing bash silently dropping this test would
+# recreate the very failure this wiring exists to fix — "green because nobody ran
+# it". bash is present in every supported environment here (MSYS2 and the
+# Jetson), so its absence is a broken toolchain, not a reason to quietly test less.
+find_program(BASH_EXECUTABLE bash REQUIRED)
+add_test(NAME packaging_policy
+         COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/packaging/run.sh)

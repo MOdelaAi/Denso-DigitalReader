@@ -368,9 +368,11 @@ silently** (require an explicit `denso-setup replace-model <stem>`). The decisio
 is made on the **pair** (engine + `.names.json`): an identical engine whose
 sidecar is missing or corrupt is broken, not "same". Because seeding is not in
 `postinst`, an upgrade carrying a NEW approved engine leaves the operator's
-existing one in place — so **`denso-setup verify` WARNs when a data-dir model
-differs from the packaged one**, naming `denso-setup replace-model <stem>`. It is
-a warning, not a failure: bring-your-own-engine is deliberate. Engine + sidecar are **ordered and
+existing one in place — so **`denso-setup verify` reports packaged-vs-data-dir
+drift**: `differs` is a **WARN** (bring-your-own-engine is deliberate) naming
+`denso-setup replace-model <stem>`; an **absent** packaged model is a **FAIL**,
+because `--check` validates every packaged engine by name and would fail on it
+anyway — warning there and failing here would be an incoherent contract. Engine + sidecar are **ordered and
 crash-resistant, NOT atomic** — two flat files cannot be made atomic with two
 renames. The engine's appearance is the commit marker: write+fsync sidecar temp →
 rename sidecar → write+fsync engine temp → rename engine **last** → fsync the

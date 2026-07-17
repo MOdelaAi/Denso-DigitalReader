@@ -222,7 +222,10 @@ cmd_verify() {
         [ -f "$side" ] || continue
         case "$(seed_decision_pair "$eng" "$side" "$DATA/models/$stem.engine" "$DATA/models/$stem.names.json")" in
             same) echo "  ok   $stem matches the packaged model" ;;
-            seed) echo "  WARN $stem is packaged but ABSENT from $DATA/models — run 'denso-setup configure --user <u>'" ;;
+            # FAIL, not WARN: --check below validates every packaged engine by
+            # name, so an absent one fails verify anyway. Warning here and then
+            # failing there would be an incoherent contract.
+            seed) echo "  FAIL $stem is packaged but ABSENT from $DATA/models — run 'denso-setup configure --user <u>'"; rc=1 ;;
             differs) echo "  WARN $stem in $DATA/models DIFFERS from the packaged one."
                      echo "       The appliance is NOT running the model this package approved."
                      echo "       Keep yours, or adopt the packaged one: denso-setup replace-model $stem" ;;

@@ -108,7 +108,9 @@ Facts that will bite whoever touches this:
   `network-manager`, `procps`).
 - `shlibs.local` maps ONLY directly-`NEEDED` sonames, and `build_package.sh`
   verifies every mapping against `dpkg -S` — the file overrides authoritative
-  metadata and shlibdeps trusts it blindly (a wrong mapping shipped once).
+  metadata and shlibdeps trusts it blindly (a wrong mapping was written once —
+  `libcudla` → `nvidia-l4t-cuda`, when `dpkg -S` says `libcudla-12-6` — which
+  would have declared a dependency nothing provides; caught before shipping).
 - **Debian policy forbids `/usr/local` for packages** → the launcher is `/usr/bin`.
 - **`--check-running` is TRI-STATE**: `0` running / `1` definitely not / `4` cannot
   determine. `prerm` proceeds ONLY on exactly `1`. `if denso --check-running; then
@@ -116,9 +118,13 @@ Facts that will bite whoever touches this:
 - Anything touching `/opt/denso/data` runs **as the target user** (`runuser`);
   root-owned artifacts there make the app unable to write, and a root-owned lock
   makes every later `--check-running` return `4`.
-- **`| head`/`grep -q`/`awk {exit}` under `set -o pipefail`** SIGPIPE the producer
-  and kill the script — but ONLY when the producer's output exceeds the ~64KB pipe
-  buffer (`ldconfig -p` is 172KB and did; `cmake --version` at 91 bytes cannot).
+- **`| head`/`grep -q`/`awk {exit}` under `set -o pipefail`**: an early-exiting
+  consumer can SIGPIPE a producer that hasn't finished, killing the script. Large
+  output made this deterministic for `ldconfig -p` (172KB, over the ~64KB pipe
+  buffer, so it blocks mid-write). The other current producers are safe because
+  they complete in a **single write** (231/91/42 bytes) — **not** because
+  sub-64KB output is universally safe: a small producer doing multiple writes can
+  still be caught between them. Check the producer, don't assume a size rule.
 - `models/*.engine`, `*.names.json` and `trt_cache/` are git-ignored: a sidecar is
   generated on-device beside its engine. Build outputs go to `dist/` (ignored) —
   writing them in the repo root made the build dirty its own tree and refuse the
