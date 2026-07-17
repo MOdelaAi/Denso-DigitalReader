@@ -101,6 +101,39 @@ TEST_CASE("runtime requires BOTH enabled and finished", "[camera_runtime]") {
     REQUIRE(all(d.handle()).size() == 3);
 }
 
+// Low-id drafts must not displace finished cameras in the runtime set. That
+// matters because CameraGrid keeps only the first four by id: when it filtered
+// nothing, a draft with a low id ate a tile slot and hid a real, working camera
+// behind it, with nothing on screen to explain the absence.
+//
+// Scope, honestly: this proves the SET runtime() returns. It does not construct
+// CameraGrid, so it cannot prove the grid calls runtime() rather than all(), nor
+// that it truncates after filtering. That ordering is structural
+// (camera_grid.cpp: runtime(db_) then resize(kMaxTiles)) and is reviewed, not
+// covered — a revert to all() + resize(4) would still pass this test.
+TEST_CASE("low-id drafts are excluded without hiding finished cameras",
+          "[camera_runtime]") {
+    Db d = db();
+
+    // Two drafts FIRST, so they hold the lowest ids and would win the truncation.
+    for (const char* n : {"draft-1", "draft-2"}) {
+        Camera c = cam(n);
+        c.setup_complete = false;
+        REQUIRE(insert(d.handle(), c).has_value());
+    }
+    for (const char* n : {"real-1", "real-2", "real-3", "real-4"}) {
+        Camera c = cam(n);
+        c.setup_complete = true;
+        REQUIRE(insert(d.handle(), c).has_value());
+    }
+
+    const std::vector<Camera> run = runtime(d.handle());
+    REQUIRE(run.size() == 4);  // all four real cameras survive the filter
+    REQUIRE(run[0].name == "real-1");
+    REQUIRE(run[3].name == "real-4");
+    REQUIRE(all(d.handle()).size() == 6);  // the drafts are still manageable
+}
+
 TEST_CASE("mark_setup_complete promotes a draft into the runtime", "[camera_runtime]") {
     Db d = db();
     Camera c = cam("Finishing");
@@ -115,6 +148,15 @@ TEST_CASE("mark_setup_complete promotes a draft into the runtime", "[camera_runt
     REQUIRE(run.size() == 1);
     REQUIRE(run[0].id == *id);
     REQUIRE(run[0].setup_complete);
+}
+
+TEST_CASE("completing a camera that does not exist fails", "[camera_runtime]") {
+    Db d = db();
+    // QSqlQuery::exec() SUCCEEDS on an UPDATE that matched zero rows — valid SQL,
+    // nothing changed. For a call whose entire job is "this camera is finished
+    // now", that would be a lie: a stale or concurrently-deleted id would report
+    // success and the caller would believe a camera is live that isn't there.
+    REQUIRE_FALSE(mark_setup_complete(d.handle(), 4242));
 }
 
 TEST_CASE("editing a finished camera does not un-finish it", "[camera_runtime]") {
