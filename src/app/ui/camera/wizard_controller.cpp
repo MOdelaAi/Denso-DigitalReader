@@ -86,6 +86,7 @@ void CameraWizardController::accept_source(const camera::Camera& source) {
 
 void CameraWizardController::open_configure(const QString& preview_text) {
     last_frame_ = QImage();
+    preview_.invalidate();  // the source may have just changed; nothing is proven
     pages_.configure->populate(draft_);
     pages_.configure->set_preview_text(preview_text);
     pages_.configure->clear_error();
@@ -110,21 +111,35 @@ void CameraWizardController::capture_snapshot() {
     }
     const QSize res = pages_.configure->resolution();
 
-    // Generation token: a late completion from a PREVIOUS source must not
-    // overwrite the preview for the current one (which would let the operator
-    // "verify" ROIs against the wrong image). Only the newest capture applies.
-    const uint64_t gen = ++capture_gen_;
+    // A late completion from a PREVIOUS source must not overwrite the preview for
+    // the current one (which would let the operator "verify" ROIs against the
+    // wrong image). Only the newest capture applies — PreviewGate owns that, and
+    // owns whether the settled result was a real frame.
+    const uint64_t gen = preview_.begin();
 
     common::run_on_worker([this, index, url, res, gen] {
         const Snapshot snap = grab_snapshot(index, url, res.width(), res.height());
-        common::post_to_gui(this, [this, snap, gen] {
-            if (gen != capture_gen_) return;  // superseded by a newer capture
+        common::post_to_gui(this, [this, snap, gen, res] {
+            const bool ok = !snap.image.isNull();
+            if (!preview_.settle(gen, ok)) {
+                return;  // superseded by a newer capture / an invalidate
+            }
             pages_.configure->set_capturing(false);
-            if (snap.image.isNull()) {
+            if (!ok) {
+                // Keep last_frame_ on screen so the ROI canvas doesn't blank out
+                // mid-edit, but the gate is now NOT live: this failure revoked
+                // verification, which is the whole point.
                 pages_.configure->set_preview_text(snap.error);
                 return;
             }
             last_frame_ = snap.image;
+            // The geometry this frame PROVES. Rotation/pitch/roll are re-applied
+            // to the raw frame by update_areas_background(), so they don't stale
+            // it — but an aspect change does: the frame becomes the wrong SHAPE
+            // to verify normalized ROIs against. Recorded so the Areas gate can
+            // tell whether the operator changed the aspect after capturing.
+            captured_.width = res.width();
+            captured_.height = res.height();
             pages_.configure->set_frame(last_frame_);
             update_areas_background();  // refresh the ROI canvas if it's showing
         });
@@ -133,6 +148,28 @@ void CameraWizardController::capture_snapshot() {
 
 void CameraWizardController::save_configured_camera() {
     pages_.configure->read_into(draft_);
+
+    // Nothing here proves the camera actually opens: Next was always enabled, and
+    // a failed snapshot only changed a label. Wrong credentials, an unreachable
+    // RTSP URL or an unplugged USB device would commit as a live production
+    // camera, and the operator would only find out from the grid later — after it
+    // had already been reporting nothing.
+    //
+    // A confirm rather than a hard block: an operator may legitimately need to
+    // fix a name or re-point a camera that is temporarily down, and trapping them
+    // in the wizard is its own failure. But they say so explicitly.
+    if (!preview_.has_live_frame()) {
+        const QMessageBox::StandardButton answer = QMessageBox::question(
+            pages_.configure, QStringLiteral("No live preview"),
+            QStringLiteral(
+                "This camera has not produced a preview frame, so its source has "
+                "not been proven to work.\n\nSave it anyway? It will be treated "
+                "as a live camera and report nothing until it connects."),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+    }
 
     if (editing_id_.has_value()) {
         draft_.id = *editing_id_;
@@ -198,6 +235,7 @@ void CameraWizardController::begin_areas_direct(const camera::Camera& cam) {
     editing_id_ = cam.id;
     draft_ = cam;
     last_frame_ = QImage();
+    preview_.invalidate();
     enter_areas(/*direct=*/true);
     capture_snapshot();
 }
@@ -220,6 +258,18 @@ void CameraWizardController::enter_areas(bool direct) {
     show_page_(4);
 }
 
+bool CameraWizardController::preview_verifies_draft() const {
+    // Liveness alone is not enough. Capture at 1920×1080, then switch the
+    // resolution preset to 640×480 and press Next: the aspect change quarantines
+    // the ROIs (requires_area_review), the Areas page still shows the retained
+    // 16:9 frame, and the gate is still live — so the operator would confirm
+    // normalized polygons against a frame of the wrong shape and resume
+    // reporting. A same-aspect resolution change is safe (normalized ROIs don't
+    // move, which is why requires_area_review ignores it), as are
+    // rotation/pitch/roll (re-applied to the raw frame).
+    return preview_.has_live_frame() && !camera::aspect_changed(captured_, draft_);
+}
+
 void CameraWizardController::update_areas_background() {
     if (last_frame_.isNull()) {
         pages_.areas->set_background(QImage());
@@ -231,15 +281,22 @@ void CameraWizardController::update_areas_background() {
 
 void CameraWizardController::save_areas(const std::vector<camera::CameraArea>& areas) {
     // Under quarantine, saving CLEARS the flag and resumes reporting — so require
-    // a valid current-source preview first. Without it the operator would be
-    // "verifying" ROIs against an image they can't see (offline / failed capture),
-    // which could resume reporting on a misaligned view. Staying paused is safe.
-    if (editing_id_.has_value() && draft_.areas_need_review && last_frame_.isNull()) {
+    // a LIVE current-source preview first. Without it the operator would be
+    // "verifying" ROIs against an image that isn't the camera, which could resume
+    // reporting on a misaligned view. Staying paused is safe.
+    //
+    // Gate on the PreviewGate, not on last_frame_.isNull(): a refresh that failed
+    // leaves the previous success on screen, so "not null" was true even though
+    // nothing had been verified against the current view — the safety mechanism
+    // let itself be bypassed through its own Refresh button.
+    if (editing_id_.has_value() && draft_.areas_need_review &&
+        !preview_verifies_draft()) {
         QMessageBox::warning(
-            pages_.areas, QStringLiteral("Preview needed"),
-            QStringLiteral("Capture a live preview of the new source before "
-                           "verifying the areas — zone reporting stays paused "
-                           "until they are checked against the current view."));
+            pages_.areas, QStringLiteral("Live preview needed"),
+            QStringLiteral("Refresh the preview and get a live frame at this "
+                           "camera's current resolution before verifying the "
+                           "areas — zone reporting stays paused until they are "
+                           "checked against the current view."));
         return;
     }
     if (editing_id_.has_value() &&

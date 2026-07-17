@@ -7,6 +7,14 @@
 
 namespace denso::camera {
 
+/// True if the width/height RATIO differs (cross-multiplied — no float division,
+/// no divide-by-zero). Unknown (0×0, e.g. a legacy camera) ↔ known counts as
+/// changed, because Configure resolves 0×0 into a preset; both-unknown does not.
+/// Exposed because the wizard needs aspect ALONE: rotation/pitch/roll are
+/// re-applied to the retained raw frame, so they don't stale a captured preview,
+/// but an aspect change makes that frame the wrong SHAPE to verify ROIs against.
+bool aspect_changed(const Camera& a, const Camera& b);
+
 /// True if `a` and `b` resolve to the SAME connection + view source — i.e. only
 /// non-view fields (name, username, password) differ. `camera_type` and the
 /// per-type view-determining fields must match: USB → index; IP → ip / rtsp /

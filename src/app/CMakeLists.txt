@@ -46,6 +46,7 @@ add_library(denso_camera STATIC
     camera/rtsp_templates.cpp
     camera/snapshot.cpp
     camera/fps_meter.cpp
+    camera/preview_gate.cpp
     camera/stream_pacing.cpp
     camera/warmup_gate.cpp
     camera/zone_assembly.cpp

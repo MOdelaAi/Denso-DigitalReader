@@ -7,6 +7,7 @@
 #pragma once
 
 #include "camera/camera.h"
+#include "camera/preview_gate.h"
 
 #include <QImage>
 #include <QObject>
@@ -71,6 +72,9 @@ private:
     void enter_models();           // load catalog + attachments → Models page
     void enter_areas(bool direct); // load areas + frame → Areas page
     void update_areas_background(); // push the oriented frame to the Areas canvas
+    /// True only when a live frame exists AND it still matches draft_'s aspect —
+    /// the two conditions for confirming quarantined ROIs against the view.
+    bool preview_verifies_draft() const;
 
     QSqlDatabase db_;
     Pages pages_;
@@ -80,7 +84,15 @@ private:
     camera::Camera original_;            // pre-edit camera (for source-change diff)
     camera::Camera draft_;               // camera being added/edited
     QImage last_frame_;                  // most recent un-rotated snapshot frame
-    uint64_t capture_gen_ = 0;           // newest snapshot request wins (stale-guard)
+    // Owns BOTH "newest request wins" and whether last_frame_ is a live view of
+    // the current source. `last_frame_` alone cannot answer the latter: it holds
+    // the previous success after a FAILED refresh, which used to let a
+    // quarantined camera's ROIs be "verified" against a stale image.
+    PreviewGate preview_;
+    // The resolution the live frame was captured at. Only width/height are used
+    // (via camera::aspect_changed) — a Camera purely to reuse that tested pure
+    // predicate rather than re-deriving aspect comparison here.
+    camera::Camera captured_;
     bool entered_areas_directly_ = false;  // true: per-row Areas (Back → list)
 };
 

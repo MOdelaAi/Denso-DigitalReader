@@ -3,12 +3,9 @@
 #include <cstdint>
 
 namespace denso::camera {
-namespace {
 
-/// Compare width/height ratios via cross-multiplication (no float division, no
-/// divide-by-zero). Going from unknown (0×0, e.g. a legacy camera) to a real
-/// resolution IS a geometry change — Configure resolves 0×0 into a preset — so
-/// treat unknown↔known as changed. Both-unknown is not a change.
+// Declared in the header (the wizard's preview gate needs aspect alone); the
+// contract lives there.
 bool aspect_changed(const Camera& a, const Camera& b) {
     const bool a_known = a.width != 0 && a.height != 0;
     const bool b_known = b.width != 0 && b.height != 0;
@@ -21,8 +18,6 @@ bool aspect_changed(const Camera& a, const Camera& b) {
     return static_cast<uint64_t>(a.width) * b.height !=
            static_cast<uint64_t>(b.width) * a.height;
 }
-
-} // namespace
 
 bool same_effective_source(const Camera& a, const Camera& b) {
     if (a.camera_type != b.camera_type) {

@@ -111,16 +111,39 @@ bool update(const QSqlDatabase& db, const Camera& c) {
 }
 
 bool remove(const QSqlDatabase& db, int64_t id) {
+    // ONE transaction, like replace_areas: the areas were deleted first and the
+    // camera second with no transaction, so a failure on the second statement
+    // destroyed the operator's hand-drawn ROI polygons while leaving the camera
+    // that referenced them. Either both go or neither does. (A QSqlDatabase copy
+    // shares the same underlying connection; transaction() is non-const.)
+    QSqlDatabase conn(db);
+    if (!conn.transaction()) {
+        return false;
+    }
+    const auto rollback = [&conn] {
+        conn.rollback();
+        return false;
+    };
+
     QSqlQuery areas(db);
     areas.prepare(QStringLiteral("DELETE FROM camera_area WHERE camera_id = ?"));
     areas.addBindValue(static_cast<qlonglong>(id));
     if (!areas.exec()) {
-        return false;
+        return rollback();
     }
     QSqlQuery cam(db);
     cam.prepare(QStringLiteral("DELETE FROM camera WHERE id = ?"));
     cam.addBindValue(static_cast<qlonglong>(id));
-    return cam.exec();
+    if (!cam.exec()) {
+        return rollback();
+    }
+    if (!conn.commit()) {
+        // SQLite can leave the transaction OPEN when commit fails (a busy/locked
+        // connection), and this handle is shared — the next write on it would
+        // then join a transaction nobody owns. Close it out explicitly.
+        return rollback();
+    }
+    return true;
 }
 
 std::optional<Camera> get(const QSqlDatabase& db, int64_t id) {
