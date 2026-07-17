@@ -134,14 +134,26 @@ cmd_configure() {
             printf '%s\n' "${oe:-false}" > "$STATE/autologin.orig.tmp" || die "cannot record the original enable"
             sync
             mv -f "$STATE/autologin.orig.tmp" "$STATE/autologin.orig" || die "cannot commit the original autologin state"
+            # Durability, not just atomicity: this file's mere presence is the
+            # "already recorded" marker every retry above checks. Losing it to a
+            # power cut right after the rename (before the directory entry hits
+            # disk) would make a later `configure` re-derive "originals" from
+            # OUR already-modified custom.conf and rebase over the real ones.
+            sync
             echo "denso-setup: recorded original autologin state (enable='${oe:-false}' user='${ou:-}')"
         else
             echo "denso-setup: original autologin state already recorded — not rebasing"
         fi
+        # Record BEFORE gdm_set_autologin, not after: if the GDM edit succeeds
+        # and THIS write then fails, autologin is enabled with no record of whom
+        # to restore -- unconfigure can never fix it and the box auto-logins
+        # forever. Recording first is strictly safer: if the edit then fails,
+        # the stale marker is harmless, because gdm_restore_autologin compares
+        # the CURRENT GDM values against what we claim we set, sees they aren't
+        # ours (the edit never landed), and returns 2 -- benign divergence,
+        # leave whatever is there alone.
+        printf '%s\n' "$user" > "$STATE/autologin.user" || die "cannot record the autologin user"
         gdm_set_autologin "$GDM_CONF" "$user" || die "failed to edit $GDM_CONF"
-        # Record AFTER gdm_set_autologin succeeds, not before: recording first
-        # would claim we set autologin for $user even on a failed edit.
-        printf '%s\n' "$user" > "$STATE/autologin.user"
         echo "denso-setup: autologin ENABLED for $user"
         echo "denso-setup: WARNING — anyone with physical access now gets $user's desktop."
     fi
@@ -187,13 +199,23 @@ cmd_verify() {
     echo "== database backup (the remedy if a migration goes wrong)"
     if [ -f "$DATA/denso.db" ]; then
         bk="$DATA/denso.db.backup-$(date +%Y%m%d-%H%M%S)"
-        cp -p "$DATA/denso.db" "$bk" || die "cannot back up the database to $bk"
-        # Carry the -wal too: a crash can leave COMMITTED transactions there, so
-        # denso.db alone is a stale snapshot. Safe to copy as a set only because
-        # we proved above that nothing is running -- no writer can race us.
-        [ -f "$DATA/denso.db-wal" ] && { cp -p "$DATA/denso.db-wal" "$bk-wal" || die "cannot back up the WAL"; }
-        chown "$user":"$group" "$bk" || die "cannot chown the backup to $user:$group"
-        [ -f "$bk-wal" ] && { chown "$user":"$group" "$bk-wal" || die "cannot chown the WAL backup"; }
+        # As the target user, not root-then-chown: a failed WAL copy, a failed
+        # chown, or power loss between them would strand root-owned files in an
+        # operator-owned data dir -- files the app then cannot write. Same class
+        # of bug as the model-seeding fix above; the DB dir is the one whose
+        # ownership contract everything else protects, so this must never be
+        # transiently root-owned either.
+        #
+        # Copying the WAL SET (db + -wal) is consistent ONLY because the
+        # liveness check above proved nothing is running: no writer can race us.
+        # A crash can leave COMMITTED transactions in -wal, so denso.db alone is
+        # a stale snapshot. -shm is transient and SQLite reconstructs it.
+        # The "$bk-wal" naming is required for SQLite to associate them.
+        runuser -u "$user" -- sh -c '
+            set -eu
+            cp -p "$1" "$2"
+            if [ -f "$1-wal" ]; then cp -p "$1-wal" "$2-wal"; fi
+        ' _ "$DATA/denso.db" "$bk" || die "cannot back up the database to $bk"
         echo "  ok  backed up to $bk"
     else
         echo "  ok  no database yet (fresh install)"
@@ -207,10 +229,17 @@ cmd_verify() {
         # transactions in -wal, so denso.db alone is a stale snapshot and this
         # smoke test would validate the wrong state. Safe as a set because
         # nothing is running (checked above).
-        cp "$DATA/denso.db" "$tmp/copy.db"; chown "$user":"$group" "$tmp/copy.db"
-        if [ -f "$DATA/denso.db-wal" ]; then
-            cp "$DATA/denso.db-wal" "$tmp/copy.db-wal"; chown "$user":"$group" "$tmp/copy.db-wal"
-        fi
+        #
+        # AS THE TARGET USER, not root-then-chown: $tmp is already chowned to
+        # $user above, but the COPY itself must still run as them -- a failure
+        # or power loss between a root-made copy and its chown would strand
+        # root-owned files even in this throwaway dir (the app process that
+        # reads it next runs as $user).
+        runuser -u "$user" -- sh -c '
+            set -eu
+            cp "$1" "$2"
+            if [ -f "$1-wal" ]; then cp "$1-wal" "$2-wal"; fi
+        ' _ "$DATA/denso.db" "$tmp/copy.db" || die "cannot copy the database into $tmp"
     fi
     # No live DB -> an empty temp file exercises the full v0 chain the app will
     # run on first launch.
@@ -271,7 +300,14 @@ cmd_unconfigure() {
         [ -n "$home" ] && rm -f "$home/.config/autostart/$AUTOSTART_NAME" && \
             echo "denso-setup: autostart removed for $user"
     fi
-    if [ -f "$STATE/autologin.orig" ] && [ -f "$GDM_CONF" ]; then
+    if [ -f "$STATE/autologin.orig" ]; then
+        # A missing $GDM_CONF here is a real failure, not a no-op: if we
+        # recorded originals, something DEPENDS on being able to restore them.
+        # The old `[ -f "$STATE/autologin.orig" ] && [ -f "$GDM_CONF" ]` guard
+        # silently skipped restoration and returned 0 when the conf file was
+        # absent -- so prerm proceeded and postrm purge deleted $STATE,
+        # destroying the only record of the original autologin state.
+        [ -f "$GDM_CONF" ] || die "recorded original autologin state exists but $GDM_CONF is missing — refusing, so $STATE is not lost. Restore or recreate $GDM_CONF (a snapshot is at $STATE/custom.conf.orig), then retry."
         oe="$(cat "$STATE/autologin.orig")"
         ou="$(cat "$STATE/autologin.origuser" 2>/dev/null || echo "")"
         du="$(cat "$STATE/autologin.user" 2>/dev/null || echo "")"
