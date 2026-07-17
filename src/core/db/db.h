@@ -15,10 +15,6 @@
 
 namespace denso::db {
 
-/// The database file inside the data dir (see denso::paths). Prefer
-/// paths::db_file() directly in new code.
-QString default_path();
-
 /// Owns one uniquely-named QSqlDatabase connection, removing it on destruction
 /// so file and in-memory test databases don't leak or collide. Move-only.
 class Db {

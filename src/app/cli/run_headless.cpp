@@ -30,12 +30,27 @@ int run_version() {
 }
 
 int run_check_running() {
-    // 0 = an instance is running, 1 = none. (prerm reads this to refuse an
-    // upgrade under a live app.)
-    const bool running =
-        denso::instance::SingleInstance::is_running(denso::paths::lock_file());
-    std::printf("%s\n", running ? "running" : "not running");
-    return running ? 0 : 1;
+    // 0 = an instance is running, 1 = none, 4 = could not determine (the lock
+    // file itself is unusable — missing dir, permissions, ...). (prerm reads
+    // this to refuse an upgrade under a live app; 4 must never masquerade as
+    // the clean 1 it would need to see to proceed.)
+    using denso::instance::RunState;
+    const RunState state =
+        denso::instance::SingleInstance::running_state(denso::paths::lock_file());
+    switch (state) {
+        case RunState::Running:
+            std::printf("running\n");
+            return 0;
+        case RunState::NotRunning:
+            std::printf("not running\n");
+            return 1;
+        case RunState::Indeterminate:
+            std::fprintf(stderr,
+                         "check-running: cannot determine — lock file unusable at %s\n",
+                         qPrintable(denso::paths::lock_file()));
+            return 4;
+    }
+    return 4;
 }
 
 int run_check_migrations(const QString& db_path) {
@@ -65,9 +80,21 @@ bool data_dir_writable() {
         std::fprintf(stderr, "check: data dir does not exist: %s\n", qPrintable(dir));
         return false;
     }
-    QTemporaryFile probe(dir + QStringLiteral("/.denso-check-XXXXXX"));
-    if (!probe.open()) {  // QTemporaryFile removes itself on close/destruction
+    // QDir::filePath, not string concatenation — paths.cpp's own rule: with
+    // DENSO_DATA_DIR=/, "dir + "/..."" would double the separator.
+    QTemporaryFile probe(QDir(dir).filePath(QStringLiteral(".denso-check-XXXXXX")));
+    if (!probe.open()) {
         std::fprintf(stderr, "check: data dir is not writable: %s\n", qPrintable(dir));
+        return false;
+    }
+    // Do not trust QTemporaryFile's auto-remove-on-close: removal can fail
+    // independently of creation (ACLs, another process holding it open) and
+    // fails silently, which would leave a stray probe file behind and break
+    // both this function's own create-and-remove intent and the "data dir
+    // left byte-for-byte empty" contract the gate script asserts.
+    probe.close();
+    if (!probe.remove()) {
+        std::fprintf(stderr, "check: cannot remove writability probe in %s\n", qPrintable(dir));
         return false;
     }
     return true;

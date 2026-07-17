@@ -16,7 +16,8 @@
 
 namespace denso::paths {
 
-/// The mutable-state root. Never has a trailing slash.
+/// The mutable-state root. Never has a trailing separator — except a
+/// filesystem root, which is why the derived paths use QDir::filePath.
 QString data_dir();
 
 QString db_file();               ///< <data>/denso.db

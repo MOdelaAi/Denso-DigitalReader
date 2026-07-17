@@ -1,7 +1,5 @@
 #include "db/db.h"
 
-#include "paths/paths.h"
-
 #include <QDebug>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -26,8 +24,6 @@ QString next_connection_name() {
 }
 
 } // namespace
-
-QString default_path() { return paths::db_file(); }
 
 Db::Db(QString name) : name_(std::move(name)) {}
 

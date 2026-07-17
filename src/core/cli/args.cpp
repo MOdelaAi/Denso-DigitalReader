@@ -14,7 +14,8 @@ QString usage() {
         "                             (does not mutate the primary database)\n"
         "  --engine <file>            repeatable; a models/ filename --check must\n"
         "                             validate even when no DB references it\n"
-        "  --check-running            exit 0 if an instance holds the lock, 1 if not\n"
+        "  --check-running            exit 0 if an instance holds the lock, 1 if not,\n"
+        "                             4 if that cannot be determined (lock unusable)\n"
         "  --check-migrations <db>    run the migration chain against <db> ONLY\n");
 }
 

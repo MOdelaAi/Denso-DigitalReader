@@ -21,6 +21,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QLocale>
+#include <QLockFile>
 #include <QMessageBox>
 #include <QSqlQuery>
 #include <QString>
@@ -41,6 +42,16 @@ namespace {
 // The bounded rotating log sink (installed in main once the app dir is known).
 denso::logging::RotatingLogSink* g_sink = nullptr;
 int g_min_rank = 1;  // default: Info and above
+
+// Describes why QLockFile::tryLock() failed for a reason OTHER than another
+// process holding it (LockFailedError has its own message at the call site).
+const char* lock_error_reason(QLockFile::LockError e) {
+    switch (e) {
+        case QLockFile::PermissionError: return "permission denied";
+        case QLockFile::UnknownError:    return "unknown error creating the lock file";
+        default:                         return "cannot create the lock file";
+    }
+}
 
 int level_rank(QtMsgType t) {
     switch (t) {
@@ -109,10 +120,20 @@ int main(int argc, char** argv) {
     denso::instance::SingleInstance instance_guard(denso::paths::lock_file());
     if (!instance_guard.acquire()) {
         // The log sink does not exist yet — stderr is all we have.
-        std::fprintf(stderr, "denso: another instance is already running\n");
-        QMessageBox::information(nullptr, QStringLiteral("Denso DigitalReader"),
-                                 QStringLiteral("Denso DigitalReader is already running."));
-        return 3;
+        if (instance_guard.last_error() == QLockFile::LockFailedError) {
+            // Another process genuinely holds the lock — the expected case.
+            std::fprintf(stderr, "denso: another instance is already running\n");
+            QMessageBox::information(nullptr, QStringLiteral("Denso DigitalReader"),
+                                     QStringLiteral("Denso DigitalReader is already running."));
+            return 3;
+        }
+        // The lock file itself could not be created (missing/read-only data
+        // dir, wrong ownership, ...). This is NOT "already running" — telling
+        // an operator that lie hides the real, fixable cause.
+        std::fprintf(stderr, "denso: cannot create the lock file at %s (%s)\n",
+                     qPrintable(denso::paths::lock_file()),
+                     lock_error_reason(instance_guard.last_error()));
+        return 1;
     }
 
     // ── Logging: bounded rotating file sink + timestamped, level-filtered lines.
@@ -150,11 +171,17 @@ int main(int argc, char** argv) {
         // running" instead of the real cause. Expected startup failures exit
         // cleanly; qFatal stays for genuinely unrecoverable aborts.
         qCritical().noquote() << "[fatal] cannot open database:" << db_path;
+        // qCritical is filterable by DENSO_LOG_LEVEL=off (it is not
+        // QtFatalMsg — see message_handler above), so a genuinely fatal
+        // startup failure could otherwise exit 1 with zero output anywhere.
+        // stderr always gets it, same as the second-instance path above.
+        std::fprintf(stderr, "denso: fatal: cannot open database: %s\n", qPrintable(db_path));
         return 1;
     }
     QSqlDatabase conn = db->handle();
     if (!denso::db::run_migrations(conn)) {
         qCritical().noquote() << "[fatal] cannot run migrations on:" << db_path;
+        std::fprintf(stderr, "denso: fatal: cannot run migrations on: %s\n", qPrintable(db_path));
         return 1;
     }
 
@@ -180,7 +207,8 @@ int main(int argc, char** argv) {
             << " schema=v" << schema << " backend=" << backend
             << " log_level=" << kLevel[g_min_rank]
             << " cameras=" << static_cast<int>(denso::camera::all(conn).size())
-            << " data=" << denso::paths::data_dir();
+            << " data=" << denso::paths::data_dir()
+            << " exe=" << QCoreApplication::applicationDirPath();
     }
 
     // One-time migration of any pre-SQLite settings.json sitting beside the DB.
