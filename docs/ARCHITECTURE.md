@@ -149,14 +149,27 @@ under a `QCoreApplication`, so none needs a display. They are the gates the
 | Mode | Contract |
 |---|---|
 | `--version` | prints `APP_VERSION`; takes no lock; no mutation |
-| `--check [--engine <file>]...` | validates the data dir + every model the DB references **and** each `--engine` named; **no persistent mutation** |
+| `--check [--engine <file>]...` | validates the data dir + every model the DB references **and** each `--engine` named; does not mutate the primary database or app-managed state — see the ownership caveat below |
 | `--check-running` | liveness; **the sole mode that takes the lock** — answering requires `tryLock` |
 | `--check-migrations <db-path>` | runs the migration chain against **that path only** |
 
 Exit codes (Slice 2's maintainer scripts depend on these): **0** ok — and for
 `--check-running`, *an instance is running*; **1** failed — and for
 `--check-running`, *nothing is running*; **2** bad usage; **3** the GUI refused
-to start because another instance holds the lock.
+to start because another instance holds the lock; **4** (`--check-running`
+only) *cannot determine* — the lock file itself is unusable (missing dir,
+permissions, ...). This must never be reported as the clean 1 a caller like
+Slice 2's `prerm` needs to see before it will proceed with an upgrade.
+
+**Ownership caveat for `--check`:** "does not mutate the primary database or
+app-managed state" is deliberately narrower than "no mutation at all" — see
+`Db::open_read_only`'s contract in `src/core/db/db.h`: a WAL reader needs the
+`-shm` index and SQLite may create it, and that file can outlive an abnormal
+exit. Running `--check` as the target user bounds **ownership** of any such
+support file, not whether one gets created. Installer/setup callers MUST run
+`--check` as the target user, never as root — a root-owned `-shm` in an
+operator-owned data dir is exactly the poisoning the data-dir rules exist to
+prevent.
 
 `--check` deliberately does **not** reuse the normal startup path:
 `EngineRegistry::warm_up()` creates the TRT cache dir and `Db::open()` runs

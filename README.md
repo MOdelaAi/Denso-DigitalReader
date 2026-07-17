@@ -99,8 +99,9 @@ Headless modes — used by the installer, no display required:
 
 ```sh
 denso --version
-denso --check [--engine <file>]...   # validate data dir + engines; no persistent mutation
-denso --check-running                # exit 0 if an instance holds the lock, 1 if not
+denso --check [--engine <file>]...   # validate data dir + engines; no primary-DB mutation,
+                                      # run as the target user (see docs/ARCHITECTURE.md)
+denso --check-running                # exit 0 running, 1 not running, 4 cannot determine
 denso --check-migrations <db-path>   # run the migration chain against that path ONLY
 ```
 
