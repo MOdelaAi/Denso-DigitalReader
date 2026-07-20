@@ -110,8 +110,14 @@ MigrateResult migrate_model(const QSqlDatabase& db, const MigrateRequest& req) {
             if (!ins.exec()) return rb("inserting remapped class row failed");
             QJsonObject so; so["class_id"] = s.class_id; so["conf"] = s.conf; sel.append(so);
         }
-        QJsonObject ao; ao["camera_id"] = static_cast<double>(req.camera_ids[k]);
-        ao["camera_model_id"] = static_cast<double>(a.camera_model_id); ao["classes"] = sel;
+        // 64-bit row ids as decimal STRINGS — a QJsonValue stores numbers as
+        // double, which would silently lose precision above 2^53 and could then
+        // misidentify the exact attachment a rollback must repoint. The receipt
+        // is the rollback contract, so its ids must round-trip losslessly.
+        QJsonObject ao;
+        ao["camera_id"] = QString::number(static_cast<qlonglong>(req.camera_ids[k]));
+        ao["camera_model_id"] = QString::number(static_cast<qlonglong>(a.camera_model_id));
+        ao["classes"] = sel;
         attJson.append(ao);
     }
 

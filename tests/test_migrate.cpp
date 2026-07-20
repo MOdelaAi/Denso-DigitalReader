@@ -4,6 +4,9 @@
 #include "detection/repo.h"
 #include <QSqlQuery>
 #include <QVariant>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 using namespace denso::detection;
 static denso::db::Db seed() {
     auto db = denso::db::Db::open_in_memory();
@@ -133,4 +136,57 @@ TEST_CASE("migrate_model refuses an unmapped selected class and leaves the DB un
     REQUIRE(q.exec("SELECT count(*) FROM model_migration_receipt"));
     REQUIRE(q.next());
     REQUIRE(q.value(0).toInt() == 0);
+}
+// Attach the seeded old model to a second camera, so a multi-camera swap can be
+// exercised. Returns nothing; camera 2 mirrors camera 1's selection.
+static void attach_second_camera(const QSqlDatabase& h) {
+    QSqlQuery q(h);
+    REQUIRE(q.exec("INSERT INTO camera(id,name,camera_type,width,height,fps,"
+                   "pitch,roll,rotation,active,setup_complete) "
+                   "VALUES(2,'C2','usb',640,480,15,0,0,0,1,1)"));
+    auto oid = upsert_model(h, DetectionModel{0,"old","old_a.engine",{"0","1"}});
+    REQUIRE(oid);
+    CameraModel cm; cm.camera_id=2; cm.model_id=*oid; cm.classes={{0,0.5f},{1,0.5f}};
+    REQUIRE(set_camera_models(h, 2, {cm}));
+}
+TEST_CASE("migrate_model swaps multiple cameras and records each attachment", "[migrate]") {
+    auto db = seed();
+    attach_second_camera(db.handle());
+    auto r = ok_req(); r.camera_ids = {1, 2};
+    auto res = migrate_model(db.handle(), r);
+    REQUIRE(res.ok);
+    REQUIRE(res.affected_cameras == std::vector<int64_t>{1, 2});
+    REQUIRE(detection_for(db.handle(), 1).models.at(0).filename == "new_b.engine");
+    REQUIRE(detection_for(db.handle(), 2).models.at(0).filename == "new_b.engine");
+    // One receipt whose attachments array holds both cameras, ids as STRINGS.
+    QSqlQuery q(db.handle());
+    REQUIRE(q.exec("SELECT attachments FROM model_migration_receipt"));
+    REQUIRE(q.next());
+    const auto atts = QJsonDocument::fromJson(q.value(0).toString().toUtf8()).array();
+    REQUIRE(atts.size() == 2);
+    REQUIRE(atts.at(0).toObject().value("camera_id").isString());
+    REQUIRE(atts.at(0).toObject().value("camera_id").toString() == "1");
+    REQUIRE(atts.at(1).toObject().value("camera_id").toString() == "2");
+}
+TEST_CASE("migrate_model records the forward/inverse map for a class reorder", "[migrate]") {
+    auto db = seed();
+    auto r = ok_req(); r.new_class_names = {"1", "0"};   // new id 0=="1", new id 1=="0"
+    REQUIRE(migrate_model(db.handle(), r).ok);
+    QSqlQuery q(db.handle());
+    REQUIRE(q.exec("SELECT forward_map,inverse_map FROM model_migration_receipt"));
+    REQUIRE(q.next());
+    // old "0"->new index 1, old "1"->new index 0.
+    REQUIRE(q.value(0).toString() == "{\"0\":1,\"1\":0}");
+    // inverse is the swap's self-inverse: new 0<-old 1, new 1<-old 0.
+    REQUIRE(q.value(1).toString() == "{\"0\":1,\"1\":0}");
+}
+TEST_CASE("migrate_model re-run refuses cleanly and does not double-write", "[migrate]") {
+    auto db = seed();
+    REQUIRE(migrate_model(db.handle(), ok_req()).ok);        // cameras now attach new_b.engine
+    auto second = migrate_model(db.handle(), ok_req());      // old_a.engine no longer attached
+    REQUIRE_FALSE(second.ok);                                // CAS NotAttached
+    QSqlQuery q(db.handle());
+    REQUIRE(q.exec("SELECT count(*) FROM model_migration_receipt"));
+    REQUIRE(q.next());
+    REQUIRE(q.value(0).toInt() == 1);                        // still exactly one receipt
 }
