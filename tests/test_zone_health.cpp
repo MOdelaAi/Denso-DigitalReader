@@ -40,3 +40,27 @@ TEST_CASE("zone_health: cameras are independent", "[zone_health]") {
     REQUIRE(h.is_inhibited(1));
     REQUIRE_FALSE(h.is_inhibited(2));
 }
+
+TEST_CASE("zone_health: clearing a cause for an unseen camera creates no entry",
+          "[zone_health]") {
+    std::vector<std::pair<int64_t,bool>> calls;
+    ZoneHealth h([&](int64_t id, bool on){ calls.push_back({id, on}); });
+    h.set_cause(42, ZoneCause::CaptureOffline, false);   // never seen before
+    REQUIRE(calls.empty());
+    REQUIRE(h.all().empty());              // no phantom mask-0 entry inserted
+    REQUIRE_FALSE(h.is_inhibited(42));
+}
+
+TEST_CASE("zone_health: a fully-recovered camera is dropped from all()",
+          "[zone_health]") {
+    std::vector<std::pair<int64_t,bool>> calls;
+    ZoneHealth h([&](int64_t id, bool on){ calls.push_back({id, on}); });
+    h.set_cause(1, ZoneCause::CaptureOffline, true);
+    h.set_cause(1, ZoneCause::InferenceWorkerFailed, true);
+    REQUIRE(h.all().count(1) == 1);
+    h.set_cause(1, ZoneCause::CaptureOffline, false);
+    REQUIRE(h.all().count(1) == 1);        // still held by the other cause
+    h.set_cause(1, ZoneCause::InferenceWorkerFailed, false);
+    REQUIRE(h.all().empty());              // last cause cleared -> entry retired
+    REQUIRE_FALSE(h.is_inhibited(1));
+}

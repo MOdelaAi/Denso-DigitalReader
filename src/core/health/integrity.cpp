@@ -30,7 +30,6 @@ QString reason_code(GlobalBlocker::Kind k) {
         case GlobalBlocker::Kind::DbQueryFailed:       return QStringLiteral("db_query_failed");
         case GlobalBlocker::Kind::ModelsDirUnreadable: return QStringLiteral("models_dir_unreadable");
         case GlobalBlocker::Kind::ManifestCorrupt:     return QStringLiteral("manifest_corrupt");
-        case GlobalBlocker::Kind::SharedBackendFailure:return QStringLiteral("shared_backend_failure");
     }
     return QStringLiteral("unknown");
 }

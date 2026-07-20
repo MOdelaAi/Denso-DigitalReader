@@ -14,10 +14,16 @@ namespace denso::health {
 enum class Readiness { Ready, Degraded, Blocked };
 
 /// Whole-machine faults: no restart fixes these, so boot exits EX_CONFIG (78).
+/// ONLY kinds with a real producer are declared (the same no-speculative-enum
+/// rule ZoneIssue::Kind follows). DbUnopenable/SchemaNewer/MigrationFailed are
+/// produced by the boot and --check paths, which run Db::open + run_migrations
+/// before calling the verdict (see startup.cpp / run_headless.cpp);
+/// DbQueryFailed/ModelsDirUnreadable/ManifestCorrupt are produced here in
+/// evaluate_integrity.
 struct GlobalBlocker {
     enum class Kind {
         DbUnopenable, SchemaNewer, MigrationFailed, DbQueryFailed,
-        ModelsDirUnreadable, ManifestCorrupt, SharedBackendFailure
+        ModelsDirUnreadable, ManifestCorrupt
     };
     Kind    kind;
     QString detail;

@@ -65,6 +65,40 @@ TEST_CASE("integrity: an engine on disk but absent from the manifest is DEGRADED
     REQUIRE(v.blockers.empty());   // MUST NOT block — it would brick production
 }
 
+TEST_CASE("integrity: a valid but empty manifest is accepted, not corrupt",
+          "[integrity]") {
+    // An empty generations array parses and validates cleanly; with no engines on
+    // disk the install is Ready, not Blocked. Guards against a future change that
+    // mistakes "no models yet" for a corrupt manifest.
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir root(tmp.path()); REQUIRE(root.mkpath("models"));
+    QDir models(root.filePath("models"));
+    put(models, "manifest.json", R"({"schema":1,"generations":[]})");
+    auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
+    REQUIRE(db::run_migrations(db->handle()));
+    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    REQUIRE(v.status == health::Readiness::Ready);
+    REQUIRE(v.blockers.empty());
+}
+
+TEST_CASE("integrity: a failed attachment query BLOCKS, never a silent empty fleet",
+          "[integrity]") {
+    // A broken DB must not be conflated with "no rows": dropping a joined table
+    // makes the readiness query ERROR, which is a global blocker (spec §2.2), not
+    // a Ready install with zero cameras.
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir root(tmp.path()); REQUIRE(root.mkpath("models"));
+    QDir models(root.filePath("models"));
+    auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
+    REQUIRE(db::run_migrations(db->handle()));
+    QSqlQuery q(db->handle());
+    REQUIRE(q.exec("DROP TABLE camera_model"));
+    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    REQUIRE(v.status == health::Readiness::Blocked);
+    REQUIRE_FALSE(v.blockers.empty());
+    REQUIRE(v.blockers[0].kind == health::GlobalBlocker::Kind::DbQueryFailed);
+}
+
 TEST_CASE("integrity: a camera attached to a missing engine is a per-zone issue",
           "[integrity]") {
     QTemporaryDir tmp; REQUIRE(tmp.isValid());
