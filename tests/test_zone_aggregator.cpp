@@ -158,6 +158,28 @@ TEST_CASE("hold: frames either side of a gap do not combine into one stable run"
     REQUIRE(feed(a, 1, 42, 2, t).has_value());              // 5 consecutive completes
 }
 
+TEST_CASE("REGRESSION: many consecutive Incomplete/NoDigits readings never "
+          "stabilise to a phantom value 0",
+          "[zone_aggregator]") {
+    // Guards the severe review finding: Incomplete/NoDigits carry value==0 in the
+    // ZoneReading struct, but that 0 must never be treated as a candidate the
+    // debounce counter can accumulate toward a stable, emitted snapshot. A zone
+    // that has NEVER produced a Complete reading must never appear in any emitted
+    // snapshot — least of all stabilised at the placeholder value 0.
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    for (int i = 0; i < 200; ++i) {
+        t += 100;
+        const auto snap = a.observe({rd(1, 0, ReadingKind::Incomplete)}, t);
+        REQUIRE_FALSE(snap.has_value());
+    }
+    for (int i = 0; i < 200; ++i) {
+        t += 100;
+        const auto snap = a.observe({rd(2, 0, ReadingKind::NoDigits)}, t);
+        REQUIRE_FALSE(snap.has_value());
+    }
+}
+
 TEST_CASE("hold: a sibling zone on the same camera keeps reporting",
           "[zone_aggregator]") {
     ZoneAggregator a(5, 10000);

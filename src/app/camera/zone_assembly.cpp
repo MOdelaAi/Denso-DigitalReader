@@ -48,6 +48,17 @@ ZoneAssembly assemble_zone_value(const std::vector<NamedDetection>& digits_in_zo
         }
         std::sort(heights.begin(), heights.end());
         const float median_h = heights[heights.size() / 2];
+        // A non-positive median height (degenerate zero/negative-height boxes from
+        // the detector) would collapse max_gap to <= 0, flagging virtually ANY
+        // positive centre separation as a gap. Since Incomplete zones eventually
+        // escalate to a permanently inhibited zone, a false gap here would freeze
+        // an otherwise-healthy zone forever. The project's stated bias is to
+        // UNDER-detect gaps (a missed gap merely holds the previous behaviour,
+        // which is far cheaper than a false one), so skip the gap check entirely
+        // rather than let it reject on bad geometry.
+        if (median_h <= 0.0f) {
+            return {ReadingKind::Complete, std::stoi(digits)};
+        }
         const float max_gap = kGapFactor * kPitchPerHeight * median_h;
         for (std::size_t i = 1; i < ordered.size(); ++i) {
             const float prev_c = ordered[i - 1]->box.x + ordered[i - 1]->box.width * 0.5f;

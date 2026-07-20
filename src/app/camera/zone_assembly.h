@@ -9,7 +9,6 @@
 #include "brazing/zone_reading.h"                   // ZoneReading
 #include "detection/merge_detections.h"   // NamedDetection
 
-#include <optional>
 #include <vector>
 
 namespace denso::ui {

@@ -32,7 +32,9 @@ TEST_CASE("assemble_zone_value collapses leading zeros", "[zone_assembly]") {
 
 TEST_CASE("assemble_zone_value on empty or non-digit is not Complete", "[zone_assembly]") {
     CHECK(assemble_zone_value({}).kind == ReadingKind::NoDigits);
-    CHECK(assemble_zone_value({digit(10, "x")}).kind == ReadingKind::Incomplete);
+    const auto r = assemble_zone_value({digit(10, "x")});
+    CHECK(r.kind == ReadingKind::Incomplete);
+    CHECK(r.value == 0);  // an unparseable label must never carry a usable value
 }
 
 TEST_CASE("assemble_zone_value rejects four digits", "[zone_assembly]") {
@@ -43,7 +45,9 @@ TEST_CASE("assemble_zone_value rejects four digits", "[zone_assembly]") {
         digit(55, "0"),
     };
 
-    CHECK(assemble_zone_value(d).kind == ReadingKind::Incomplete);
+    const auto r = assemble_zone_value(d);
+    CHECK(r.kind == ReadingKind::Incomplete);
+    CHECK(r.value == 0);  // never a truncated/bogus integer
 }
 
 TEST_CASE("assemble_zone_value accepts the maximum supported value", "[zone_assembly]") {
@@ -117,6 +121,41 @@ TEST_CASE("assemble: an internal missing digit is Incomplete", "[zone_assembly]"
     REQUIRE(r.kind == ReadingKind::Incomplete);
 }
 
+TEST_CASE("assemble: a separation just under the gap threshold stays Complete",
+          "[zone_assembly]") {
+    // height 40 -> max_gap = kGapFactor(1.60) * kPitchPerHeight(0.70) * 40 = 44.8.
+    // A centre separation of 44 is unambiguously below 44.8 in float, so the
+    // strict '>' comparison must NOT flag a gap.
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
+                                        dg("2", 44, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Complete);
+    REQUIRE(r.value == 12);
+}
+
+TEST_CASE("assemble: a separation just over the gap threshold is Incomplete",
+          "[zone_assembly]") {
+    // height 40 -> max_gap = kGapFactor(1.60) * kPitchPerHeight(0.70) * 40 = 44.8.
+    // A centre separation of 46 is unambiguously above 44.8 in float, so the
+    // strict '>' comparison must flag a gap.
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
+                                        dg("2", 46, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Incomplete);
+    REQUIRE(r.value == 0);
+}
+
+TEST_CASE("assemble: a non-positive median box height does not false-flag a gap",
+          "[zone_assembly]") {
+    // Degenerate zero-height boxes from the detector must not make max_gap collapse
+    // to 0 (which would flag virtually any positive separation as a gap and, via
+    // the later inhibition escalation, permanently freeze an otherwise-healthy
+    // zone). The project's stated bias is to UNDER-detect gaps, so a non-positive
+    // median height must skip the gap check entirely rather than reject.
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 0),
+                                        dg("2", 1000, 0, 20, 0)});
+    REQUIRE(r.kind == ReadingKind::Complete);
+    REQUIRE(r.value == 12);
+}
+
 TEST_CASE("assemble: no detections is NoDigits", "[zone_assembly]") {
     REQUIRE(assemble_zone_value({}).kind == ReadingKind::NoDigits);
 }
@@ -164,6 +203,7 @@ TEST_CASE("assemble: more than three digits is Incomplete, not a bogus value",
     const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40), dg("2", 28, 0, 20, 40),
                                         dg("3", 56, 0, 20, 40), dg("4", 84, 0, 20, 40)});
     REQUIRE(r.kind == ReadingKind::Incomplete);
+    REQUIRE(r.value == 0);
 }
 
 TEST_CASE("group_into_zones emits NoDigits for a zoned area with no detections",
@@ -175,4 +215,21 @@ TEST_CASE("group_into_zones emits NoDigits for a zoned area with no detections",
     REQUIRE(out.size() == 1);
     REQUIRE(out[0].zone_no == 7);
     REQUIRE(out[0].kind == ReadingKind::NoDigits);
+    REQUIRE(out[0].value == 0);
+    REQUIRE(out[0].conf == 0.0f);
+}
+
+TEST_CASE("group_into_zones does not reconstruct a value for a gapped zone",
+          "[zone_assembly]") {
+    // A zone with a gapped pair (internal missing digit) must survive grouping as
+    // Incomplete + value 0 — group_into_zones must not derive any value of its own.
+    CameraArea a;
+    a.zone = 3;
+    a.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    std::vector<NamedDetection> kept = {dg("1", 0, 0, 20, 40), dg("3", 560, 0, 20, 40)};
+    const auto out = group_into_zones(kept, {a}, 640.0f, 480.0f);
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].zone_no == 3);
+    REQUIRE(out[0].kind == ReadingKind::Incomplete);
+    REQUIRE(out[0].value == 0);
 }
