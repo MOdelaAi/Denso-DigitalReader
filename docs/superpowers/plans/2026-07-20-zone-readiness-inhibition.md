@@ -18,7 +18,9 @@
 - **Never construct an integer for an incomplete reading** anywhere in the pipeline (spec §5.1).
 - **`sync_models()`'s directory scan is RETAINED.** The production Jetson has no `manifest.json`; retiring the scan would globally block it (spec §2.3).
 - **The asymmetry in spec §3.1.1 is load-bearing and must be repeated in code comments:** camera-level causes reject the *entire observation*; a zone-level hold-timeout suppresses *publication only*, while complete observations keep rebuilding recovery debounce. Collapsing these into one gate reintroduces a permanent-inhibit deadlock.
-- Build: `cmake -S . -B build -G Ninja` · `cmake --build build` · `ctest --test-dir build`
+- **Build env (MSYS2 UCRT64):** `export PATH=/c/msys64/ucrt64/bin:$PATH` first, in every shell. A `build/` directory already exists (Ninja) — configure only if it is missing.
+- Build: `cmake --build build` · Full suite: `ctest --test-dir build --output-on-failure`
+- **Tag-scoped tests MUST use the Catch2 binary directly:** `./build/tests/denso_tests "[tag]"`. `ctest -R <tag>` matches test *names*, not tags, and silently reports "No tests were found!!!" — which reads as a passing run.
 - Every new test file must be added to the `add_executable(denso_tests ...)` list in `tests/CMakeLists.txt`.
 - Baseline before starting: **414 tests passing on Jetson / 413 + 1 skip on Windows.**
 
@@ -28,8 +30,8 @@
 
 **Create:**
 - `src/core/health/integrity.h` / `.cpp` — the pure readiness verdict (§2)
-- `src/app/health/zone_health.h` / `.cpp` — per-camera cause-set owner, GUI thread, no mutex (§3.1–3.2)
-- `src/app/health/status_file.h` / `.cpp` — atomic `status.json` writer (§7)
+- `src/core/health/zone_health.h` / `.cpp` — per-camera cause-set owner, GUI thread, no mutex (§3.1–3.2)
+- `src/core/health/status_file.h` / `.cpp` — atomic `status.json` writer (§7)
 - `tests/test_integrity.cpp`, `tests/test_zone_health.cpp`, `tests/test_status_file.cpp`
 
 **Modify:**
@@ -99,23 +101,32 @@ TEST_CASE("assemble: an incomplete reading carries NO usable value", "[zone_asse
     REQUIRE(r.value == 0);  // never 13 — spec §5.1
 }
 
-// ── Documented limits (spec §5.2). These assert the guard does NOT fire; they
-// pin the accepted residual so it cannot silently drift to "assumed fixed".
-TEST_CASE("assemble: a missing LEADING digit is undetectable", "[zone_assembly]") {
+// ─────────────────────────────────────────────────────────────────────────────
+// KNOWN LIMITATIONS — spec §5.2 / §10. These are NOT correctness expectations.
+// They assert the guard does NOT fire, pinning residuals we have explicitly
+// accepted for this slice so a future contributor cannot assume they are solved.
+// Slice (b2)'s calibrated anchor/slot work is what closes them; when it lands,
+// these cases flip to Incomplete and these tests SHOULD be rewritten.
+// Tagged [known_limit] so they can be listed on demand.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("KNOWN LIMITATION: a missing LEADING digit is undetectable",
+          "[zone_assembly][known_limit]") {
     const auto r = assemble_zone_value({dg("2", 28, 0, 20, 40),
                                         dg("3", 56, 0, 20, 40)});
     REQUIRE(r.kind == ReadingKind::Complete);
     REQUIRE(r.value == 23);
 }
 
-TEST_CASE("assemble: a missing TRAILING digit is undetectable", "[zone_assembly]") {
+TEST_CASE("KNOWN LIMITATION: a missing TRAILING digit is undetectable",
+          "[zone_assembly][known_limit]") {
     const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
                                         dg("2", 28, 0, 20, 40)});
     REQUIRE(r.kind == ReadingKind::Complete);
     REQUIRE(r.value == 12);
 }
 
-TEST_CASE("assemble: a single remaining detection is undetectable", "[zone_assembly]") {
+TEST_CASE("KNOWN LIMITATION: a single remaining detection is undetectable",
+          "[zone_assembly][known_limit]") {
     const auto r = assemble_zone_value({dg("3", 56, 0, 20, 40)});
     REQUIRE(r.kind == ReadingKind::Complete);
     REQUIRE(r.value == 3);
@@ -142,7 +153,7 @@ TEST_CASE("group_into_zones emits NoDigits for a zoned area with no detections",
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `ctest --test-dir build -R zone_assembly --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_assembly]"`
 Expected: compile error — `ReadingKind` undeclared, `assemble_zone_value` returns `std::optional<int>`.
 
 - [ ] **Step 3: Add `ReadingKind` to `zone_reading.h`**
@@ -163,7 +174,7 @@ struct ZoneReading {
     ReadingKind kind    = ReadingKind::Complete;
 };
 
-} // namespace denso::ui
+} // namespace denso::health
 ```
 
 - [ ] **Step 4: Implement the sum type and guard**
@@ -266,7 +277,7 @@ Replace the tail of `group_into_zones` so every zoned area emits a reading:
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `ctest --test-dir build -R zone_assembly --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_assembly]"`
 Expected: all `[zone_assembly]` cases PASS.
 
 - [ ] **Step 6: Commit**
@@ -385,7 +396,7 @@ TEST_CASE("hold: a sibling zone on the same camera keeps reporting",
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `ctest --test-dir build -R zone_aggregator --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_aggregator]"`
 Expected: FAIL — `rd()` won't compile until `ZoneReading::kind` is honoured, and holds are treated as observations.
 
 - [ ] **Step 3: Extend `Debounce` in `zone_aggregator.h`**
@@ -473,7 +484,7 @@ Then clear the re-announce flags **only on commit**, immediately after `last_sen
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `ctest --test-dir build -R zone_aggregator --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_aggregator]"`
 Expected: all `[zone_aggregator]` cases PASS.
 
 - [ ] **Step 6: Commit**
@@ -554,7 +565,7 @@ TEST_CASE("observe: an all-empty result is suppressed, not emitted",
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `ctest --test-dir build -R zone_aggregator --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_aggregator]"`
 Expected: FAIL — `evict_zones` not declared.
 
 - [ ] **Step 3: Implement**
@@ -619,7 +630,7 @@ replace `observe()`'s tail with `return build_snapshot();`.
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `ctest --test-dir build -R zone_aggregator --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_aggregator]"`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -724,7 +735,7 @@ TEST_CASE("cold start: timeout with no previous valid value inhibits and emits n
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `ctest --test-dir build -R zone_aggregator --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_aggregator]"`
 Expected: FAIL — `take_newly_inhibited` not declared.
 
 - [ ] **Step 3: Implement**
@@ -816,7 +827,7 @@ std::set<int> ZoneAggregator::take_newly_inhibited() {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `ctest --test-dir build -R zone_aggregator --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_aggregator]"`
 Expected: PASS — in particular "a zone-inhibited zone still RECOVERS".
 
 - [ ] **Step 5: Commit**
@@ -839,6 +850,8 @@ Implements spec §3.3(a)(b)(d).
 
 **Files:**
 - Modify: `src/app/brazing/zone_reporter.h`, `.cpp`
+- Modify: `src/app/CMakeLists.txt` — **move `brazing/zone_reporter.cpp` from the `denso` exe into the `denso_brazing` library**, and update the stale comment at line ~28 claiming the `ZoneSink` impl must stay in the executable. It has **zero Qt dependencies** (`chrono`, `utility`, `functional`, `map`, `mutex` only), so it belongs in `denso_brazing` — "the pure, testable reporting logic". `denso_tests` links `denso_brazing` but **not** the `denso` exe, so without this move none of this task's tests can link. Compile it in exactly one target.
+- Modify: `CLAUDE.md` — the `denso_brazing` row and the `zone_reporter` row both state it stays in `denso`; correct both.
 - Test: `tests/test_zone_reporter.cpp` (create)
 
 **Interfaces:**
@@ -934,7 +947,7 @@ TEST_CASE("reporter: sequence numbers increase and skip suppressed snapshots",
 
 Add `test_zone_reporter.cpp` to `add_executable(denso_tests ...)` in `tests/CMakeLists.txt`.
 
-Run: `cmake --build build && ctest --test-dir build -R zone_reporter --output-on-failure`
+Run: `cmake --build build && ./build/tests/denso_tests "[zone_reporter]"`
 Expected: FAIL — `set_camera_inhibited` not declared; callback arity mismatch.
 
 - [ ] **Step 3: Implement**
@@ -1049,12 +1062,12 @@ void ZoneReporter::set_camera_inhibited(int64_t camera_id, bool on) {
     }
 }
 
-} // namespace denso::ui
+} // namespace denso::health
 ```
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `ctest --test-dir build -R zone_reporter --output-on-failure`
+Run: `./build/tests/denso_tests "[zone_reporter]"`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1182,7 +1195,7 @@ TEST_CASE("integrity: a camera attached to a missing engine is a per-zone issue"
 
 Add `test_integrity.cpp` to `tests/CMakeLists.txt`.
 
-Run: `cmake --build build && ctest --test-dir build -R integrity --output-on-failure`
+Run: `cmake --build build && ./build/tests/denso_tests "[integrity]"`
 Expected: FAIL — `health/integrity.h` not found.
 
 - [ ] **Step 3: Implement the header**
@@ -1216,12 +1229,11 @@ struct GlobalBlocker {
 };
 
 /// Faults scoped to one camera's zones: the app boots and healthy zones report.
+/// ONLY kinds with a real producer are declared. Do NOT add speculative values
+/// to "stabilise" status.json — that file uses stable STRING reason codes
+/// (reason_code below), so new kinds are additive without placeholders.
 struct ZoneIssue {
-    enum class Kind {
-        EngineMissing, SidecarMissingOrInvalid, ShaMismatch,
-        ArtifactDeserializeFailed, ClassSelectionIncompatible,
-        EnginesUnmanifested
-    };
+    enum class Kind { EngineMissing, EnginesUnmanifested };
     Kind    kind;
     int64_t camera_id = 0;   // 0 = not camera-scoped (e.g. EnginesUnmanifested)
     QString detail;
@@ -1238,6 +1250,13 @@ IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& model
 
 /// Process exit code for a verdict: 0 Ready / 10 Degraded / 78 Blocked (spec §2.1).
 int exit_code_for(Readiness r);
+
+/// Stable, machine-readable reason codes for status.json. These strings are a
+/// FILE FORMAT: never renumber, never reuse, only add. Deliberately not enum
+/// ordinals — an ordinal shifts whenever a value is inserted, silently
+/// remapping every historical status.json.
+QString reason_code(GlobalBlocker::Kind k);
+QString reason_code(ZoneIssue::Kind k);
 
 } // namespace denso::health
 ```
@@ -1270,6 +1289,27 @@ bool read_text(const QString& path, std::string& out) {
 }
 
 } // namespace
+
+QString reason_code(GlobalBlocker::Kind k) {
+    switch (k) {
+        case GlobalBlocker::Kind::DbUnopenable:        return QStringLiteral("db_unopenable");
+        case GlobalBlocker::Kind::SchemaNewer:         return QStringLiteral("schema_newer");
+        case GlobalBlocker::Kind::MigrationFailed:     return QStringLiteral("migration_failed");
+        case GlobalBlocker::Kind::DbQueryFailed:       return QStringLiteral("db_query_failed");
+        case GlobalBlocker::Kind::ModelsDirUnreadable: return QStringLiteral("models_dir_unreadable");
+        case GlobalBlocker::Kind::ManifestCorrupt:     return QStringLiteral("manifest_corrupt");
+        case GlobalBlocker::Kind::SharedBackendFailure:return QStringLiteral("shared_backend_failure");
+    }
+    return QStringLiteral("unknown");
+}
+
+QString reason_code(ZoneIssue::Kind k) {
+    switch (k) {
+        case ZoneIssue::Kind::EngineMissing:       return QStringLiteral("engine_missing");
+        case ZoneIssue::Kind::EnginesUnmanifested: return QStringLiteral("engines_unmanifested");
+    }
+    return QStringLiteral("unknown");
+}
 
 int exit_code_for(Readiness r) {
     switch (r) {
@@ -1363,7 +1403,7 @@ Add both files to the `denso_core` source list in `src/core/CMakeLists.txt`.
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `cmake --build build && ctest --test-dir build -R integrity --output-on-failure`
+Run: `cmake --build build && ./build/tests/denso_tests "[integrity]"`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -1384,13 +1424,13 @@ engines are reported and never block, so the production Jetson still boots."
 Implements spec §7.
 
 **Files:**
-- Create: `src/app/health/status_file.h`, `.cpp`
-- Modify: `src/app/CMakeLists.txt`
+- Create: `src/core/health/status_file.h`, `.cpp`
+- Modify: `src/core/CMakeLists.txt` (add to `denso_core`)
 - Test: `tests/test_status_file.cpp` (create)
 
 **Interfaces:**
 - Consumes: `health::IntegrityVerdict` (Task 6).
-- Produces: `bool denso::ui::write_status_file(const QString& path, const health::IntegrityVerdict&, const std::map<int64_t,uint32_t>& camera_causes, const std::set<int>& held_zones, const std::set<int>& inhibited_zones);`
+- Produces: `bool denso::health::write_status_file(const QString& path, const health::IntegrityVerdict&, const std::map<int64_t,uint32_t>& camera_causes, const std::set<int>& held_zones, const std::set<int>& inhibited_zones);`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1412,12 +1452,14 @@ TEST_CASE("status.json: writes a parseable document", "[status_file]") {
     health::IntegrityVerdict v;
     v.status = health::Readiness::Degraded;
     v.issues.push_back({health::ZoneIssue::Kind::EngineMissing, 1, "gone.engine"});
-    REQUIRE(ui::write_status_file(path, v, {{1, 0x08}}, {5}, {9}));
+    REQUIRE(health::write_status_file(path, v, {{1, 0x08}}, {5}, {9}));
 
     QFile f(path); REQUIRE(f.open(QIODevice::ReadOnly));
     const auto doc = QJsonDocument::fromJson(f.readAll());
     REQUIRE(doc.isObject());
     REQUIRE(doc.object()["status"].toString() == "degraded");
+    REQUIRE(doc.object()["issues"].toArray()[0].toObject()["reason"].toString()
+            == "engine_missing");   // stable string code, not an enum ordinal
     REQUIRE(doc.object()["held_zones"].toArray().size() == 1);
     REQUIRE(doc.object()["inhibited_zones"].toArray().size() == 1);
 }
@@ -1427,8 +1469,8 @@ TEST_CASE("status.json: rewriting leaves no temp file behind", "[status_file]") 
     QDir dir(tmp.path());
     const QString path = dir.filePath("status.json");
     health::IntegrityVerdict v;
-    REQUIRE(ui::write_status_file(path, v, {}, {}, {}));
-    REQUIRE(ui::write_status_file(path, v, {}, {}, {}));
+    REQUIRE(health::write_status_file(path, v, {}, {}, {}));
+    REQUIRE(health::write_status_file(path, v, {}, {}, {}));
     // Atomic write = temp + rename; a leftover temp would mean a partial write
     // could be observed after a crash.
     REQUIRE(dir.entryList({"*.tmp"}, QDir::Files).isEmpty());
@@ -1438,12 +1480,12 @@ TEST_CASE("status.json: rewriting leaves no temp file behind", "[status_file]") 
 - [ ] **Step 2: Register and run to verify it fails**
 
 Add `test_status_file.cpp` to `tests/CMakeLists.txt`.
-Run: `cmake --build build && ctest --test-dir build -R status_file --output-on-failure`
+Run: `cmake --build build && ./build/tests/denso_tests "[status_file]"`
 Expected: FAIL — header not found.
 
 - [ ] **Step 3: Implement**
 
-Create `src/app/health/status_file.h`:
+Create `src/core/health/status_file.h`:
 
 ```cpp
 // Machine-readable local health, for SSH/denso-setup inspection. Written
@@ -1458,7 +1500,7 @@ Create `src/app/health/status_file.h`:
 #include <map>
 #include <set>
 
-namespace denso::ui {
+namespace denso::health {
 
 bool write_status_file(const QString& path,
                        const health::IntegrityVerdict& verdict,
@@ -1466,10 +1508,10 @@ bool write_status_file(const QString& path,
                        const std::set<int>& held_zones,
                        const std::set<int>& inhibited_zones);
 
-} // namespace denso::ui
+} // namespace denso::health
 ```
 
-Create `src/app/health/status_file.cpp`:
+Create `src/core/health/status_file.cpp`:
 
 ```cpp
 #include "health/status_file.h"
@@ -1505,7 +1547,7 @@ bool write_status_file(const QString& path,
     QJsonArray blockers;
     for (const auto& b : verdict.blockers) {
         QJsonObject o;
-        o["kind"] = static_cast<int>(b.kind);
+        o["reason"] = health::reason_code(b.kind);   // stable string, never an ordinal
         o["detail"] = b.detail;
         blockers.append(o);
     }
@@ -1514,7 +1556,7 @@ bool write_status_file(const QString& path,
     QJsonArray issues;
     for (const auto& i : verdict.issues) {
         QJsonObject o;
-        o["kind"] = static_cast<int>(i.kind);
+        o["reason"] = health::reason_code(i.kind);   // stable string, never an ordinal
         // Ids as STRINGS: QJsonValue is a double, so >2^53 would lose precision.
         o["camera_id"] = QString::number(i.camera_id);
         o["detail"] = i.detail;
@@ -1549,20 +1591,20 @@ bool write_status_file(const QString& path,
     return f.commit();
 }
 
-} // namespace denso::ui
+} // namespace denso::health
 ```
 
-Add both files to `src/app/CMakeLists.txt`.
+Add both files to the `denso_core` source list in `src/core/CMakeLists.txt`.
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cmake --build build && ctest --test-dir build -R status_file --output-on-failure`
+Run: `cmake --build build && ./build/tests/denso_tests "[status_file]"`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/app/health/status_file.h src/app/health/status_file.cpp \
+git add src/core/health/status_file.h src/core/health/status_file.cpp \
         src/app/CMakeLists.txt tests/test_status_file.cpp tests/CMakeLists.txt
 git commit -m "feat(health): atomic status.json writer"
 ```
@@ -1574,8 +1616,8 @@ git commit -m "feat(health): atomic status.json writer"
 Implements spec §3.1–§3.2. Single-threaded by construction — **no mutex**.
 
 **Files:**
-- Create: `src/app/health/zone_health.h`, `.cpp`
-- Modify: `src/app/CMakeLists.txt`
+- Create: `src/core/health/zone_health.h`, `.cpp`
+- Modify: `src/core/CMakeLists.txt` (add to `denso_core`)
 - Test: `tests/test_zone_health.cpp` (create)
 
 **Interfaces:**
@@ -1590,7 +1632,7 @@ Create `tests/test_zone_health.cpp`:
 #include <catch2/catch_test_macros.hpp>
 #include "health/zone_health.h"
 #include <vector>
-using namespace denso::ui;
+using namespace denso::health;
 
 TEST_CASE("zone_health: causes compose and release only when ALL clear",
           "[zone_health]") {
@@ -1634,12 +1676,12 @@ TEST_CASE("zone_health: cameras are independent", "[zone_health]") {
 - [ ] **Step 2: Register and run to verify it fails**
 
 Add `test_zone_health.cpp` to `tests/CMakeLists.txt`.
-Run: `cmake --build build && ctest --test-dir build -R zone_health --output-on-failure`
+Run: `cmake --build build && ./build/tests/denso_tests "[zone_health]"`
 Expected: FAIL — header not found.
 
 - [ ] **Step 3: Implement**
 
-Create `src/app/health/zone_health.h`:
+Create `src/core/health/zone_health.h`:
 
 ```cpp
 // Per-camera inhibit causes. Causes are evaluated PER CAMERA and conservatively
@@ -1656,7 +1698,7 @@ Create `src/app/health/zone_health.h`:
 #include <functional>
 #include <map>
 
-namespace denso::ui {
+namespace denso::health {
 
 enum class ZoneCause : uint32_t {
     AreasNeedReview       = 1u << 0,
@@ -1682,17 +1724,17 @@ private:
     std::map<int64_t, uint32_t> causes_;
 };
 
-} // namespace denso::ui
+} // namespace denso::health
 ```
 
-Create `src/app/health/zone_health.cpp`:
+Create `src/core/health/zone_health.cpp`:
 
 ```cpp
 #include "health/zone_health.h"
 
 #include <utility>
 
-namespace denso::ui {
+namespace denso::health {
 
 ZoneHealth::ZoneHealth(std::function<void(int64_t, bool)> on_inhibit_changed)
     : on_inhibit_changed_(std::move(on_inhibit_changed)) {}
@@ -1726,20 +1768,20 @@ uint32_t ZoneHealth::causes(int64_t camera_id) const {
     return it == causes_.end() ? 0u : it->second;
 }
 
-} // namespace denso::ui
+} // namespace denso::health
 ```
 
-Add both files to `src/app/CMakeLists.txt`.
+Add both files to the `denso_core` source list in `src/core/CMakeLists.txt`.
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cmake --build build && ctest --test-dir build -R zone_health --output-on-failure`
+Run: `cmake --build build && ./build/tests/denso_tests "[zone_health]"`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/app/health/zone_health.h src/app/health/zone_health.cpp \
+git add src/core/health/zone_health.h src/core/health/zone_health.cpp \
         src/app/CMakeLists.txt tests/test_zone_health.cpp tests/CMakeLists.txt
 git commit -m "feat(health): per-camera composable inhibit cause-set"
 ```
@@ -1867,7 +1909,7 @@ Replace both `app.exit(1)` calls. On warmup failure and on a blocked verdict:
 
 ```cpp
     const auto verdict = health::evaluate_integrity(db.handle(), paths::models_dir());
-    ui::write_status_file(QDir(paths::data_dir()).filePath("status.json"),
+    health::write_status_file(QDir(paths::data_dir()).filePath("status.json"),
                           verdict, {}, {}, {});
     if (verdict.status == health::Readiness::Blocked) {
         for (const auto& b : verdict.blockers) {
