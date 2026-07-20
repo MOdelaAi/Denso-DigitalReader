@@ -82,3 +82,71 @@ TEST_CASE("parse: --engine only applies to --check", "[cli]") {
     REQUIRE(parse({QStringLiteral("--version"), QStringLiteral("--engine"),
                    QStringLiteral("a.engine")}).mode == Mode::Error);
 }
+
+TEST_CASE("parse: --migrate-model with old, new, and repeated --camera", "[cli]") {
+    const Command c = parse({QStringLiteral("--migrate-model"),
+                             QStringLiteral("--old"), QStringLiteral("a.engine"),
+                             QStringLiteral("--new"), QStringLiteral("b.engine"),
+                             QStringLiteral("--camera"), QStringLiteral("1"),
+                             QStringLiteral("--camera"), QStringLiteral("2")});
+    REQUIRE(c.mode == Mode::MigrateModel);
+    REQUIRE(c.old_engine == QStringLiteral("a.engine"));
+    REQUIRE(c.new_engine == QStringLiteral("b.engine"));
+    REQUIRE(c.cameras == QList<qint64>{1, 2});
+}
+
+TEST_CASE("parse: --migrate-model captures an optional --class-map", "[cli]") {
+    const Command c = parse({QStringLiteral("--migrate-model"),
+                             QStringLiteral("--old"), QStringLiteral("a.engine"),
+                             QStringLiteral("--new"), QStringLiteral("b.engine"),
+                             QStringLiteral("--camera"), QStringLiteral("1"),
+                             QStringLiteral("--class-map"), QStringLiteral("p.json")});
+    REQUIRE(c.mode == Mode::MigrateModel);
+    REQUIRE(c.class_map_path == QStringLiteral("p.json"));
+}
+
+TEST_CASE("parse: --migrate-model without --old is an error", "[cli]") {
+    const Command c = parse({QStringLiteral("--migrate-model"),
+                             QStringLiteral("--new"), QStringLiteral("b.engine"),
+                             QStringLiteral("--camera"), QStringLiteral("1")});
+    REQUIRE(c.mode == Mode::Error);
+}
+
+TEST_CASE("parse: --migrate-model without --new is an error", "[cli]") {
+    const Command c = parse({QStringLiteral("--migrate-model"),
+                             QStringLiteral("--old"), QStringLiteral("a.engine"),
+                             QStringLiteral("--camera"), QStringLiteral("1")});
+    REQUIRE(c.mode == Mode::Error);
+}
+
+TEST_CASE("parse: --migrate-model without any --camera is an error", "[cli]") {
+    const Command c = parse({QStringLiteral("--migrate-model"),
+                             QStringLiteral("--old"), QStringLiteral("a.engine"),
+                             QStringLiteral("--new"), QStringLiteral("b.engine")});
+    REQUIRE(c.mode == Mode::Error);
+}
+
+TEST_CASE("parse: --migrate-model with a non-integer --camera id is an error", "[cli]") {
+    const Command c = parse({QStringLiteral("--migrate-model"),
+                             QStringLiteral("--old"), QStringLiteral("a.engine"),
+                             QStringLiteral("--new"), QStringLiteral("b.engine"),
+                             QStringLiteral("--camera"), QStringLiteral("abc")});
+    REQUIRE(c.mode == Mode::Error);
+}
+
+TEST_CASE("parse: --migrate-model with a duplicate --camera id is an error", "[cli]") {
+    const Command c = parse({QStringLiteral("--migrate-model"),
+                             QStringLiteral("--old"), QStringLiteral("a.engine"),
+                             QStringLiteral("--new"), QStringLiteral("b.engine"),
+                             QStringLiteral("--camera"), QStringLiteral("1"),
+                             QStringLiteral("--camera"), QStringLiteral("1")});
+    REQUIRE(c.mode == Mode::Error);
+}
+
+TEST_CASE("parse: --migrate-model with a flag missing its value is an error", "[cli]") {
+    const Command c = parse({QStringLiteral("--migrate-model"),
+                             QStringLiteral("--new"), QStringLiteral("b.engine"),
+                             QStringLiteral("--camera"), QStringLiteral("1"),
+                             QStringLiteral("--old")});
+    REQUIRE(c.mode == Mode::Error);
+}

@@ -14,7 +14,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 12;
+constexpr int SCHEMA_VERSION = 13;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -383,6 +383,29 @@ bool run_migrations(const QSqlDatabase& db) {
         // signal to recover and every pre-existing row must be treated as done.
         if (!run("ALTER TABLE camera ADD COLUMN setup_complete "
                  "INTEGER NOT NULL DEFAULT 1")) {
+            return false;
+        }
+    }
+
+    if (version < 13) {
+        // Rollback-complete receipt for a model generation swap (Slice C). Records
+        // the exact camera_model rows, both model identities, prior selections +
+        // thresholds, and the forward+inverse class-id maps, so a swap can be
+        // reversed deterministically. Written by the migrate coordinator; read by
+        // rollback. Additive table only — no existing row is touched.
+        if (!run("CREATE TABLE IF NOT EXISTS model_migration_receipt ("
+                 "id                INTEGER PRIMARY KEY,"
+                 "created_utc       TEXT NOT NULL,"
+                 "old_filename      TEXT NOT NULL,"
+                 "old_model_id      INTEGER NOT NULL,"
+                 "old_name          TEXT NOT NULL,"
+                 "old_class_names   TEXT NOT NULL,"
+                 "new_filename      TEXT NOT NULL,"
+                 "new_model_id      INTEGER NOT NULL,"
+                 "new_engine_sha256 TEXT NOT NULL,"
+                 "forward_map       TEXT NOT NULL,"
+                 "inverse_map       TEXT NOT NULL,"
+                 "attachments       TEXT NOT NULL)")) {
             return false;
         }
     }
