@@ -67,12 +67,14 @@ add_executable(denso_tests
     test_manifest.cpp
     test_class_map.cpp
     test_migrate.cpp
+    test_migrate_coordinator.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),
     # NOT compiled in a second time here. The few units that don't yet have a lib
     # are compiled in directly:
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/roi_geometry.cpp  # UI geometry
+    ${CMAKE_SOURCE_DIR}/src/app/cli/migrate_coordinator.cpp        # headless migrate coordinator
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/grid_layout.cpp     # grid layout algo
     ${CMAKE_SOURCE_DIR}/src/app/ui/startup_mode.cpp                # cold-start probe
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_rotation.cpp
