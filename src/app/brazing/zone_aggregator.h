@@ -19,6 +19,7 @@ namespace denso::ui {
 
 constexpr int kStableFrames = 5;          // identical observations before a value is sent
 constexpr int64_t kZoneExpiryMs = 10000;  // drop a zone unseen for longer than this
+constexpr int64_t kHoldTimeoutMs = 30000; // hold -> Inhibited escalation (spec §5.3)
 
 class ZoneAggregator {
 public:
@@ -37,6 +38,10 @@ public:
     /// as an inhibit does. Returns the shrunk snapshot when the payload actually
     /// changed, else nullopt. NEVER returns an empty snapshot (spec §3.3).
     std::optional<std::map<int, int>> evict_zones(const std::set<int>& zone_nos);
+
+    /// Zones that escalated from hold to inhibited since the last call. Draining
+    /// is destructive so a caller raises each alarm exactly once.
+    std::set<int> take_newly_inhibited();
 
 private:
     struct Debounce {
@@ -68,8 +73,11 @@ private:
 
     int stable_frames_;
     int64_t expiry_ms_;
+    int64_t hold_timeout_ms_ = kHoldTimeoutMs;
     std::map<int, Debounce> zones_;   // zone_no -> debounce state
     std::map<int, int> last_sent_;    // zone_no -> value in the last snapshot
+    std::set<int> zone_inhibit_;      // publication suppressed; debounce continues
+    std::set<int> newly_inhibited_;   // drained by take_newly_inhibited()
 };
 
 } // namespace denso::ui

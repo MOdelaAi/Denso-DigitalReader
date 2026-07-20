@@ -333,3 +333,78 @@ TEST_CASE("evict: an empty zone set is a no-op", "[zone_aggregator]") {
     feed(a, 1, 42, 5, t);
     REQUIRE_FALSE(a.evict_zones({}).has_value());
 }
+
+TEST_CASE("timeout: a hold that exceeds kHoldTimeoutMs inhibits the zone",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 11, 5, t);
+    feed(a, 2, 22, 5, t);
+    for (int i = 0; i < 400; ++i) {   // 40s of incomplete frames
+        t += 100;
+        a.observe({rd(1, 0, ReadingKind::Incomplete), rd(2, 22)}, t);
+    }
+    REQUIRE(a.take_newly_inhibited().count(1) == 1);
+}
+
+TEST_CASE("timeout: recovery BEFORE the timeout resumes normally",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    for (int i = 0; i < 100; ++i) {   // 10s — well under 30s
+        t += 100;
+        a.observe({rd(1, 0, ReadingKind::Incomplete)}, t);
+    }
+    REQUIRE(a.take_newly_inhibited().empty());
+    REQUIRE(feed(a, 1, 42, 5, t).has_value());
+}
+
+TEST_CASE("timeout: a zone-inhibited zone still RECOVERS via debounce",
+          "[zone_aggregator]") {
+    // The permanent-inhibit trap: quarantined recovery means observations keep
+    // rebuilding debounce while publication is suppressed (spec §3.1.1).
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 11, 5, t);
+    feed(a, 2, 22, 5, t);
+    for (int i = 0; i < 400; ++i) {
+        t += 100;
+        a.observe({rd(1, 0, ReadingKind::Incomplete), rd(2, 22)}, t);
+    }
+    REQUIRE(a.take_newly_inhibited().count(1) == 1);
+    const auto snap = feed(a, 1, 11, 5, t);   // five complete readings
+    REQUIRE(snap.has_value());
+    REQUIRE((*snap).at(1) == 11);              // published again — not stuck
+}
+
+// ── Cold start (spec §5.3.1) ──
+TEST_CASE("cold start: repeated incompletes publish NOTHING", "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    for (int i = 0; i < 100; ++i) {
+        t += 100;
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());
+    }
+}
+
+TEST_CASE("cold start: first valid value before the timeout publishes normally",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    for (int i = 0; i < 50; ++i) { t += 100; a.observe({rd(1, 0, ReadingKind::NoDigits)}, t); }
+    const auto snap = feed(a, 1, 77, 5, t);
+    REQUIRE(snap.has_value());
+    REQUIRE((*snap).at(1) == 77);
+}
+
+TEST_CASE("cold start: timeout with no previous valid value inhibits and emits nothing",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    for (int i = 0; i < 400; ++i) {   // 40s, never a complete reading
+        t += 100;
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());
+    }
+    REQUIRE(a.take_newly_inhibited().count(1) == 1);
+}

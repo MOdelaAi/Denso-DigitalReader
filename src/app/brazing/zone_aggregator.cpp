@@ -56,8 +56,30 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
             }
             d.has_last_valid = true;
             d.last_valid = d.stable;
+            // Quarantined recovery: a hold-timeout inhibit suppresses PUBLICATION
+            // only, so the zone kept accumulating debounce and can clear itself
+            // here. Gating the observation instead would deadlock it forever.
+            const bool was_inhibited = zone_inhibit_.erase(z.zone_no) > 0;
             const auto it = last_sent_.find(z.zone_no);
-            if (it == last_sent_.end() || it->second != d.stable || d.needs_reannounce) {
+            if (it == last_sent_.end() || it->second != d.stable ||
+                d.needs_reannounce || was_inhibited) {
+                changed = true;
+            }
+        }
+    }
+
+    // Hold-timeout sweep. One rule covers warm and cold start: measure against the
+    // last COMPLETE reading, or — for a zone that has never read successfully —
+    // against its first observation of any kind (spec §5.3.1).
+    for (auto& [zone_no, d] : zones_) {
+        if (zone_inhibit_.count(zone_no) > 0) {
+            continue;   // already inhibited; recovery is handled in the stable branch
+        }
+        const int64_t base = d.has_last_valid ? d.last_complete_ms : d.first_seen_ms;
+        if (base != 0 && now_ms - base > hold_timeout_ms_) {
+            zone_inhibit_.insert(zone_no);
+            newly_inhibited_.insert(zone_no);
+            if (last_sent_.erase(zone_no) > 0) {
                 changed = true;
             }
         }
@@ -110,7 +132,7 @@ std::optional<std::map<int, int>> ZoneAggregator::build_snapshot(
     const std::set<int>& recovered_zone_nos) {
     std::map<int, int> snapshot;
     for (const auto& [zone_no, d] : zones_) {
-        if (d.has_stable) {
+        if (d.has_stable && zone_inhibit_.count(zone_no) == 0) {
             snapshot[zone_no] = d.stable;
         }
     }
@@ -130,6 +152,12 @@ std::optional<std::map<int, int>> ZoneAggregator::build_snapshot(
         }
     }
     return snapshot;
+}
+
+std::set<int> ZoneAggregator::take_newly_inhibited() {
+    std::set<int> out;
+    out.swap(newly_inhibited_);
+    return out;
 }
 
 } // namespace denso::ui
