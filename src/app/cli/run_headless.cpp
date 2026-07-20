@@ -1,5 +1,6 @@
 #include "cli/run_headless.h"
 
+#include "cli/migrate_coordinator.h"
 #include "db/db.h"
 #include "detection/engine_registry.h"   // denso::ui::BackendEngine
 #include "detection/repo.h"
@@ -171,6 +172,23 @@ bool validate_model(const std::string& filename, const QString& cache_dir) {
     return true;
 }
 
+/// Wire the parsed --migrate-model command to the headless coordinator: the
+/// real appliance paths come from denso::paths, everything else from the parsed
+/// command. No logic here — the coordinator owns validation, the transaction,
+/// and the machine-readable JSON (printed verbatim for the caller to consume).
+int run_migrate_model(const denso::cli::Command& cmd) {
+    denso::cli::MigrateInputs in;
+    in.models_dir = denso::paths::models_dir();
+    in.db_path = denso::paths::db_file();
+    in.old_engine = cmd.old_engine;
+    in.new_engine = cmd.new_engine;
+    in.class_map_path = cmd.class_map_path;
+    in.cameras = cmd.cameras;
+    const denso::cli::MigrateOutcome outcome = denso::cli::run_migrate(in);
+    std::printf("%s\n", outcome.json.toStdString().c_str());
+    return outcome.exit_code;
+}
+
 int run_check(const QStringList& extra_engines) {
     if (!data_dir_writable()) return 1;
 
@@ -219,6 +237,7 @@ int run_headless(const denso::cli::Command& cmd) {
         case Mode::CheckRunning:    return run_check_running();
         case Mode::CheckMigrations: return run_check_migrations(cmd.arg);
         case Mode::Check:           return run_check(cmd.engines);
+        case Mode::MigrateModel:    return run_migrate_model(cmd);
         case Mode::Error:
             std::fprintf(stderr, "denso: %s\n\n%s", qPrintable(cmd.error),
                          qPrintable(denso::cli::usage()));
