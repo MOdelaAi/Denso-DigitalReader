@@ -2,6 +2,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <algorithm>
+#include <set>
 namespace denso::models {
 namespace {
 ParseResult fail(const std::string& why) { return {std::nullopt, why}; }
@@ -44,3 +46,69 @@ ParseResult parse_manifest(const std::string& json_text) {
     return {m, {}};
 }
 }
+
+namespace denso::models {
+namespace {
+bool is_basename(const std::string& s) {
+    if (s.empty()) return false;
+    if (s.find('/') != std::string::npos) return false;
+    if (s.find('\\') != std::string::npos) return false;
+    if (s.find("..") != std::string::npos) return false;
+    return true;
+}
+bool is_lower_hex64(const std::string& s) {
+    if (s.size() != 64) return false;
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
+// "digit-v3.1.engine" -> "digit-v3.1" (strip the last dot-extension)
+std::string stem_of(const std::string& s) {
+    const auto pos = s.find_last_of('.');
+    return pos == std::string::npos ? s : s.substr(0, pos);
+}
+// "digit-v3.1.names.json" -> "digit-v3.1" (strip the trailing ".names.json")
+std::string sidecar_stem(const std::string& s) {
+    const auto pos1 = s.find_last_of('.');
+    if (pos1 == std::string::npos || pos1 == 0) return s;
+    const auto pos2 = s.find_last_of('.', pos1 - 1);
+    return pos2 == std::string::npos ? s.substr(0, pos1) : s.substr(0, pos2);
+}
+}  // namespace
+
+std::optional<std::string> validate_manifest(const Manifest& m) {
+    std::set<std::string> names, engines;
+    for (const auto& g : m.generations) {
+        if (!is_basename(g.engine)) return "engine is not a safe basename: " + g.engine;
+        if (!is_basename(g.sidecar)) return "sidecar is not a safe basename: " + g.sidecar;
+        if (stem_of(g.engine) != sidecar_stem(g.sidecar))
+            return "engine/sidecar stem mismatch for generation " + g.name;
+        if (g.class_names.empty()) return "class_names must be non-empty for generation " + g.name;
+        std::set<std::string> seen_classes;
+        for (const auto& c : g.class_names) {
+            if (c.empty()) return "class_names must not contain blanks for generation " + g.name;
+            if (!seen_classes.insert(c).second)
+                return "duplicate class name '" + c + "' for generation " + g.name;
+        }
+        if (g.name.empty()) return "generation name must be non-empty";
+        if (g.installed_utc.empty()) return "installed_utc must be non-empty for generation " + g.name;
+        if (g.trt.empty()) return "built_for.trt must be non-empty for generation " + g.name;
+        if (g.cuda.empty()) return "built_for.cuda must be non-empty for generation " + g.name;
+        if (g.sm.empty()) return "built_for.sm must be non-empty for generation " + g.name;
+        if (!is_lower_hex64(g.engine_sha256))
+            return "engine_sha256 must be 64 lowercase hex chars for generation " + g.name;
+        if (!is_lower_hex64(g.sidecar_sha256))
+            return "sidecar_sha256 must be 64 lowercase hex chars for generation " + g.name;
+        if (g.state != "installed") return "state must be 'installed' for generation " + g.name;
+        if (!names.insert(g.name).second) return "duplicate generation name: " + g.name;
+        if (!engines.insert(g.engine).second) return "duplicate engine filename: " + g.engine;
+    }
+    return std::nullopt;
+}
+
+const ModelGeneration* find_by_engine(const Manifest& m, const std::string& engine) {
+    for (const auto& g : m.generations)
+        if (g.engine == engine) return &g;
+    return nullptr;
+}
+}  // namespace denso::models

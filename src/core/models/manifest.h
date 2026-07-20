@@ -11,4 +11,6 @@ struct ModelGeneration {
 struct Manifest { int schema = 0; std::vector<ModelGeneration> generations; };
 struct ParseResult { std::optional<Manifest> manifest; std::string error; };
 ParseResult parse_manifest(const std::string& json_text);   // structural only
+std::optional<std::string> validate_manifest(const Manifest& m);   // semantic rules
+const ModelGeneration* find_by_engine(const Manifest& m, const std::string& engine);
 }
