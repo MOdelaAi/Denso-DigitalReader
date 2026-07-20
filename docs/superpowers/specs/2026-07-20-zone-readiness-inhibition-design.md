@@ -50,6 +50,23 @@ A pure, unit-testable routine in core, backing **both** boot and `--check`. Thes
 not diverge: a `--check` that passes an installation boot would refuse is worse than
 no check at all.
 
+**The verdict routine is READ-ONLY and takes the catalog as an input.** This is what
+makes the shared-routine claim honest: boot mutates (it runs `sync_models()`), whereas
+`--check`'s existing contract is strictly non-mutating. So the scan stays a *boot-only*
+step that happens **before** the verdict, and the verdict itself observes state rather
+than producing it. `--check` computes the same verdict over the current catalog plus a
+read-only directory listing — enough to report `engines_unmanifested` without writing
+anything.
+
+**`--check` exit contract** (previously undefined for a degraded result, which would
+have made "non-blocking degraded" operationally meaningless):
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `Ready` | `0` | All zones healthy |
+| `Degraded` | `10` | Boots and runs; some zones inhibited. Diagnostics on stdout. Distinct from `1` so a generic failure is never mistaken for a degraded-but-serviceable appliance. |
+| `Blocked` | `78` (`EX_CONFIG`) | Will not boot; matches the boot exit code exactly |
+
 ```
 enum class Readiness { Ready, Degraded, Blocked };
 
@@ -131,9 +148,28 @@ zone_inhibited(z) := camera_causes[owner_of(z)] != 0     // §3.1, projected
 ```
 
 `zone_inhibit` is a per-zone flag with exactly one producer in this slice (hold
-timeout) and is cleared only by a complete reading passing debounce. Both scopes are
-evaluated in the same predicate under the reporter mutex (§3.3a), so a camera-level
+timeout). Both scopes are evaluated under the reporter mutex (§3.3a), so a camera-level
 release cannot un-inhibit a zone that timed out its hold, and vice versa.
+
+**The two scopes gate DIFFERENT things, and conflating them is a permanent-inhibit
+trap.** The asymmetry is deliberate:
+
+| Scope | Recovery evidence | Gate blocks |
+|---|---|---|
+| `camera_causes` | **External** — the camera comes back online, the model revalidates, the worker recovers. Arrives as a cause *clear*, not as an observation. | The whole observation. Nothing is evaluated. |
+| `zone_inhibit` (hold timeout) | **Only the observations themselves** — there is no external signal that a meter became readable again. | **Publication only.** Observations still update private debounce state. |
+
+If `zone_inhibit` blocked observations the way camera causes do, the zone could never
+accumulate the complete readings needed to clear its own inhibition, and would stay
+inhibited until process restart. **Quarantined recovery** avoids that:
+
+> A zone with `zone_inhibit` set continues to be fed to `observe()`, rebuilding its
+> `Debounce` normally, but is **excluded from the emitted snapshot**. When a *complete*
+> reading passes debounce, `zone_inhibit` clears and the zone publishes in the same
+> critical section — forced, because `last_sent_` no longer holds it.
+
+So the rule is: **camera causes drop the observation; a zone hold-timeout drops only
+the publication.**
 
 ### 3.2 Cause transitions are serialized on the GUI thread
 
@@ -150,6 +186,19 @@ Only the last originates off-thread, so one `post_to_gui` makes every transition
 GUI-ordered. Consequently **`ZoneHealth` needs no mutex**, no revision counter, and
 there is no ZoneHealth↔ZoneReporter lock ordering to reason about. `ZoneReporter`
 keeps its existing mutex because it genuinely spans threads.
+
+**Wiring requirement (load-bearing, not incidental).** `status_changed` is *emitted on
+`CameraStream`'s private capture thread* — it is not intrinsically GUI-delivered. It
+reaches the GUI thread today only because `CameraGrid` connects it to a GUI-affine
+receiver under `Qt::AutoConnection`, which Qt then queues. The health connection **must
+likewise use a GUI-affine receiver/context object with an auto/queued connection**. A
+contextless functor or an explicit `Qt::DirectConnection` would execute on the capture
+thread and silently invalidate the single-owner claim — reintroducing the ordering
+hazard this section exists to remove.
+
+Note that a cause transition can still race an observation in wall-clock terms; that is
+harmless precisely because both the predicate and `observe()` are taken under the
+reporter mutex (§3.3a), so mutex acquisition order *is* the linearization order.
 
 This removes the ordering hazard where an older add/clear overtakes a newer one.
 
@@ -182,6 +231,11 @@ mutex; the GUI side drops any snapshot older than the last applied.
 **Never emit an empty snapshot.** The aggregator's "a genuinely empty snapshot never
 arises" invariant breaks once eviction exists, and `build_brazing_payload({})` emits
 literal `"{}"`. If all cameras drop, that POST under U1=CLEAR could clear every zone.
+
+A suppressed empty snapshot **must not consume or advance the sequence number** of
+§3.3(d). If suppression burned a sequence, the GUI side's drop-stale rule would discard
+the next genuine snapshot as "older" and the recovery would be lost. Sequence numbers
+are assigned only to snapshots actually dispatched.
 
 ### 3.4 Inhibit / release semantics
 
@@ -278,16 +332,38 @@ and a shrunk snapshot drops it — the opposite of "retain the last valid value"
 Conflating them is what would let a permanently missed digit freeze an old meter value
 forever.
 
-**On an incomplete reading:** refresh `last_seen_ms` (defeats the 10 s expiry);
-**reset the debounce run** so frames either side of the gap cannot combine into five
-"consecutive" complete observations; leave `stable`, `has_stable`, and `last_sent_`
-untouched; retain the complete `last_valid_value`; set `needs_reannounce`. Do not
-treat as a fresh observation, do not update `last_reported_value`, do not POST.
+**`NoDigits` is treated exactly as `Incomplete`** for hold and liveness purposes. This
+is not cosmetic: if `NoDigits` did not refresh `last_seen_ms`, the 10 s expiry would
+erase the zone and emit a shrunk snapshot **long before** the 30 s hold timeout ever
+ran — the short timer would silently pre-empt the long one and the bounded hold would
+never be reached. A frame that yields no digits still proves the camera is alive.
+
+**On an incomplete (or no-digit) reading:** refresh `last_seen_ms` (defeats the 10 s
+expiry); set `count = 0` so frames either side of the gap cannot combine into five
+"consecutive" complete observations (`candidate` may be left as-is — it cannot
+contribute without `count`); leave `stable`, `has_stable`, and `last_sent_` untouched;
+retain the complete `last_valid_value`; set `needs_reannounce`. Do **not** refresh
+`last_complete_ms`, do not treat as a fresh observation, do not update
+`last_reported_value`, do not POST.
 
 **On recovery before the timeout:** five fresh consecutive complete frames, then emit
-**one** value even if equal to the pre-hold value — via `needs_reannounce`, **not** by
-deleting `last_sent_` (which would emit a spurious shrunk snapshot). Then resume
-normal change-only reporting.
+**one** value even if equal to the pre-hold value, then resume change-only reporting.
+
+The existing `changed` computation cannot express this on its own. Today `changed` is
+only evaluated inside the `!has_stable || stable != candidate` branch, which is **false**
+on an equal-value recovery — so the forced report would be silently dropped. The
+required contract is explicit:
+
+> When `count >= stable_frames_` **and** `needs_reannounce` is set, `changed` is set
+> even if `stable == candidate` and `last_sent_[zone]` already equals it.
+> `needs_reannounce` is cleared **exactly when the snapshot containing that zone is
+> committed** (alongside `last_sent_ = snapshot`), never when the flag is merely read —
+> otherwise a suppressed or superseded snapshot would consume the re-announce and lose
+> it.
+
+Clearing `last_sent_[zone]` is **not** an acceptable alternative route to forcing the
+report: it would emit a transient shrunk snapshot that drops the zone from the payload
+mid-hold, which is precisely what the hold exists to prevent.
 
 **On exceeding the hold timeout:** the zone **escalates to `Inhibited`** (setting
 `zone_inhibit[z]` per §3.1.1) and is evicted. The timeout is a single configurable
@@ -313,6 +389,13 @@ shifts every digit one slot left, reads as "missing units", and freezes the zone
 forever. Cheap pitch sources were ruled out — box width isn't character pitch, and
 ROI-width/N re-imports the slack. (b2) requires an on-device calibration campaign
 against the real meters, which cannot be validated from the Windows dev host.
+
+**(b2) REPLACES §5.2, it does not refine it.** The `ZoneAssembly` sum type (§5.1) and
+the bounded-hold contract (§5.3) are designed to survive unchanged — (b2) swaps only
+the classification *inside* assembly, from the height-ratio gap heuristic to calibrated
+slot assignment. Implementers should therefore keep §5.2's logic behind the
+`ZoneAssembly` boundary and avoid leaking pitch/gap concepts into the aggregator or the
+hold state machine, so (b2) is a contained substitution rather than a rewrite.
 
 **(b2) must also verify a physical assumption this design does not establish:** that
 short values are right-justified into fixed positions — i.e. that the `3` in a lone
@@ -371,6 +454,13 @@ runtime enters the same interlock **immediately**, not after the 10 s expiry.
 - **Camera failure inhibits every zone owned by that camera**
 - Two inhibit scopes (§3.1.1) are independent: a camera-level release does **not**
   un-inhibit a zone that timed out its hold
+- **Quarantined recovery**: a zone inhibited by hold timeout still updates debounce and
+  **does recover** on five complete readings — the permanent-inhibit trap does not occur
+- A camera-cause-inhibited zone's observations are dropped entirely (contrast above)
+- `NoDigits` refreshes `last_seen_ms`, so the 10 s expiry never pre-empts the 30 s hold
+- `needs_reannounce` survives a suppressed/superseded snapshot and is consumed only on
+  commit
+- A suppressed empty snapshot does **not** advance the sequence number
 
 **On-device (Jetson)** — camera unplugged mid-run: its zones inhibit immediately,
 healthy zones keep reporting; `status.json` and the UI show cause and episode;
