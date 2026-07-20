@@ -32,6 +32,7 @@ add_library(denso_core STATIC
     reading/repo.cpp
     brazing/config.cpp
     models/hashing.cpp
+    models/manifest.cpp
     ui/convert.cpp
 )
 target_include_directories(denso_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

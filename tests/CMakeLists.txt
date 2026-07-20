@@ -64,6 +64,7 @@ add_executable(denso_tests
     test_log_throttle.cpp
     test_cli_args.cpp
     test_hashing.cpp
+    test_manifest.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),
