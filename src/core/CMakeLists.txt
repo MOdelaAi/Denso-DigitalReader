@@ -29,6 +29,7 @@ add_library(denso_core STATIC
     camera/source_change.cpp
     detection/class_names.cpp
     detection/repo.cpp
+    detection/migrate.cpp
     reading/repo.cpp
     brazing/config.cpp
     models/hashing.cpp
