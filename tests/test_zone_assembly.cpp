@@ -126,6 +126,12 @@ TEST_CASE("assemble: a separation just under the gap threshold stays Complete",
     // height 40 -> max_gap = kGapFactor(1.60) * kPitchPerHeight(0.70) * 40 = 44.8.
     // A centre separation of 44 is unambiguously below 44.8 in float, so the
     // strict '>' comparison must NOT flag a gap.
+    //
+    // NOTE: with integer box coordinates the threshold (44.8) is not itself a
+    // representable separation, so these two tests (44 vs 46) cannot land exactly
+    // on it and therefore cannot distinguish a strict '>' comparison from an
+    // inclusive '>='. That distinction is deliberately left untested rather than
+    // faked with a fragile float-equality test.
     const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
                                         dg("2", 44, 0, 20, 40)});
     REQUIRE(r.kind == ReadingKind::Complete);
@@ -137,6 +143,10 @@ TEST_CASE("assemble: a separation just over the gap threshold is Incomplete",
     // height 40 -> max_gap = kGapFactor(1.60) * kPitchPerHeight(0.70) * 40 = 44.8.
     // A centre separation of 46 is unambiguously above 44.8 in float, so the
     // strict '>' comparison must flag a gap.
+    //
+    // NOTE: see the sibling test above -- the strict-vs-inclusive boundary at
+    // exactly 44.8 is unreachable with integer geometry and is deliberately
+    // untested here for the same reason.
     const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
                                         dg("2", 46, 0, 20, 40)});
     REQUIRE(r.kind == ReadingKind::Incomplete);

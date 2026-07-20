@@ -49,6 +49,8 @@ private:
         bool    has_last_valid = false;
         int     last_valid = 0;
         int64_t last_complete_ms = 0;  // ONLY complete readings — hold timeout base
+        bool    has_first_seen = false; // false until first_seen_ms is set (t=0 is a
+                                         // valid timestamp, so it can't be its own sentinel)
         int64_t first_seen_ms = 0;     // cold-start timeout base (spec §5.3.1)
         bool    needs_reannounce = false;
     };
@@ -56,7 +58,13 @@ private:
     // Build the full snapshot of every zone holding a stable value and commit it.
     // Returns nullopt when the result would be EMPTY: build_brazing_payload({})
     // renders literal "{}" and, under an unverified backend, could clear every zone.
-    std::optional<std::map<int, int>> build_snapshot();
+    // `recovered_zone_nos` is the set of zones that completed their OWN recovery
+    // (reached count >= stable_frames_) in the calling observe() invocation — only
+    // those zones' needs_reannounce may be consumed by this commit. Passing an
+    // empty set (as evict_zones() does) means no zone's re-announce is consumed,
+    // since merely carrying a sibling's held value in the snapshot must not count.
+    std::optional<std::map<int, int>> build_snapshot(
+        const std::set<int>& recovered_zone_nos = {});
 
     int stable_frames_;
     int64_t expiry_ms_;

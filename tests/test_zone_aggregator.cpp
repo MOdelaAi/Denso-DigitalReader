@@ -198,6 +198,53 @@ TEST_CASE("hold: a sibling zone on the same camera keeps reporting",
     REQUIRE((*snap)[1] == 11);   // zone 1 still carries its held value
 }
 
+TEST_CASE("hold: a sibling's snapshot commit must not swallow this zone's "
+          "own recovery re-announce",
+          "[zone_aggregator]") {
+    // Reproduces the review defect: zone A goes incomplete (owes a re-announce),
+    // then WHILE A is still mid-recovery (has not yet reached stable_frames_ again)
+    // zone B completes its OWN debounce run and commits a full snapshot that
+    // carries A's held value. That commit must NOT clear A's needs_reannounce
+    // just because A appears in the snapshot at its held value -- only a commit
+    // in which A ITSELF completed recovery in the same observe() call may consume
+    // the flag. If it wrongly clears here, A's later recovery to the SAME value
+    // it already held will not force a report (last_sent_ already matches),
+    // violating the "one forced report on recovery" contract.
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    // Frames 1-5: both zones reach their initial stable values (A=42, B=100).
+    for (int i = 0; i < 5; ++i) { t += 100; a.observe({rd(1, 42), rd(2, 100)}, t); }
+
+    // Frame 6: zone A goes incomplete (count resets, needs_reannounce=true since
+    // it has a last-valid value). Zone B starts changing to a new value on this
+    // SAME frame, so B's new debounce run is exactly one frame ahead of A's
+    // recovery run.
+    t += 100;
+    a.observe({rd(1, 0, ReadingKind::Incomplete), rd(2, 200)}, t);
+
+    // Frames 7-10 (4 more): A accumulates 4 of the 5 consecutive complete frames
+    // it needs to recover -- NOT yet stable again. B's new-value run reaches its
+    // 5th consecutive frame on the last of these, so IT commits a full snapshot
+    // that carries A's still-held value (42) while A has not completed recovery.
+    std::optional<std::map<int, int>> sibling_commit;
+    for (int i = 0; i < 4; ++i) {
+        t += 100;
+        if (auto s = a.observe({rd(1, 42), rd(2, 200)}, t)) sibling_commit = s;
+    }
+    REQUIRE(sibling_commit.has_value());
+    CHECK(sibling_commit->at(1) == 42);   // A's held value, carried but NOT recovered
+    CHECK(sibling_commit->at(2) == 200);  // B's own change
+
+    // Frame 11: A's 5th consecutive complete frame -- it now completes recovery
+    // with the SAME value (42) it held before the gap. Per the contract this must
+    // still force a report, because A itself never got to consume its own
+    // re-announce.
+    t += 100;
+    const auto recovery_snap = a.observe({rd(1, 42), rd(2, 200)}, t);
+    REQUIRE(recovery_snap.has_value());
+    CHECK(recovery_snap->at(1) == 42);
+}
+
 TEST_CASE("evict: removes the zone and emits the shrunk snapshot", "[zone_aggregator]") {
     ZoneAggregator a(5, 10000);
     int64_t t = 0;
@@ -243,4 +290,46 @@ TEST_CASE("observe: an all-empty result is suppressed, not emitted",
     feed(a, 1, 42, 5, t);
     t += 5000;   // past expiry with nothing observed -> would expire to {}
     REQUIRE_FALSE(a.observe({}, t).has_value());
+}
+
+TEST_CASE("expiry: a never-stable zone's state is dropped after the expiry "
+          "window, not held forever",
+          "[zone_aggregator]") {
+    // Reproduces the review defect: the expiry sweep only considered entries
+    // with has_stable == true. A zone that never reaches stable_frames_ creates
+    // Debounce state that, before the fix, is never evicted no matter how long
+    // it goes unobserved -- a later hold-timeout sweep could then read a stale
+    // first_seen_ms and mis-inhibit. We can't reach into privates, so we assert
+    // observable behaviour: leftover partial debounce progress (a count short of
+    // stable_frames_) must NOT survive the expiry window. If it does, a single
+    // post-window observation of the same value it was partway through would
+    // wrongly complete the run and emit; it must instead behave as a first-ever
+    // observation and need the full run again.
+    ZoneAggregator a(3, 100);  // stable after 3 consecutive completes; expire after 100ms
+    int64_t t = 0;
+
+    // Zone 1 makes PARTIAL progress toward stability (2 of the 3 needed
+    // consecutive complete observations of the same value) but never gets there.
+    // has_stable stays false the whole time.
+    REQUIRE_FALSE(a.observe({rd(1, 77)}, t += 10).has_value());  // count 1
+    REQUIRE_FALSE(a.observe({rd(1, 77)}, t += 10).has_value());  // count 2
+
+    // It then goes completely silent, well past the expiry window. A
+    // never-stable entry must expire on age exactly like a stable one.
+    t += 200;
+    REQUIRE_FALSE(a.observe({}, t).has_value());
+
+    // Zone 1 reappears with a SINGLE complete observation of the SAME value it
+    // was partway through before. If the stale Debounce entry (count==2) had
+    // survived, this one observation would complete the run to 3 and wrongly
+    // emit. It must instead behave as a first-ever observation (count restarts
+    // at 1) and NOT emit yet.
+    REQUIRE_FALSE(a.observe({rd(1, 77)}, t + 10).has_value());
+}
+
+TEST_CASE("evict: an empty zone set is a no-op", "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    REQUIRE_FALSE(a.evict_zones({}).has_value());
 }
