@@ -68,6 +68,7 @@ add_executable(denso_tests
     test_class_map.cpp
     test_migrate.cpp
     test_migrate_coordinator.cpp
+    test_integrity.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),
