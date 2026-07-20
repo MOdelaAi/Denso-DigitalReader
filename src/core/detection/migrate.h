@@ -30,4 +30,8 @@ struct LoadResult { LoadStatus status = LoadStatus::QueryFailed; OldAttach attac
 // Exactly-one CAS: >1 matching attachment => Ambiguous; 0 => NotAttached; exec fail => QueryFailed.
 LoadResult load_old_attachment(const QSqlDatabase& db, int64_t camera_id,
                                const std::string& old_filename);
+
+// Perform the model swap for req.camera_ids in ONE transaction; on any failure
+// rolls back and returns {false, error}. Writes one model_migration_receipt.
+MigrateResult migrate_model(const QSqlDatabase& db, const MigrateRequest& req);
 }

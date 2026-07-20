@@ -82,3 +82,55 @@ TEST_CASE("load_old_attachment returns Ambiguous on a double attachment", "[migr
                    "SELECT camera_id,model_id FROM camera_model WHERE camera_id=1 LIMIT 1"));
     REQUIRE(load_old_attachment(db.handle(), 1, "old_a.engine").status == LoadStatus::Ambiguous);
 }
+TEST_CASE("migrate_model swaps the model in one transaction and writes a receipt", "[migrate]") {
+    auto db = seed();
+    auto res = migrate_model(db.handle(), ok_req());
+    REQUIRE(res.ok);
+    REQUIRE(res.affected_cameras == std::vector<int64_t>{1});
+
+    auto det = detection_for(db.handle(), 1);
+    REQUIRE(det.models.size() == 1);
+    REQUIRE(det.models[0].filename == "new_b.engine");
+
+    QSqlQuery q(db.handle());
+    REQUIRE(q.exec("SELECT count(*),old_model_id,new_engine_sha256,attachments "
+                   "FROM model_migration_receipt"));
+    REQUIRE(q.next());
+    REQUIRE(q.value(0).toInt() == 1);
+    REQUIRE(q.value(1).toLongLong() > 0);
+    REQUIRE(q.value(2).toString().toStdString() == ok_req().new_engine_sha256);
+    REQUIRE(q.value(3).toString().contains("camera_model_id"));
+}
+TEST_CASE("migrate_model CAS refusal leaves the DB unchanged", "[migrate]") {
+    auto db = seed();
+    auto r = ok_req();
+    r.camera_ids = {1, 2};   // camera 2 has no attachment
+    auto res = migrate_model(db.handle(), r);
+    REQUIRE_FALSE(res.ok);
+    REQUIRE(res.error.find("2") != std::string::npos);
+
+    auto det = detection_for(db.handle(), 1);
+    REQUIRE(det.models.size() == 1);
+    REQUIRE(det.models[0].filename == "old_a.engine");
+
+    QSqlQuery q(db.handle());
+    REQUIRE(q.exec("SELECT count(*) FROM model_migration_receipt"));
+    REQUIRE(q.next());
+    REQUIRE(q.value(0).toInt() == 0);
+}
+TEST_CASE("migrate_model refuses an unmapped selected class and leaves the DB unchanged", "[migrate]") {
+    auto db = seed();
+    auto r = ok_req();
+    r.new_class_names = {"0"};   // old selected class 1 has no name in the new model
+    auto res = migrate_model(db.handle(), r);
+    REQUIRE_FALSE(res.ok);
+
+    auto det = detection_for(db.handle(), 1);
+    REQUIRE(det.models.size() == 1);
+    REQUIRE(det.models[0].filename == "old_a.engine");
+
+    QSqlQuery q(db.handle());
+    REQUIRE(q.exec("SELECT count(*) FROM model_migration_receipt"));
+    REQUIRE(q.next());
+    REQUIRE(q.value(0).toInt() == 0);
+}
