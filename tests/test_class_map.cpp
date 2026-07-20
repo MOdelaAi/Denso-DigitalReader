@@ -49,3 +49,28 @@ TEST_CASE("resolve_class_map omits an old id absent from new", "[class_map]") {
     REQUIRE(r.map.has_value());
     REQUIRE((*r.map) == (std::map<int, int>{{0, 0}}));
 }
+
+// A remap that collides with an existing identity mapping: old "a" is redirected
+// to new "b" while old "b" already resolves to new "b" by name — non-injective.
+TEST_CASE("resolve_class_map rejects a remap colliding with an identity name", "[class_map]") {
+    auto r = denso::models::resolve_class_map({"a", "b"}, {"a", "b"}, {{"a", "b"}});
+    REQUIRE_FALSE(r.map.has_value());
+}
+
+TEST_CASE("resolve_class_map handles empty old_names", "[class_map]") {
+    auto r = denso::models::resolve_class_map({}, {"a"}, {});
+    REQUIRE(r.map.has_value());
+    REQUIRE(r.map->empty());
+}
+
+TEST_CASE("resolve_class_map handles empty new_names (all omitted)", "[class_map]") {
+    auto r = denso::models::resolve_class_map({"a", "b"}, {}, {});
+    REQUIRE(r.map.has_value());
+    REQUIRE(r.map->empty());
+}
+
+TEST_CASE("resolve_class_map accepts a valid two-source two-target remap", "[class_map]") {
+    auto r = denso::models::resolve_class_map({"a", "b"}, {"x", "y"}, {{"a", "x"}, {"b", "y"}});
+    REQUIRE(r.map.has_value());
+    REQUIRE((*r.map) == (std::map<int, int>{{0, 0}, {1, 1}}));
+}

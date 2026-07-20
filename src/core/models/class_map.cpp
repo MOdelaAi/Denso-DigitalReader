@@ -5,6 +5,8 @@ namespace { ClassMapResult fail(const std::string& why) { return {std::nullopt, 
 ClassMapResult resolve_class_map(const std::vector<std::string>& old_names,
                                  const std::vector<std::string>& new_names,
                                  const std::map<std::string, std::string>& explicit_remap) {
+    // Class ids are int and a class-name list is always tiny (models carry tens of
+    // classes), so size()->int can never overflow here.
     std::map<std::string, int> new_index;
     for (int i = 0; i < static_cast<int>(new_names.size()); ++i)
         if (!new_index.emplace(new_names[i], i).second)
