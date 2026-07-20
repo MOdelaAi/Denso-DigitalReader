@@ -44,12 +44,31 @@ TEST_CASE("validate_request rejects old==new filename", "[migrate]") {
     auto r = ok_req(); r.new_filename=r.old_filename;
     REQUIRE(validate_request(r).has_value());
 }
+TEST_CASE("validate_request rejects a negative camera id", "[migrate]") {
+    auto r = ok_req(); r.camera_ids={-1};
+    REQUIRE(validate_request(r).has_value());
+}
+TEST_CASE("validate_request rejects each empty required string field", "[migrate]") {
+    { auto r = ok_req(); r.old_filename.clear();      REQUIRE(validate_request(r).has_value()); }
+    { auto r = ok_req(); r.new_filename.clear();      REQUIRE(validate_request(r).has_value()); }
+    { auto r = ok_req(); r.new_name.clear();          REQUIRE(validate_request(r).has_value()); }
+    { auto r = ok_req(); r.new_class_names.clear();   REQUIRE(validate_request(r).has_value()); }
+    { auto r = ok_req(); r.new_engine_sha256.clear(); REQUIRE(validate_request(r).has_value()); }
+}
 TEST_CASE("load_old_attachment returns Ok for a normal attachment", "[migrate]") {
     auto db = seed();
     auto res = load_old_attachment(db.handle(), 1, "old_a.engine");
     REQUIRE(res.status == LoadStatus::Ok);
     REQUIRE(res.attach.old_class_names == std::vector<std::string>{"0","1"});
+    REQUIRE(res.attach.camera_model_id > 0);
+    REQUIRE(res.attach.old_model_id > 0);
+    // The kept classes must load exactly the seeded (class_id, conf) pairs — this is
+    // what a rollback repoints, so assert the content, not just the count.
     REQUIRE(res.attach.classes.size() == 2);
+    REQUIRE(res.attach.classes[0].class_id == 0);
+    REQUIRE(res.attach.classes[0].conf == 0.5f);
+    REQUIRE(res.attach.classes[1].class_id == 1);
+    REQUIRE(res.attach.classes[1].conf == 0.5f);
 }
 TEST_CASE("load_old_attachment returns NotAttached for a wrong filename", "[migrate]") {
     auto db = seed();
