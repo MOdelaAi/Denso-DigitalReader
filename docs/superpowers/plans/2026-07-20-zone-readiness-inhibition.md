@@ -22,7 +22,7 @@
 - Build: `cmake --build build` · Full suite: `ctest --test-dir build --output-on-failure`
 - **Tag-scoped tests MUST use the Catch2 binary directly:** `./build/tests/denso_tests "[tag]"`. `ctest -R <tag>` matches test *names*, not tags, and silently reports "No tests were found!!!" — which reads as a passing run.
 - Every new test file must be added to the `add_executable(denso_tests ...)` list in `tests/CMakeLists.txt`.
-- Baseline before starting: **414 tests passing on Jetson / 413 + 1 skip on Windows.**
+- Baseline before starting: **Windows `ctest -N` total = 415** (414 Catch2 + 1 `packaging_policy`); a run shows 414 passing + 1 skip, and ctest reports the Catch2 SKIP as `Failed` (the `run_migrate ... symlinked outside models_dir` case — no symlink privilege on Windows). Jetson total = 415 with the symlink case actually running. Verify deltas against `ctest -N` totals, never against a remembered pass count.
 
 ---
 
