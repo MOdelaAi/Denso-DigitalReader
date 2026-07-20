@@ -63,7 +63,19 @@ MigrateOutcome run_migrate(const MigrateInputs& in) {
     const auto* gen = denso::models::find_by_engine(*pr.manifest, new_engine);
     if (!gen) return fail(5, "no-such-generation",
                           "manifest has no generation for engine " + in.new_engine);
-    // (5) canonicalize + assert engine & sidecar resolve UNDER models_dir (symlink-escape guard)
+    // (5) canonicalize + assert engine & sidecar resolve UNDER models_dir (symlink-escape guard).
+    //
+    // This defends against a STATIC misconfiguration — a manifest whose engine or
+    // sidecar resolves (via symlink or "..") outside models_dir. It does NOT close
+    // the TOCTOU window between this canonical check and the file_sha256() reopen
+    // below: a component could in principle be swapped for an out-of-tree symlink
+    // in that instant. Closing it would need handle-based no-follow hashing
+    // (O_NOFOLLOW / FILE_FLAG_OPEN_REPARSE_POINT), which file_sha256() does not do.
+    // We accept the residual: models_dir is <data_dir>/models on a single-operator
+    // appliance, root/operator-owned and written only by denso-setup and this
+    // coordinator — the storage is trusted against concurrent mutation, and an
+    // actor who could win the race already has write access to drop a malicious
+    // engine directly. (Noted for the spec's next revision.)
     const QString canon_dir = QFileInfo(in.models_dir).canonicalFilePath();
     if (canon_dir.isEmpty()) return fail(6, "path-escape", "models_dir does not exist: " + in.models_dir);
     const QString prefix = canon_dir.endsWith('/') ? canon_dir : canon_dir + '/';
@@ -96,10 +108,12 @@ MigrateOutcome run_migrate(const MigrateInputs& in) {
     req.created_utc = QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toStdString();
     auto res = denso::detection::migrate_model(db->handle(), req);
     if (!res.ok) return fail(8, "migrate-failed", QString::fromStdString(res.error));
-    QJsonObject ok; ok["ok"] = true;
+    // Success carries the same machine-readable schema as failures — a stable
+    // "code" slug ("ok") plus the swapped engine and the cameras repointed.
+    QJsonObject ok; ok["ok"] = true; ok["code"] = "ok"; ok["new_engine"] = in.new_engine;
     QJsonArray cams; for (auto c : res.affected_cameras)
-        cams.append(QString::number(static_cast<qlonglong>(c)));
-    ok["cameras"] = cams;
+        cams.append(static_cast<qlonglong>(c));
+    ok["affected_cameras"] = cams;
     return {0, QString::fromUtf8(QJsonDocument(ok).toJson(QJsonDocument::Compact)), {}};
 }
 }  // namespace denso::cli

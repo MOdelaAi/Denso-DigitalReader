@@ -6,6 +6,7 @@
 #include <QTemporaryDir>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSqlQuery>
@@ -62,7 +63,14 @@ TEST_CASE("run_migrate succeeds end-to-end and swaps the camera's model", "[migr
 
     auto out = cli::run_migrate(in);
     REQUIRE(out.exit_code == 0);
-    REQUIRE(out.json.contains("\"ok\":true"));
+    // Success carries the full machine-readable schema: ok + a stable "code" slug
+    // + the swapped engine + the repointed cameras.
+    auto oj = QJsonDocument::fromJson(out.json.toUtf8()).object();
+    REQUIRE(oj["ok"].toBool() == true);
+    REQUIRE(oj["code"].toString() == "ok");
+    REQUIRE(oj["new_engine"].toString() == "new_b.engine");
+    REQUIRE(oj["affected_cameras"].toArray().size() == 1);
+    REQUIRE(oj["affected_cameras"].toArray().at(0).toInt() == 1);
 
     auto db2 = db::Db::open(db_path); REQUIRE(db2);
     auto cd = detection::detection_for(db2->handle(), 1);
@@ -314,4 +322,101 @@ TEST_CASE("run_migrate refuses an unattached camera and leaves the DB unchanged"
     auto cd = detection::detection_for(db2->handle(), 1);
     REQUIRE(cd.models.size() == 1);
     REQUIRE(cd.models[0].filename == "old_a.engine");
+}
+
+// Small fixture shared by the class-map tests: a valid models_dir (engine+sidecar
+// hashed into the manifest) + a seeded DB. Fills `in`; the caller sets class_map_path.
+static void setup_valid(QDir& dir, QString& db_path, cli::MigrateInputs& in) {
+    QString engine_path = put(dir, "new_b.engine", "ENGINE-BYTES");
+    QString sidecar_path = put(dir, "new_b.names.json", R"(["0","1"])");
+    auto esha = models::file_sha256(engine_path); REQUIRE(esha);
+    auto ssha = models::file_sha256(sidecar_path); REQUIRE(ssha);
+    put(dir, "manifest.json", manifest_json(*esha, *ssha));
+    db_path = dir.filePath("denso.db");
+    seed_db(db_path);
+    in.models_dir = dir.path(); in.db_path = db_path;
+    in.old_engine = "old_a.engine"; in.new_engine = "new_b.engine"; in.cameras = {1};
+}
+
+TEST_CASE("run_migrate applies a valid class-map remap through to migrate_model", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path()); QString db_path; cli::MigrateInputs in;
+    setup_valid(dir, db_path, in);
+    // Swap the two class names by NAME: old "0"->new "1", old "1"->new "0".
+    in.class_map_path = put(dir, "class_map.json", R"({"0":"1","1":"0"})");
+
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 0);
+    // Proof the remap reached migrate_model: the receipt's forward map is the swap.
+    auto db2 = db::Db::open(db_path); REQUIRE(db2);
+    QSqlQuery q(db2->handle());
+    REQUIRE(q.exec("SELECT forward_map FROM model_migration_receipt"));
+    REQUIRE(q.next());
+    REQUIRE(q.value(0).toString() == "{\"0\":1,\"1\":0}");
+}
+
+TEST_CASE("run_migrate rejects a class-map whose root is not an object", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path()); QString db_path; cli::MigrateInputs in;
+    setup_valid(dir, db_path, in);
+    in.class_map_path = put(dir, "class_map.json", "[]");   // array, not object
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 2);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString() == "bad-class-map");
+}
+
+TEST_CASE("run_migrate rejects a class-map with a non-string value", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path()); QString db_path; cli::MigrateInputs in;
+    setup_valid(dir, db_path, in);
+    in.class_map_path = put(dir, "class_map.json", R"({"0":5})");   // number value
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 2);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString() == "bad-class-map");
+}
+
+TEST_CASE("run_migrate rejects an unreadable class-map path", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path()); QString db_path; cli::MigrateInputs in;
+    setup_valid(dir, db_path, in);
+    in.class_map_path = dir.filePath("does_not_exist.json");   // never created
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 2);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString() == "bad-class-map");
+}
+
+TEST_CASE("run_migrate rejects a sidecar-only hash mismatch", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path());
+    QString engine_path = put(dir, "new_b.engine", "ENGINE-BYTES");
+    put(dir, "new_b.names.json", R"(["0","1"])");
+    auto esha = models::file_sha256(engine_path); REQUIRE(esha);
+    // Correct engine hash, WRONG sidecar hash — exercises the sidecar branch.
+    put(dir, "manifest.json", manifest_json(*esha, std::string(64, 'c')));
+    QString db_path = dir.filePath("denso.db"); seed_db(db_path);
+    cli::MigrateInputs in;
+    in.models_dir = dir.path(); in.db_path = db_path;
+    in.old_engine = "old_a.engine"; in.new_engine = "new_b.engine"; in.cameras = {1};
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 7);
+    auto doc = QJsonDocument::fromJson(out.json.toUtf8());
+    REQUIRE(doc.object()["code"].toString() == "hash-mismatch");
+    REQUIRE(doc.object()["error"].toString().contains("sidecar"));
+}
+
+TEST_CASE("run_migrate reports a DB that cannot be opened", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path());
+    QString engine_path = put(dir, "new_b.engine", "ENGINE-BYTES");
+    QString sidecar_path = put(dir, "new_b.names.json", R"(["0","1"])");
+    auto esha = models::file_sha256(engine_path); REQUIRE(esha);
+    auto ssha = models::file_sha256(sidecar_path); REQUIRE(ssha);
+    put(dir, "manifest.json", manifest_json(*esha, *ssha));
+    cli::MigrateInputs in;
+    in.models_dir = dir.path();
+    in.db_path = dir.filePath("no_such_subdir/denso.db");  // parent dir absent -> open fails
+    in.old_engine = "old_a.engine"; in.new_engine = "new_b.engine"; in.cameras = {1};
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 3);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString() == "db-open-failed");
 }
