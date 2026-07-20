@@ -4,6 +4,7 @@
 
 using denso::ui::ZoneAggregator;
 using denso::ui::ZoneReading;
+using denso::ui::ReadingKind;
 
 static std::vector<ZoneReading> obs(int zone, int value) {
     return {ZoneReading{zone, value, 0.9f}};
@@ -90,4 +91,85 @@ TEST_CASE("an expired zone is sent again when it reappears", "[zone_aggregator]"
     REQUIRE(reappeared.has_value());
     REQUIRE(reappeared->contains(1));
     CHECK(reappeared->at(1) == 500);
+}
+
+static ZoneReading rd(int zone, int value, ReadingKind k = ReadingKind::Complete) {
+    ZoneReading r; r.zone_no = zone; r.value = value; r.conf = 0.9f; r.kind = k;
+    return r;
+}
+// Drive `n` identical complete frames; returns the last snapshot emitted.
+static std::optional<std::map<int,int>> feed(ZoneAggregator& a, int zone, int value,
+                                             int n, int64_t& t) {
+    std::optional<std::map<int,int>> last;
+    for (int i = 0; i < n; ++i) { t += 100; if (auto s = a.observe({rd(zone, value)}, t)) last = s; }
+    return last;
+}
+
+TEST_CASE("hold: an incomplete reading does not change the reported value",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    REQUIRE(feed(a, 1, 42, 5, t).has_value());          // 42 becomes stable and is sent
+    t += 100;
+    REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::Incomplete)}, t).has_value());
+}
+
+TEST_CASE("hold: incomplete readings keep the zone alive past the expiry window",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    // 15s of incomplete frames — longer than the 10s expiry. The zone must NOT be
+    // evicted, so no shrunk snapshot is emitted.
+    for (int i = 0; i < 150; ++i) {
+        t += 100;
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::Incomplete)}, t).has_value());
+    }
+}
+
+TEST_CASE("hold: NoDigits also keeps the zone alive", "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    for (int i = 0; i < 150; ++i) {
+        t += 100;
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());
+    }
+}
+
+TEST_CASE("hold: recovery re-announces even when the value is UNCHANGED",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    for (int i = 0; i < 10; ++i) { t += 100; a.observe({rd(1, 0, ReadingKind::Incomplete)}, t); }
+    const auto snap = feed(a, 1, 42, 5, t);   // same value as before the hold
+    REQUIRE(snap.has_value());
+    REQUIRE(snap->at(1) == 42);
+}
+
+TEST_CASE("hold: frames either side of a gap do not combine into one stable run",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 3, t);                                  // 3 of the 5 needed
+    t += 100; a.observe({rd(1, 0, ReadingKind::Incomplete)}, t);
+    REQUIRE_FALSE(feed(a, 1, 42, 3, t).has_value());        // 3 more must NOT reach 5
+    REQUIRE(feed(a, 1, 42, 2, t).has_value());              // 5 consecutive completes
+}
+
+TEST_CASE("hold: a sibling zone on the same camera keeps reporting",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    for (int i = 0; i < 5; ++i) { t += 100; a.observe({rd(1, 11), rd(2, 22)}, t); }
+    // Zone 1 goes incomplete; zone 2 changes and must still be reported.
+    std::optional<std::map<int,int>> snap;
+    for (int i = 0; i < 5; ++i) {
+        t += 100;
+        if (auto s = a.observe({rd(1, 0, ReadingKind::Incomplete), rd(2, 33)}, t)) snap = s;
+    }
+    REQUIRE(snap.has_value());
+    REQUIRE((*snap)[2] == 33);
+    REQUIRE((*snap)[1] == 11);   // zone 1 still carries its held value
 }

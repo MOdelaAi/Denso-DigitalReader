@@ -34,11 +34,17 @@ public:
 
 private:
     struct Debounce {
-        int candidate = 0;         // value currently accumulating
-        int count = 0;             // consecutive observations of `candidate`
-        bool has_stable = false;
-        int stable = 0;            // last value that reached stability
-        int64_t last_seen_ms = 0;  // time this zone was last observed
+        int     candidate = 0;
+        int     count = 0;
+        bool    has_stable = false;
+        int     stable = 0;
+        int64_t last_seen_ms = 0;      // ANY frame, incl. incomplete — liveness
+        // ── Hold state (spec §5.3) ──
+        bool    has_last_valid = false;
+        int     last_valid = 0;
+        int64_t last_complete_ms = 0;  // ONLY complete readings — hold timeout base
+        int64_t first_seen_ms = 0;     // cold-start timeout base (spec §5.3.1)
+        bool    needs_reannounce = false;
     };
 
     int stable_frames_;
