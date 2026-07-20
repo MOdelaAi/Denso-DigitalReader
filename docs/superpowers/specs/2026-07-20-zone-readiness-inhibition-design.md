@@ -307,12 +307,25 @@ false gap freezes a healthy zone, which is worse than the bug being fixed. A gap
 2.0 pitch (one missing digit) clears 1.60 comfortably, so the guard fires on the case
 it targets while tolerating pitch-estimate noise.
 
-> **DOCUMENTED LIMITATION — this does not detect a missing LEADING digit.** `123`
-> losing its hundreds digit reads as `23`, which is geometrically indistinguishable
-> from a genuine `23` when leading zeros and fixed digit counts are not guaranteed. No
-> geometric rule can close this; it needs either a guaranteed fixed digit count or a
-> detector that classifies a blank/unlit position as its own class. Neither is in
-> scope. **The residual is accepted and stated, not hidden behind the guard.**
+> **DOCUMENTED LIMITATION — the guard detects ONLY an obvious internal missing
+> position between two retained detections.** It compares gaps *between digits it
+> actually has*, so any loss that does not widen an interior gap is invisible to it:
+>
+> | Case | Example | Detected? | Why not |
+> |---|---|---|---|
+> | Internal gap | `123` → `1_3` | **Yes** | The retained pair sits ~2 pitches apart |
+> | Missing **leading** digit | `123` → `23` | No | Remaining pair is normally spaced |
+> | Missing **trailing/units** digit | `123` → `12` | No | Remaining pair is normally spaced |
+> | Only one detection remains | `13` → `3` | No | No adjacent pair exists to measure |
+>
+> In every undetected case the result is a well-formed shorter number that is
+> geometrically indistinguishable from a genuine reading of that value, because leading
+> zeros and fixed digit counts are not guaranteed. No gap-based rule can close them —
+> they need the calibrated right-anchor/slot work in **slice (b2)**, which establishes
+> *which positions exist* rather than merely how far apart the observed ones are.
+>
+> **The residual is accepted and stated, not hidden behind the guard.** This slice
+> reduces wrong-value POSTs; it does not eliminate them.
 
 Note also that this guard cannot ship *without* §5.3: an incomplete reading that
 simply emits no `ZoneReading` stops the zone being seen, the 10 s expiry erases it,
@@ -364,6 +377,32 @@ required contract is explicit:
 Clearing `last_sent_[zone]` is **not** an acceptable alternative route to forcing the
 report: it would emit a transient shrunk snapshot that drops the zone from the payload
 mid-hold, which is precisely what the hold exists to prevent.
+
+### 5.3.1 Cold start — a zone that has never read successfully
+
+At boot, or for a newly configured zone, there is **no `last_valid_value` to hold and
+no `last_complete_ms` baseline to measure the timeout against**. `HoldingLastValid` is
+therefore a misnomer for this state: there is nothing yet to hold.
+
+The zone carries `has_last_valid = false` until its first complete reading passes
+debounce. While that is false:
+
+- **Publish nothing.** There is no value to report and none may be invented — in
+  particular the zone must never appear in a snapshot with a placeholder or zero.
+- **The timeout clock starts at the zone's FIRST observation of any kind** (complete,
+  incomplete, or no-digit), not at `last_complete_ms`, which does not yet exist. A zone
+  that is never observed at all is simply absent, not held — absence is the
+  configuration/capture problem reported by §2, not a hold.
+- **First complete reading passing five-frame debounce** → `has_last_valid = true`,
+  publish normally, resume change-only reporting. No re-announce is owed, because
+  nothing was ever announced.
+- **`kHoldTimeoutMs` elapses with no complete reading** → the zone becomes
+  **zone-inhibited** exactly as in the warm path, and is surfaced locally.
+
+The distinction matters operationally: a cold-start timeout usually means a
+misconfigured ROI or an unreadable meter, whereas a warm timeout means a previously
+working zone degraded. §7 surfaces them with different text so an operator is not sent
+looking for a regression that never existed.
 
 **On exceeding the hold timeout:** the zone **escalates to `Inhibited`** (setting
 `zone_inhibit[z]` per §3.1.1) and is evicted. The timeout is a single configurable
@@ -446,6 +485,14 @@ runtime enters the same interlock **immediately**, not after the 10 s expiry.
 - Reordered snapshots: stale sequence dropped
 - Gap guard: the **two-digit `1_3` case** (the case a median-of-gaps rule cannot
   detect, since with one gap the gap *is* the median)
+- Gap guard **negative** cases, asserting the documented limits rather than pretending
+  they pass: `123`→`23`, `123`→`12`, and `13`→`3` are each classified `Complete`
+- **Cold start (§5.3.1)**: repeated `NoDigits`/`Incomplete` from boot publishes
+  **nothing** — no placeholder, no zero
+- Cold start, **first valid value before the timeout** → publishes normally, owes no
+  re-announce
+- Cold start, **timeout with no previous valid value** → zone-inhibited, and no value
+  is ever emitted for that zone
 - Assembly returns `Incomplete` and **constructs no integer**
 - Hold defeats the 10 s expiry; re-announce fires on an **equal** value
 - **Incomplete recovering before the hold timeout** → resumes, one forced report
@@ -470,7 +517,10 @@ reconnect restores reporting with one forced fresh value.
 
 ## 10. Accepted limitations
 
-1. **Missing leading digit is undetectable** (§5.2) — geometric indistinguishability.
+1. **The gap guard detects only an internal missing position** (§5.2). Missing leading
+   (`123`→`23`), missing trailing/units (`123`→`12`), and single-remaining-detection
+   (`13`→`3`) losses are all undetectable and POST as valid shorter numbers. Closing
+   them requires slice (b2)'s calibrated anchor/slots.
 2. **No backend fault visibility** (§1.1) — inherent to the numeric-only contract.
 3. **Per-camera projection, not per-zone precision** (§3.1) — conservative bias.
 4. **Directory scan retained** (§2.3) — compatibility; retirement needs a migration
