@@ -408,3 +408,143 @@ TEST_CASE("cold start: timeout with no previous valid value inhibits and emits n
     }
     REQUIRE(a.take_newly_inhibited().count(1) == 1);
 }
+
+// ── Review fix wave (lifecycle) ──
+
+TEST_CASE("DEFECT1: timeout fires with a baseline at t==0 (cold start)",
+          "[zone_aggregator]") {
+    // A zone first seen at t==0 that never produces a Complete reading. Before
+    // the fix, the sweep guarded on `base != 0`, so first_seen_ms==0 could never
+    // exceed the hold timeout -- the zone would NEVER inhibit no matter how long
+    // it went un-completed.
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());  // first_seen_ms = 0
+    for (int i = 0; i < 400; ++i) {   // 40s, never a complete reading
+        t += 100;
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());
+    }
+    REQUIRE(a.take_newly_inhibited().count(1) == 1);
+}
+
+TEST_CASE("DEFECT1: timeout fires with a baseline at t==0 (warm path)",
+          "[zone_aggregator]") {
+    // A zone whose LATEST Complete reading lands at t==0 (last_complete_ms==0).
+    // Before the fix, `base != 0` guarded this out too.
+    ZoneAggregator a(5, 10000);
+    int64_t t = -500;  // feed() pre-increments by 100, so the 5th complete frame lands at t==0
+    REQUIRE(feed(a, 1, 42, 5, t).has_value());
+    REQUIRE(t == 0);
+    for (int i = 0; i < 400; ++i) {   // 40s of incomplete frames past the t==0 baseline
+        t += 100;
+        a.observe({rd(1, 0, ReadingKind::Incomplete)}, t);
+    }
+    REQUIRE(a.take_newly_inhibited().count(1) == 1);
+}
+
+TEST_CASE("DEFECT2: a zone whose timeout and expiry are both due in the same "
+          "call is expired, not escalated, and re-observation is fresh",
+          "[zone_aggregator]") {
+    // Zone 1 stabilises, then stops being observed AT ALL (unlike the hold
+    // tests, no incomplete frames keep refreshing last_seen_ms). The NEXT call
+    // that mentions zone 1 at all is a single huge jump past BOTH the 10s
+    // expiry window and the 30s hold-timeout window -- so both conditions
+    // become true in the SAME sweep, reproducing the ordering defect (as
+    // opposed to expiry quietly winning across many small, incrementally
+    // ticked calls, which would mask the bug).
+    ZoneAggregator a(5, 10000);  // expiry_ms = 10000, hold_timeout_ms = 30000 (default)
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);   // zone 1 stable at 42, last_complete_ms == last_seen_ms == t
+    feed(a, 2, 99, 5, t);   // zone 2 stable too, keeps the snapshot non-empty
+
+    const int64_t jump = t + 31000;  // 31s past zone 1's last activity: > both windows
+    a.observe({rd(2, 99)}, jump);    // ONE call; zone 1 is not in this reading list
+
+    // Zone 1 must have been expired, not escalated -- no orphaned inhibit event.
+    REQUIRE(a.take_newly_inhibited().count(1) == 0);
+
+    // Re-observing zone 1 now must behave as a genuinely fresh zone: it needs a
+    // full fresh debounce run (stable_frames_ = 5) before it emits again, and it
+    // must NOT be pre-inhibited (an orphaned zone_inhibit_ entry would suppress
+    // its publication even after re-stabilising).
+    int64_t t2 = jump;
+    auto snap = feed(a, 1, 42, 5, t2);
+    REQUIRE(snap.has_value());
+    REQUIRE(snap->at(1) == 42);
+}
+
+TEST_CASE("DEFECT3: evicting an already-inhibited zone drops it from "
+          "newly_inhibited_ too -- no false alarm for a zone that no longer exists",
+          "[zone_aggregator]") {
+    // Escalate zone 1 to inhibited, but do NOT drain take_newly_inhibited() yet
+    // (mirrors a caller that hasn't polled since the escalation). Then evict the
+    // zone before it is ever drained. evict_zones() must remove it from
+    // newly_inhibited_ (and zone_inhibit_) as well as zones_/last_sent_ -- a
+    // zone that no longer exists must not later be reported as newly inhibited.
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 11, 5, t);
+    feed(a, 2, 22, 5, t);
+    for (int i = 0; i < 400; ++i) {   // 40s of incomplete -> zone 1 escalates to inhibited
+        t += 100;
+        a.observe({rd(1, 0, ReadingKind::Incomplete), rd(2, 22)}, t);
+    }
+
+    a.evict_zones({1});   // evicted BEFORE the caller ever drained the escalation
+
+    REQUIRE(a.take_newly_inhibited().count(1) == 0);   // no false alarm
+
+    // Re-observing zone 1 must also behave as fresh: no leftover zone_inhibit_
+    // entry should suppress its publication once it re-stabilises.
+    const auto snap = feed(a, 1, 11, 5, t);
+    REQUIRE(snap.has_value());
+    REQUIRE(snap->at(1) == 11);
+}
+
+TEST_CASE("DEFECT4: a zone that recovers BEFORE the drain is not reported by "
+          "take_newly_inhibited()",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    for (int i = 0; i < 400; ++i) {   // 40s -> escalates to inhibited (NOT drained yet)
+        t += 100;
+        a.observe({rd(1, 0, ReadingKind::Incomplete)}, t);
+    }
+    // Recover BEFORE draining take_newly_inhibited().
+    REQUIRE(feed(a, 1, 42, 5, t).has_value());
+
+    // The escalation has already been undone -- it must not be reported.
+    REQUIRE(a.take_newly_inhibited().count(1) == 0);
+}
+
+TEST_CASE("DEFECT5: duplicate readings for one zone in one call (Complete then "
+          "Incomplete) still owe and later emit a forced recovery report",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);  // zone 1 stable at 42, sent
+
+    // One incomplete frame: breaks the run, arms needs_reannounce (has_last_valid).
+    t += 100;
+    a.observe({rd(1, 0, ReadingKind::Incomplete)}, t);
+
+    // 4 of the 5 consecutive completes needed to recover -- NOT yet stable again.
+    for (int i = 0; i < 4; ++i) { t += 100; a.observe({rd(1, 42)}, t); }
+
+    // The 5th consecutive complete would complete the recovery run (count hits
+    // stable_frames_, entering "recovered this call") -- but a DUPLICATE
+    // Incomplete reading for the SAME zone follows it in the SAME call, which
+    // resets count back to 0 and re-arms needs_reannounce. The zone's FINAL
+    // state this call is Incomplete (still owing), so the bookkeeping must not
+    // treat zone 1 as having completed its own recovery in this call.
+    t += 100;
+    a.observe({rd(1, 42), rd(1, 0, ReadingKind::Incomplete)}, t);
+
+    // Finish the recovery run for real with 5 fresh consecutive completes.
+    // Since the duplicate-reading call above must NOT have consumed
+    // needs_reannounce, this must still force a report of the SAME value (42).
+    const auto snap = feed(a, 1, 42, 5, t);
+    REQUIRE(snap.has_value());
+    REQUIRE(snap->at(1) == 42);
+}

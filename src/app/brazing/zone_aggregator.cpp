@@ -60,6 +60,10 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
             // only, so the zone kept accumulating debounce and can clear itself
             // here. Gating the observation instead would deadlock it forever.
             const bool was_inhibited = zone_inhibit_.erase(z.zone_no) > 0;
+            // The escalation this zone owed, if any, has now been undone by its
+            // own recovery — a caller that hasn't drained take_newly_inhibited()
+            // yet must not later be told about an inhibit that no longer holds.
+            newly_inhibited_.erase(z.zone_no);
             const auto it = last_sent_.find(z.zone_no);
             if (it == last_sent_.end() || it->second != d.stable ||
                 d.needs_reannounce || was_inhibited) {
@@ -68,38 +72,65 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
         }
     }
 
+    // "Recovered this call" must reflect the zone's FINAL state at the end of
+    // the loop above, not a transition merely observed mid-loop: a duplicate
+    // reading for the same zone (e.g. Complete then Incomplete in one call) can
+    // make count cross stable_frames_ and then immediately fall back below it.
+    // Prune any zone whose current count no longer actually meets the bar so
+    // build_snapshot() cannot wrongly consume its needs_reannounce debt.
+    for (auto it = recovered_this_call.begin(); it != recovered_this_call.end();) {
+        const auto zit = zones_.find(*it);
+        if (zit == zones_.end() || zit->second.count < stable_frames_) {
+            it = recovered_this_call.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Expiry sweep runs BEFORE the timeout sweep: a zone that has genuinely aged
+    // out (unseen — by ANY frame, complete or not — past expiry_ms_) must be
+    // expired outright, never escalated to inhibited first. A zone truly stuck
+    // in hold keeps being observed (incomplete frames refresh last_seen_ms), so
+    // it will not expire here — only a zone that stopped arriving entirely does.
+    // Expiry drops the zone from EVERY container: state for a zone that no
+    // longer exists must not survive anywhere (zone_inhibit_/newly_inhibited_
+    // included), or a later re-observation of that zone number would inherit an
+    // orphaned inhibit instead of behaving as a fresh zone.
+    for (auto it = zones_.begin(); it != zones_.end();) {
+        const int zone_no = it->first;
+        const Debounce& d = it->second;
+        if (now_ms - d.last_seen_ms > expiry_ms_) {
+            if (last_sent_.erase(zone_no) > 0) {
+                changed = true;
+            }
+            zone_inhibit_.erase(zone_no);
+            newly_inhibited_.erase(zone_no);
+            it = zones_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     // Hold-timeout sweep. One rule covers warm and cold start: measure against the
     // last COMPLETE reading, or — for a zone that has never read successfully —
-    // against its first observation of any kind (spec §5.3.1).
+    // against its first observation of any kind (spec §5.3.1). Baseline validity
+    // comes from the explicit has_last_valid/has_first_seen flags, never from a
+    // magic-zero timestamp check — t == 0 is a fully usable timestamp (a cold
+    // zone first seen at t == 0, or a warm zone last complete at t == 0, must
+    // still be able to time out). Every entry still in zones_ at this point has
+    // has_first_seen == true (set unconditionally on first observation above),
+    // so `base` is always a valid baseline.
     for (auto& [zone_no, d] : zones_) {
         if (zone_inhibit_.count(zone_no) > 0) {
             continue;   // already inhibited; recovery is handled in the stable branch
         }
         const int64_t base = d.has_last_valid ? d.last_complete_ms : d.first_seen_ms;
-        if (base != 0 && now_ms - base > hold_timeout_ms_) {
+        if (now_ms - base > hold_timeout_ms_) {
             zone_inhibit_.insert(zone_no);
             newly_inhibited_.insert(zone_no);
             if (last_sent_.erase(zone_no) > 0) {
                 changed = true;
             }
-        }
-    }
-
-    // Expire zones unseen past the window: drop their state so a one-time stale
-    // reading (or a zone that never even reached stability) can't linger forever
-    // and the maps stay bounded. This applies regardless of has_stable — a
-    // never-stable entry's first_seen_ms/count must not survive to be misread by
-    // a later timeout sweep. Only removing a zone that was actually part of the
-    // last-sent payload counts as a payload change worth emitting promptly.
-    for (auto it = zones_.begin(); it != zones_.end();) {
-        const Debounce& d = it->second;
-        if (now_ms - d.last_seen_ms > expiry_ms_) {
-            if (last_sent_.erase(it->first) > 0) {
-                changed = true;
-            }
-            it = zones_.erase(it);
-        } else {
-            ++it;
         }
     }
 
@@ -115,6 +146,13 @@ std::optional<std::map<int, int>> ZoneAggregator::evict_zones(
     bool changed = false;
     for (const int zone_no : zone_nos) {
         zones_.erase(zone_no);
+        // Evicting a zone must drop it from every container, exactly like
+        // expiry does — otherwise a leftover zone_inhibit_/newly_inhibited_
+        // entry orphans state for a zone that no longer exists (a stale
+        // newly_inhibited_ entry would surface as a false alarm on the next
+        // drain even though the zone was evicted before ever being reported).
+        zone_inhibit_.erase(zone_no);
+        newly_inhibited_.erase(zone_no);
         if (last_sent_.erase(zone_no) > 0) {
             changed = true;
         }
