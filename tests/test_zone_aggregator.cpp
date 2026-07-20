@@ -548,3 +548,64 @@ TEST_CASE("DEFECT5: duplicate readings for one zone in one call (Complete then "
     REQUIRE(snap.has_value());
     REQUIRE(snap->at(1) == 42);
 }
+
+// ── Review fix wave (expiry vs escalation) ──
+
+TEST_CASE("REGRESSION: an escalated zone that later expires still reports its "
+          "escalation -- newly_inhibited_ is an EVENT set, not state",
+          "[zone_aggregator]") {
+    // Zone 1 times out and is escalated to inhibited (newly_inhibited_ gains
+    // an entry), but the caller has NOT drained take_newly_inhibited() yet.
+    // The camera then goes completely silent -- no further mention of zone 1
+    // at all -- long enough for it to also EXPIRE. Before the fix, expiry
+    // erased zone 1 from newly_inhibited_ too, silently swallowing an
+    // escalation that had already genuinely happened. The alarm must still be
+    // delivered: an event, once raised, survives the state it was raised
+    // about later expiring.
+    ZoneAggregator a(5, 10000);  // expiry_ms = 10000, hold_timeout_ms = 30000 (default)
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    for (int i = 0; i < 400; ++i) {   // 40s of incomplete -> zone 1 times out
+        t += 100;
+        a.observe({rd(1, 0, ReadingKind::Incomplete)}, t);
+    }
+    // Not drained yet -- mirrors a caller that hasn't polled since escalation.
+
+    // Now the camera goes completely silent: zone 1 is not mentioned again,
+    // and enough time passes for it to expire (> expiry_ms with nothing
+    // refreshing last_seen_ms).
+    t += 11000;
+    a.observe({}, t);
+
+    REQUIRE(a.take_newly_inhibited().count(1) == 1);  // escalation still delivered
+}
+
+TEST_CASE("REGRESSION: a zone that merely holds (never times out) then goes "
+          "silent expires and reports NO escalation",
+          "[zone_aggregator]") {
+    // Pins the deliberate behaviour: a zone that never reached the 30s hold
+    // timeout was never added to newly_inhibited_, so simply expiring it must
+    // not manufacture a spurious alarm. A future contributor "fixing" expiry
+    // to always raise something on drop would be wrong -- this test guards
+    // against that.
+    ZoneAggregator a(5, 10000);  // expiry_ms = 10000, hold_timeout_ms = 30000 (default)
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    for (int i = 0; i < 50; ++i) {   // 5s of incomplete -- well under the 30s timeout
+        t += 100;
+        a.observe({rd(1, 0, ReadingKind::Incomplete)}, t);
+    }
+    REQUIRE(a.take_newly_inhibited().empty());  // never escalated
+
+    // Now goes completely silent past the expiry window.
+    t += 11000;
+    a.observe({}, t);
+
+    REQUIRE(a.take_newly_inhibited().count(1) == 0);  // still nothing to report
+
+    // And the expired zone must behave as genuinely fresh on re-observation --
+    // not pre-inhibited, needing a full fresh debounce run.
+    auto snap = feed(a, 1, 42, 5, t);
+    REQUIRE(snap.has_value());
+    REQUIRE(snap->at(1) == 42);
+}

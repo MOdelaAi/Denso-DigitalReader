@@ -87,15 +87,26 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
         }
     }
 
-    // Expiry sweep runs BEFORE the timeout sweep: a zone that has genuinely aged
-    // out (unseen — by ANY frame, complete or not — past expiry_ms_) must be
-    // expired outright, never escalated to inhibited first. A zone truly stuck
-    // in hold keeps being observed (incomplete frames refresh last_seen_ms), so
-    // it will not expire here — only a zone that stopped arriving entirely does.
-    // Expiry drops the zone from EVERY container: state for a zone that no
-    // longer exists must not survive anywhere (zone_inhibit_/newly_inhibited_
-    // included), or a later re-observation of that zone number would inherit an
-    // orphaned inhibit instead of behaving as a fresh zone.
+    // Expiry sweep runs BEFORE the timeout sweep: a zone that has stopped
+    // arriving at all (unseen — by ANY frame, complete or not — past
+    // expiry_ms_) is ABSENT, not held, and expiring it here stops it being
+    // escalated against a stale baseline (which would alarm on data nobody
+    // can act on and strand inhibit state a re-observed zone could later
+    // inherit). This does not lose coverage: group_into_zones emits a reading
+    // for every zoned area on every inference round, so a zone can only go
+    // silent if its own camera's inference loop has stopped — and *that* is
+    // absence, handled by a camera-level mechanism elsewhere, not a per-zone
+    // one here. A zone genuinely stuck in hold keeps being observed
+    // (incomplete frames refresh last_seen_ms), so it will not expire here.
+    //
+    // Expiry clears STATE (zones_/last_sent_/zone_inhibit_) but deliberately
+    // leaves newly_inhibited_ alone: that set is an EVENT log drained by
+    // take_newly_inhibited(), not a state container. If this zone already
+    // timed out and was escalated earlier, the alarm was already raised and
+    // must still be delivered even though the zone has since gone silent —
+    // swallowing it here would silently drop a real escalation. A zone that
+    // was only ever holding (never reached the 30s timeout) was never added
+    // to newly_inhibited_ in the first place, so it still reports nothing.
     for (auto it = zones_.begin(); it != zones_.end();) {
         const int zone_no = it->first;
         const Debounce& d = it->second;
@@ -104,7 +115,6 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
                 changed = true;
             }
             zone_inhibit_.erase(zone_no);
-            newly_inhibited_.erase(zone_no);
             it = zones_.erase(it);
         } else {
             ++it;
