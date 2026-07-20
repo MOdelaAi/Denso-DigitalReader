@@ -86,7 +86,8 @@ std::optional<std::string> validate_manifest(const Manifest& m) {
         if (g.class_names.empty()) return "class_names must be non-empty for generation " + g.name;
         std::set<std::string> seen_classes;
         for (const auto& c : g.class_names) {
-            if (c.empty()) return "class_names must not contain blanks for generation " + g.name;
+            if (c.find_first_not_of(" \t\r\n\f\v") == std::string::npos)
+                return "class_names must not contain blanks for generation " + g.name;
             if (!seen_classes.insert(c).second)
                 return "duplicate class name '" + c + "' for generation " + g.name;
         }

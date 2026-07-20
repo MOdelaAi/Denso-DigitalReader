@@ -79,3 +79,52 @@ TEST_CASE("find_by_engine returns nullptr on a miss", "[manifest]") {
     REQUIRE(r.manifest.has_value());
     REQUIRE(denso::models::find_by_engine(*r.manifest, "nope.engine") == nullptr);
 }
+TEST_CASE("validate_manifest rejects a whitespace-only class name", "[manifest]") {
+    auto r = denso::models::parse_manifest(one_gen_json());
+    REQUIRE(r.manifest.has_value());
+    r.manifest->generations[0].class_names = {"0", " "};
+    REQUIRE(denso::models::validate_manifest(*r.manifest).has_value());
+    r.manifest->generations[0].class_names = {"0", "\t"};
+    REQUIRE(denso::models::validate_manifest(*r.manifest).has_value());
+}
+TEST_CASE("validate_manifest rejects state != installed", "[manifest]") {
+    auto r = denso::models::parse_manifest(one_gen_json());
+    REQUIRE(r.manifest.has_value());
+    r.manifest->generations[0].state = "pending";
+    REQUIRE(denso::models::validate_manifest(*r.manifest).has_value());
+}
+TEST_CASE("validate_manifest rejects a duplicate generation name", "[manifest]") {
+    auto r = denso::models::parse_manifest(one_gen_json());
+    REQUIRE(r.manifest.has_value());
+    auto g2 = r.manifest->generations[0];
+    g2.engine = "digit-v3.2.engine";        // distinct engine so only the name collides
+    g2.sidecar = "digit-v3.2.names.json";
+    r.manifest->generations.push_back(g2);
+    REQUIRE(denso::models::validate_manifest(*r.manifest).has_value());
+}
+TEST_CASE("validate_manifest rejects empty required metadata", "[manifest]") {
+    auto r = denso::models::parse_manifest(one_gen_json());
+    REQUIRE(r.manifest.has_value());
+    r.manifest->generations[0].installed_utc = "";
+    REQUIRE(denso::models::validate_manifest(*r.manifest).has_value());
+}
+TEST_CASE("validate_manifest rejects an unsafe sidecar basename", "[manifest]") {
+    auto r = denso::models::parse_manifest(one_gen_json());
+    REQUIRE(r.manifest.has_value());
+    r.manifest->generations[0].sidecar = "../digit-v3.1.names.json";
+    REQUIRE(denso::models::validate_manifest(*r.manifest).has_value());
+}
+TEST_CASE("validate_manifest rejects an uppercase-hex sha256", "[manifest]") {
+    auto r = denso::models::parse_manifest(one_gen_json());
+    REQUIRE(r.manifest.has_value());
+    r.manifest->generations[0].engine_sha256 =
+        "ABCDEF0000000000000000000000000000000000000000000000000000000000";
+    REQUIRE(denso::models::validate_manifest(*r.manifest).has_value());
+}
+TEST_CASE("validate_manifest accepts single-extension engine/sidecar stems", "[manifest]") {
+    auto r = denso::models::parse_manifest(one_gen_json());
+    REQUIRE(r.manifest.has_value());
+    r.manifest->generations[0].engine = "foo.engine";
+    r.manifest->generations[0].sidecar = "foo.names.json";
+    REQUIRE_FALSE(denso::models::validate_manifest(*r.manifest).has_value());
+}
