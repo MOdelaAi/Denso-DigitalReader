@@ -8,16 +8,15 @@
 
 namespace denso::ui {
 
-std::optional<int> assemble_zone_value(const std::vector<NamedDetection>& digits_in_zone) {
+ZoneAssembly assemble_zone_value(const std::vector<NamedDetection>& digits_in_zone) {
     if (digits_in_zone.empty()) {
-        return std::nullopt;
+        return {ReadingKind::NoDigits, 0};
     }
     std::vector<const NamedDetection*> ordered;
     ordered.reserve(digits_in_zone.size());
     for (const NamedDetection& d : digits_in_zone) {
         ordered.push_back(&d);
     }
-    // Left-to-right by box x-center.
     std::sort(ordered.begin(), ordered.end(),
               [](const NamedDetection* a, const NamedDetection* b) {
                   return (a->box.x + a->box.width * 0.5) < (b->box.x + b->box.width * 0.5);
@@ -25,20 +24,40 @@ std::optional<int> assemble_zone_value(const std::vector<NamedDetection>& digits
 
     std::string digits;
     for (const NamedDetection* d : ordered) {
-        digits += d->name;  // class name is the digit label ("0".."9")
+        digits += d->name;
     }
-    // Every char must be a decimal digit, else it's not a number we can send.
-    if (!std::all_of(digits.begin(), digits.end(),
+    // Anything unparseable is Incomplete, never a value. A >3-digit group means a
+    // spurious extra detection; a non-digit label means the model emitted a class
+    // we cannot place. Both must hold the previous value rather than POST.
+    if (digits.size() > 3 ||
+        !std::all_of(digits.begin(), digits.end(),
                      [](unsigned char c) { return c >= '0' && c <= '9'; })) {
-        return std::nullopt;
+        return {ReadingKind::Incomplete, 0};
     }
-    // Zone values are restricted to 0..999. A spurious extra detection (>3
-    // digits) is rejected rather than POSTed as a bogus 4-digit reading; ≤3
-    // digits can never overflow int (max 999), so no try/catch is needed.
-    if (digits.empty() || digits.size() > 3) {
-        return std::nullopt;
+
+    // Gap guard: estimate pitch from median box height, then look for an adjacent
+    // pair sitting materially more than one pitch apart. One missing interior
+    // digit yields ~2.0 pitch, comfortably past the 1.60 threshold; the margin is
+    // deliberate, because a FALSE gap freezes a healthy zone, which is worse than
+    // the missing-digit bug this mitigates.
+    if (ordered.size() >= 2) {
+        std::vector<float> heights;
+        heights.reserve(ordered.size());
+        for (const NamedDetection* d : ordered) {
+            heights.push_back(static_cast<float>(d->box.height));
+        }
+        std::sort(heights.begin(), heights.end());
+        const float median_h = heights[heights.size() / 2];
+        const float max_gap = kGapFactor * kPitchPerHeight * median_h;
+        for (std::size_t i = 1; i < ordered.size(); ++i) {
+            const float prev_c = ordered[i - 1]->box.x + ordered[i - 1]->box.width * 0.5f;
+            const float cur_c  = ordered[i]->box.x + ordered[i]->box.width * 0.5f;
+            if (cur_c - prev_c > max_gap) {
+                return {ReadingKind::Incomplete, 0};
+            }
+        }
     }
-    return std::stoi(digits);  // leading zeros collapse; "050" -> 50
+    return {ReadingKind::Complete, std::stoi(digits)};
 }
 
 std::vector<ZoneReading> group_into_zones(const std::vector<NamedDetection>& kept,
@@ -63,9 +82,15 @@ std::vector<ZoneReading> group_into_zones(const std::vector<NamedDetection>& kep
                 min_conf = std::min(min_conf, d.conf);
             }
         }
-        if (const auto v = assemble_zone_value(in_zone)) {
-            out.push_back(ZoneReading{*area.zone, *v, min_conf});
-        }
+        const ZoneAssembly a = assemble_zone_value(in_zone);
+        // Emit for EVERY zoned area, including NoDigits: the aggregator needs the
+        // liveness signal, or the 10s expiry erases a held zone (spec §5.3).
+        ZoneReading r;
+        r.zone_no = *area.zone;
+        r.kind    = a.kind;
+        r.value   = a.value;
+        r.conf    = in_zone.empty() ? 0.0f : min_conf;
+        out.push_back(r);
     }
     return out;
 }

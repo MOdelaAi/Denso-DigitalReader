@@ -7,6 +7,7 @@
 using denso::ui::assemble_zone_value;
 using denso::ui::group_into_zones;
 using denso::ui::NamedDetection;
+using denso::ui::ReadingKind;
 using denso::camera::CameraArea;
 using denso::camera::Point;
 
@@ -17,19 +18,21 @@ static NamedDetection digit(int x, const char* name) {
 TEST_CASE("assemble_zone_value reads digits left-to-right", "[zone_assembly]") {
     // Supplied out of order; x-center ordering must produce 500.
     std::vector<NamedDetection> d = {digit(40, "0"), digit(10, "5"), digit(25, "0")};
-    auto v = assemble_zone_value(d);
-    REQUIRE(v.has_value());
-    CHECK(*v == 500);
+    auto r = assemble_zone_value(d);
+    REQUIRE(r.kind == ReadingKind::Complete);
+    CHECK(r.value == 500);
 }
 
 TEST_CASE("assemble_zone_value collapses leading zeros", "[zone_assembly]") {
     std::vector<NamedDetection> d = {digit(10, "0"), digit(25, "5"), digit(40, "0")};
-    CHECK(assemble_zone_value(d) == 50);
+    auto r = assemble_zone_value(d);
+    REQUIRE(r.kind == ReadingKind::Complete);
+    CHECK(r.value == 50);
 }
 
-TEST_CASE("assemble_zone_value on empty or non-digit is nullopt", "[zone_assembly]") {
-    CHECK_FALSE(assemble_zone_value({}).has_value());
-    CHECK_FALSE(assemble_zone_value({digit(10, "x")}).has_value());
+TEST_CASE("assemble_zone_value on empty or non-digit is not Complete", "[zone_assembly]") {
+    CHECK(assemble_zone_value({}).kind == ReadingKind::NoDigits);
+    CHECK(assemble_zone_value({digit(10, "x")}).kind == ReadingKind::Incomplete);
 }
 
 TEST_CASE("assemble_zone_value rejects four digits", "[zone_assembly]") {
@@ -40,7 +43,7 @@ TEST_CASE("assemble_zone_value rejects four digits", "[zone_assembly]") {
         digit(55, "0"),
     };
 
-    CHECK_FALSE(assemble_zone_value(d).has_value());
+    CHECK(assemble_zone_value(d).kind == ReadingKind::Incomplete);
 }
 
 TEST_CASE("assemble_zone_value accepts the maximum supported value", "[zone_assembly]") {
@@ -50,7 +53,9 @@ TEST_CASE("assemble_zone_value accepts the maximum supported value", "[zone_asse
         digit(40, "9"),
     };
 
-    CHECK(assemble_zone_value(d) == 999);
+    auto r = assemble_zone_value(d);
+    REQUIRE(r.kind == ReadingKind::Complete);
+    CHECK(r.value == 999);
 }
 
 TEST_CASE("assemble_zone_value rejects many digits without throwing", "[zone_assembly]") {
@@ -60,7 +65,7 @@ TEST_CASE("assemble_zone_value rejects many digits without throwing", "[zone_ass
     }
 
     CHECK_NOTHROW(assemble_zone_value(d));
-    CHECK_FALSE(assemble_zone_value(d).has_value());
+    CHECK(assemble_zone_value(d).kind == ReadingKind::Incomplete);
 }
 
 TEST_CASE("group_into_zones assigns digits to their area and skips zoneless", "[zone_assembly]") {
@@ -80,7 +85,94 @@ TEST_CASE("group_into_zones assigns digits to their area and skips zoneless", "[
 
     REQUIRE(zones.size() == 2);
     CHECK(zones[0].zone_no == 1);
+    CHECK(zones[0].kind == ReadingKind::Complete);
     CHECK(zones[0].value == 12);
     CHECK(zones[1].zone_no == 2);
+    CHECK(zones[1].kind == ReadingKind::Complete);
     CHECK(zones[1].value == 3);
+}
+
+// Build a digit detection: name, box at (x,y) sized w*h.
+static NamedDetection dg(const char* name, int x, int y, int w, int h) {
+    NamedDetection d;
+    d.name = name;
+    d.box = cv::Rect(x, y, w, h);
+    d.conf = 0.9f;
+    return d;
+}
+
+TEST_CASE("assemble: three evenly spaced digits are Complete", "[zone_assembly]") {
+    // height 40 -> pitch 28; centres 28 apart = exactly 1.0 pitch.
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
+                                        dg("2", 28, 0, 20, 40),
+                                        dg("3", 56, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Complete);
+    REQUIRE(r.value == 123);
+}
+
+TEST_CASE("assemble: an internal missing digit is Incomplete", "[zone_assembly]") {
+    // "1_3": centres 56 apart = 2.0 pitch > 1.6 threshold.
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
+                                        dg("3", 56, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Incomplete);
+}
+
+TEST_CASE("assemble: no detections is NoDigits", "[zone_assembly]") {
+    REQUIRE(assemble_zone_value({}).kind == ReadingKind::NoDigits);
+}
+
+TEST_CASE("assemble: an incomplete reading carries NO usable value", "[zone_assembly]") {
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
+                                        dg("3", 56, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Incomplete);
+    REQUIRE(r.value == 0);  // never 13 — spec §5.1
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KNOWN LIMITATIONS — spec §5.2 / §10. These are NOT correctness expectations.
+// They assert the guard does NOT fire, pinning residuals we have explicitly
+// accepted for this slice so a future contributor cannot assume they are solved.
+// Slice (b2)'s calibrated anchor/slot work is what closes them; when it lands,
+// these cases flip to Incomplete and these tests SHOULD be rewritten.
+// Tagged [known_limit] so they can be listed on demand.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("KNOWN LIMITATION: a missing LEADING digit is undetectable",
+          "[zone_assembly][known_limit]") {
+    const auto r = assemble_zone_value({dg("2", 28, 0, 20, 40),
+                                        dg("3", 56, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Complete);
+    REQUIRE(r.value == 23);
+}
+
+TEST_CASE("KNOWN LIMITATION: a missing TRAILING digit is undetectable",
+          "[zone_assembly][known_limit]") {
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40),
+                                        dg("2", 28, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Complete);
+    REQUIRE(r.value == 12);
+}
+
+TEST_CASE("KNOWN LIMITATION: a single remaining detection is undetectable",
+          "[zone_assembly][known_limit]") {
+    const auto r = assemble_zone_value({dg("3", 56, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Complete);
+    REQUIRE(r.value == 3);
+}
+
+TEST_CASE("assemble: more than three digits is Incomplete, not a bogus value",
+          "[zone_assembly]") {
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40), dg("2", 28, 0, 20, 40),
+                                        dg("3", 56, 0, 20, 40), dg("4", 84, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Incomplete);
+}
+
+TEST_CASE("group_into_zones emits NoDigits for a zoned area with no detections",
+          "[zone_assembly]") {
+    CameraArea a;
+    a.zone = 7;
+    a.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    const auto out = group_into_zones({}, {a}, 640.0f, 480.0f);
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].zone_no == 7);
+    REQUIRE(out[0].kind == ReadingKind::NoDigits);
 }
