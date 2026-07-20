@@ -126,7 +126,75 @@ TEST_CASE("parse_manifest rejects a generation missing engine", "[manifest]") {
 
 - [ ] **Step 2: Register + verify fail** — add to `tests/CMakeLists.txt`; build → FAIL.
 
-- [ ] **Step 3: Implement** (as in the prior draft's `manifest.cpp`/`.h`; keep `parse_manifest` structural). Add both to `denso_core`.
+- [ ] **Step 3: Implement**
+
+```cpp
+// src/core/models/manifest.h
+#pragma once
+#include <optional>
+#include <string>
+#include <vector>
+namespace denso::models {
+struct ModelGeneration {
+    std::string name, engine, engine_sha256, sidecar, sidecar_sha256;
+    std::vector<std::string> class_names;
+    std::string trt, cuda, sm, installed_utc, state;
+};
+struct Manifest { int schema = 0; std::vector<ModelGeneration> generations; };
+struct ParseResult { std::optional<Manifest> manifest; std::string error; };
+ParseResult parse_manifest(const std::string& json_text);   // structural only
+}
+```
+```cpp
+// src/core/models/manifest.cpp
+#include "models/manifest.h"
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+namespace denso::models {
+namespace {
+ParseResult fail(const std::string& why) { return {std::nullopt, why}; }
+bool str(const QJsonObject& o, const char* k, std::string& out) {
+    if (!o.contains(k) || !o.value(k).isString()) return false;
+    out = o.value(k).toString().toStdString(); return true;
+}
+}
+ParseResult parse_manifest(const std::string& json_text) {
+    QJsonParseError err{};
+    const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(json_text), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject())
+        return fail("manifest is not a JSON object");
+    const QJsonObject root = doc.object();
+    const QJsonValue sv = root.value("schema");
+    // schema must be an INTEGER equal to 1 (reject 1.5, strings, etc.)
+    if (!sv.isDouble() || sv.toDouble() != static_cast<double>(sv.toInt()) || sv.toInt() != 1)
+        return fail("schema must be the integer 1");
+    if (!root.value("generations").isArray()) return fail("missing generations array");
+    Manifest m; m.schema = sv.toInt();
+    for (const auto v : root.value("generations").toArray()) {
+        if (!v.isObject()) return fail("generation is not an object");
+        const QJsonObject o = v.toObject();
+        ModelGeneration g;
+        if (!str(o,"name",g.name) || !str(o,"engine",g.engine) ||
+            !str(o,"engine_sha256",g.engine_sha256) || !str(o,"sidecar",g.sidecar) ||
+            !str(o,"sidecar_sha256",g.sidecar_sha256) ||
+            !str(o,"installed_utc",g.installed_utc) || !str(o,"state",g.state))
+            return fail("generation missing a required string field");
+        if (!o.value("class_names").isArray()) return fail("generation missing class_names");
+        for (const auto c : o.value("class_names").toArray()) {
+            if (!c.isString()) return fail("class_names must be strings");
+            g.class_names.push_back(c.toString().toStdString());
+        }
+        const QJsonObject bf = o.value("built_for").toObject();
+        if (!str(bf,"trt",g.trt) || !str(bf,"cuda",g.cuda) || !str(bf,"sm",g.sm))
+            return fail("generation missing built_for.{trt,cuda,sm}");
+        m.generations.push_back(std::move(g));
+    }
+    return {m, {}};
+}
+}
+```
+Add both to `denso_core` in `src/core/CMakeLists.txt`.
 
 - [ ] **Step 4: Run** — `./build/tests/denso_tests "[manifest]"` → PASS (3).
 - [ ] **Step 5: Commit** — `feat(models): manifest struct + structural JSON parse`
@@ -246,7 +314,46 @@ TEST_CASE("migration v13 creates model_migration_receipt", "[db]") {
 
 - [ ] **Step 2: Verify fail.**
 
-- [ ] **Step 3: Implement** `parse_migrate` (as prior draft) + a duplicate-id check (`if (c.cameras.contains(id)) return error(...)`). Extend `usage()`.
+- [ ] **Step 3: Implement**
+
+In `args.h`: add `MigrateModel,` to `enum class Mode` (before `Error`), and **append after `error`** on `struct Command`:
+```cpp
+    QString old_engine;      ///< MigrateModel: --old <file>
+    QString new_engine;      ///< MigrateModel: --new <file>
+    QString class_map_path;  ///< MigrateModel: --class-map <path> (optional)
+    QList<qint64> cameras;   ///< MigrateModel: repeated --camera <id>
+```
+In `args.cpp`, add a dispatch line in `parse()` before the final `return error(...)`:
+```cpp
+    if (flag == QStringLiteral("--migrate-model")) return parse_migrate(rest);
+```
+And the helper in the anonymous namespace:
+```cpp
+Command parse_migrate(const QStringList& rest) {
+    Command c; c.mode = Mode::MigrateModel;
+    for (int i = 0; i < rest.size(); ++i) {
+        const QString& a = rest.at(i);
+        auto need = [&](QString& dst) -> bool {
+            if (i + 1 >= rest.size()) return false;
+            dst = rest.at(++i); return true;
+        };
+        if (a == QStringLiteral("--old"))       { if (!need(c.old_engine))     return error(QStringLiteral("--old requires a filename")); }
+        else if (a == QStringLiteral("--new"))  { if (!need(c.new_engine))     return error(QStringLiteral("--new requires a filename")); }
+        else if (a == QStringLiteral("--class-map")) { if (!need(c.class_map_path)) return error(QStringLiteral("--class-map requires a path")); }
+        else if (a == QStringLiteral("--camera")) {
+            if (i + 1 >= rest.size()) return error(QStringLiteral("--camera requires an id"));
+            bool ok = false; const qint64 id = rest.at(++i).toLongLong(&ok);
+            if (!ok) return error(QStringLiteral("--camera id must be an integer"));
+            if (c.cameras.contains(id)) return error(QStringLiteral("duplicate --camera id: %1").arg(id));
+            c.cameras << id;
+        } else return error(QStringLiteral("unexpected argument to --migrate-model: %1").arg(a));
+    }
+    if (c.old_engine.isEmpty() || c.new_engine.isEmpty() || c.cameras.isEmpty())
+        return error(QStringLiteral("--migrate-model requires --old, --new, and at least one --camera"));
+    return c;
+}
+```
+Extend `usage()` with a `--migrate-model` line. (Appending the new `Command` members keeps existing `Command{Mode::X,{},{},{}}` initializers valid.)
 
 - [ ] **Step 4: Run** — `./build/tests/denso_tests "[cli]"` → PASS.
 - [ ] **Step 5: Commit** — `feat(cli): parse --migrate-model`
@@ -309,7 +416,98 @@ static denso::db::Db seed() {           // Db is move-only; return by move
 - [ ] **Step 1: Failing tests** — happy path repoints camera 1 to `new_b.engine` **and** writes one receipt whose `attachments` contains `camera_model_id`; CAS refusal leaves the DB unchanged (`detection_for` still `old_a.engine`); refusal when a selected class is unmapped (`new_class_names={"0"}`). Assert receipt columns via `SELECT old_model_id,new_engine_sha256,attachments FROM model_migration_receipt`.
 
 - [ ] **Step 2: Verify fail.**
-- [ ] **Step 3: Implement** (extend the prior draft's `migrate_model`, now populating the expanded receipt; add `<optional> <utility> <cstddef>`; bind the identity pairs by `const auto&`).
+- [ ] **Step 3: Implement**
+
+Uses `validate_request`, `load_old` (four-state), `LoadStatus`, `OldAttach` from Task 7a. Add includes `<optional> <utility> <cstddef> <QJsonArray> <QJsonDocument> <QJsonObject> <QSqlQuery> <QString> <QVariant>`, plus `"detection/class_names.h"`, `"detection/repo.h"`, `"models/class_map.h"`.
+
+```cpp
+MigrateResult migrate_model(const QSqlDatabase& db, const MigrateRequest& req) {
+    if (auto e = validate_request(req)) return {false, *e, {}};
+    QSqlDatabase conn(db);
+    if (!conn.transaction()) return {false, "cannot begin transaction", {}};
+    auto rb = [&](const std::string& e){ conn.rollback(); return MigrateResult{false, e, {}}; };
+
+    // Old model identity (every named camera must attach exactly this filename).
+    int64_t old_model_id = 0; std::string old_name; std::vector<std::string> old_names;
+    { QSqlQuery q(db); q.prepare("SELECT id,name,class_names FROM model WHERE filename=?");
+      q.addBindValue(QString::fromStdString(req.old_filename));
+      if (!q.exec())  return rb("query old model failed");
+      if (!q.next())  return rb("no catalog row for old filename " + req.old_filename);
+      old_model_id = q.value(0).toLongLong();
+      old_name     = q.value(1).toString().toStdString();
+      old_names    = parse_class_names(q.value(2).toString().toStdString());
+      if (q.next())   return rb("multiple catalog rows for old filename"); }
+
+    std::vector<OldAttach> attaches;
+    for (int64_t cam : req.camera_ids) {
+        auto [st, a] = load_old(db, cam, req.old_filename);
+        switch (st) {
+            case LoadStatus::QueryFailed: return rb("CAS query failed for camera " + std::to_string(cam));
+            case LoadStatus::NotAttached: return rb("camera " + std::to_string(cam) + " does not attach " + req.old_filename);
+            case LoadStatus::Ambiguous:   return rb("camera " + std::to_string(cam) + " attaches " + req.old_filename + " more than once");
+            case LoadStatus::Ok: break;
+        }
+        attaches.push_back(a);
+    }
+
+    auto cm = denso::models::resolve_class_map(old_names, req.new_class_names, req.explicit_remap);
+    if (!cm.map) return rb(cm.error);
+    const auto& fwd = *cm.map;
+    std::map<int,int> inv; for (const auto& [k,v] : fwd) inv[v] = k;
+
+    DetectionModel nm{0, req.new_name, req.new_filename, req.new_class_names};
+    auto nid = upsert_model(db, nm);
+    if (!nid) return rb("upsert new model failed");
+
+    QJsonArray attJson;
+    for (std::size_t k = 0; k < attaches.size(); ++k) {
+        const OldAttach& a = attaches[k];
+        QSqlQuery up(db); up.prepare("UPDATE camera_model SET model_id=? WHERE id=?");
+        up.addBindValue(static_cast<qlonglong>(*nid)); up.addBindValue(static_cast<qlonglong>(a.camera_model_id));
+        if (!up.exec()) return rb("repoint failed");
+        QSqlQuery del(db); del.prepare("DELETE FROM camera_model_class WHERE camera_model_id=?");
+        del.addBindValue(static_cast<qlonglong>(a.camera_model_id));
+        if (!del.exec()) return rb("clearing old class rows failed");
+        QJsonArray sel;
+        for (const auto& s : a.classes) {
+            const auto it = fwd.find(s.class_id);
+            if (it == fwd.end()) return rb("selected class " + std::to_string(s.class_id) + " has no mapping in the new model");
+            QSqlQuery ins(db);
+            ins.prepare("INSERT INTO camera_model_class(camera_model_id,class_id,conf) VALUES(?,?,?)");
+            ins.addBindValue(static_cast<qlonglong>(a.camera_model_id)); ins.addBindValue(it->second);
+            ins.addBindValue(static_cast<double>(s.conf));
+            if (!ins.exec()) return rb("inserting remapped class row failed");
+            QJsonObject so; so["class_id"] = s.class_id; so["conf"] = s.conf; sel.append(so);
+        }
+        QJsonObject ao; ao["camera_id"] = static_cast<double>(req.camera_ids[k]);
+        ao["camera_model_id"] = static_cast<double>(a.camera_model_id); ao["classes"] = sel;
+        attJson.append(ao);
+    }
+
+    auto jmap = [](const std::map<int,int>& m){ QJsonObject o; for (auto [k,v] : m) o[QString::number(k)] = v;
+        return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
+    QJsonArray oldcn; for (const auto& n : old_names) oldcn.append(QString::fromStdString(n));
+    QSqlQuery rec(db);
+    rec.prepare("INSERT INTO model_migration_receipt"
+                "(created_utc,old_filename,old_model_id,old_name,old_class_names,"
+                " new_filename,new_model_id,new_engine_sha256,forward_map,inverse_map,attachments)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?)");
+    rec.addBindValue(QString::fromStdString(req.created_utc));
+    rec.addBindValue(QString::fromStdString(req.old_filename));
+    rec.addBindValue(static_cast<qlonglong>(old_model_id));
+    rec.addBindValue(QString::fromStdString(old_name));
+    rec.addBindValue(QString::fromUtf8(QJsonDocument(oldcn).toJson(QJsonDocument::Compact)));
+    rec.addBindValue(QString::fromStdString(req.new_filename));
+    rec.addBindValue(static_cast<qlonglong>(*nid));
+    rec.addBindValue(QString::fromStdString(req.new_engine_sha256));
+    rec.addBindValue(jmap(fwd)); rec.addBindValue(jmap(inv));
+    rec.addBindValue(QString::fromUtf8(QJsonDocument(attJson).toJson(QJsonDocument::Compact)));
+    if (!rec.exec()) return rb("writing the migration receipt failed");
+
+    if (!conn.commit()) return rb("commit failed");
+    MigrateResult r; r.ok = true; r.affected_cameras = req.camera_ids; return r;
+}
+```
 - [ ] **Step 4: Run** — `./build/tests/denso_tests "[migrate]"` → PASS.
 - [ ] **Step 5: Commit** — `feat(detection): migrate_model transaction + rollback-complete receipt`
 
