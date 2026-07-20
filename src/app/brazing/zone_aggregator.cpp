@@ -75,12 +75,36 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
         return std::nullopt;
     }
 
-    // Build the full snapshot of every zone that currently holds a stable value.
+    return build_snapshot();
+}
+
+std::optional<std::map<int, int>> ZoneAggregator::evict_zones(
+    const std::set<int>& zone_nos) {
+    bool changed = false;
+    for (const int zone_no : zone_nos) {
+        zones_.erase(zone_no);
+        if (last_sent_.erase(zone_no) > 0) {
+            changed = true;
+        }
+    }
+    if (!changed) {
+        return std::nullopt;
+    }
+    return build_snapshot();
+}
+
+// Build the full snapshot of every zone holding a stable value and commit it.
+// Returns nullopt when the result would be EMPTY: build_brazing_payload({})
+// renders literal "{}" and, under an unverified backend, could clear every zone.
+std::optional<std::map<int, int>> ZoneAggregator::build_snapshot() {
     std::map<int, int> snapshot;
     for (const auto& [zone_no, d] : zones_) {
         if (d.has_stable) {
             snapshot[zone_no] = d.stable;
         }
+    }
+    if (snapshot.empty()) {
+        return std::nullopt;
     }
     last_sent_ = snapshot;
     // Consume re-announce ONLY when the snapshot is actually committed. Clearing it

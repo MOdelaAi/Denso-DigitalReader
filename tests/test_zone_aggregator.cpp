@@ -83,9 +83,11 @@ TEST_CASE("an expired zone is sent again when it reappears", "[zone_aggregator]"
 
     REQUIRE(agg.observe(obs(1, 500), 0).has_value());
 
+    // Zone1 ages out and it was the only zone, so the resulting snapshot would be
+    // EMPTY. The empty-snapshot rule (spec §3.3) suppresses that instead of
+    // emitting a bare "{}" that an unqualified backend could read as "clear all".
     auto expired = agg.observe({}, 101);  // no zones observed; zone1 ages out
-    REQUIRE(expired.has_value());
-    CHECK(expired->empty());
+    REQUIRE_FALSE(expired.has_value());
 
     auto reappeared = agg.observe(obs(1, 500), 102);
     REQUIRE(reappeared.has_value());
@@ -194,4 +196,51 @@ TEST_CASE("hold: a sibling zone on the same camera keeps reporting",
     REQUIRE(snap.has_value());
     REQUIRE((*snap)[2] == 33);
     REQUIRE((*snap)[1] == 11);   // zone 1 still carries its held value
+}
+
+TEST_CASE("evict: removes the zone and emits the shrunk snapshot", "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    for (int i = 0; i < 5; ++i) { t += 100; a.observe({rd(1, 11), rd(2, 22)}, t); }
+    const auto snap = a.evict_zones({1});
+    REQUIRE(snap.has_value());
+    REQUIRE(snap->count(1) == 0);
+    REQUIRE(snap->at(2) == 22);
+}
+
+TEST_CASE("evict: never emits an EMPTY snapshot", "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    // Evicting the only zone would yield {} — which build_brazing_payload renders
+    // as literal "{}" and could clear every zone on an unqualified backend.
+    REQUIRE_FALSE(a.evict_zones({1}).has_value());
+}
+
+TEST_CASE("evict: evicting an unknown zone changes nothing", "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    REQUIRE_FALSE(a.evict_zones({99}).has_value());
+}
+
+TEST_CASE("evict: re-entry forces a fresh report of an unchanged value",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 10000);
+    int64_t t = 0;
+    feed(a, 1, 11, 5, t);
+    feed(a, 2, 22, 5, t);
+    a.evict_zones({1});
+    const auto snap = feed(a, 1, 11, 5, t);   // same value it had before eviction
+    REQUIRE(snap.has_value());
+    REQUIRE(snap->at(1) == 11);
+}
+
+TEST_CASE("observe: an all-empty result is suppressed, not emitted",
+          "[zone_aggregator]") {
+    ZoneAggregator a(5, 1000);
+    int64_t t = 0;
+    feed(a, 1, 42, 5, t);
+    t += 5000;   // past expiry with nothing observed -> would expire to {}
+    REQUIRE_FALSE(a.observe({}, t).has_value());
 }
