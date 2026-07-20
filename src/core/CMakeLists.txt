@@ -37,6 +37,7 @@ add_library(denso_core STATIC
     models/class_map.cpp
     health/integrity.cpp
     health/status_file.cpp
+    health/zone_health.cpp
     ui/convert.cpp
 )
 target_include_directories(denso_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
