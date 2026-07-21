@@ -482,6 +482,33 @@ is "repro: entry mtime is the epoch, not the staging time" \
 is "repro: gzip header timestamp is zeroed (gzip -n)" \
    "$(od -An -tx1 -j4 -N4 "$R1" | tr -d ' ')" "00000000"
 
+# The archive's top-level DIRECTORY has a mode too, and `mkdir` takes the
+# builder's umask — 0775 under the Jetson's 002, 0755 under 022. That changed
+# the archive bytes under an identical clean filename, on a file holding no
+# data at all.
+is "repro: the top-level directory is 0755, not umask-dependent" \
+   "$(tar tzvf "$R1" | awk 'NR==1{print $1}')" "drwxr-xr-x"
+
+# A tar FAILURE must not be masked. `{ tar || rc=$?; } | gzip` cannot work — a
+# pipeline component runs in a subshell, so rc never reaches the caller and
+# gzip happily compresses a truncated stream into a valid-looking archive.
+# Verified by making tar fail (a source path that does not exist) and asserting
+# both the status AND that no archive is left behind.
+FAKEBIN="$B/failbin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/tar" <<'EOF'
+#!/bin/sh
+# Emit a plausible partial stream, then fail — the exact shape that used to
+# sail through as success.
+printf 'partial-tar-stream'
+exit 3
+EOF
+chmod +x "$FAKEBIN/tar"
+FAILOUT="$B/out/should-not-exist.tar.gz"
+PATH="$FAKEBIN:$PATH" emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$FAILOUT" "$EPOCH" >/dev/null 2>&1
+rc_is "repro: a FAILING tar is reported, not masked by gzip" $? 1
+[ -f "$FAILOUT" ] && bad "repro: a failed tar leaves no archive behind" \
+                  || ok "repro: a failed tar leaves no archive behind"
+
 # An unusable epoch must be REFUSED, never defaulted to "now": silently
 # falling back is exactly how the non-reproducibility would creep back.
 emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$B/out/x.tar.gz" ""

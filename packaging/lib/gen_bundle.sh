@@ -56,6 +56,12 @@ emit_bundle() (
     stage="$(mktemp -d)" || return 1
     root="$stage/$name"
     mkdir -p "$root" || { rm -rf "$stage"; return 1; }
+    # The DIRECTORY's own mode is archived too, and `mkdir` takes the builder's
+    # umask — 0775 on the Jetson (umask 002) but 0755 under 022, which changes
+    # the archive bytes under an identical clean filename. Every mode in this
+    # archive is pinned; the directory is not an exception just because it holds
+    # no data.
+    chmod 0755 "$root" || { rm -rf "$stage"; return 1; }
 
     cp "$deb" "$root/$deb_base" || { rm -rf "$stage"; return 1; }
     cp "$pre" "$root/$pre_base" || { rm -rf "$stage"; return 1; }
@@ -125,16 +131,21 @@ emit_bundle() (
     # interrupted tar can never leave a truncated .tar.gz sitting at the path
     # an operator is about to scp.
     tmp="$(mktemp "$(dirname "$out")/.bundle.XXXXXX")" || { rm -rf "$stage"; return 1; }
-    # No pipefail assumption: this is sourced into callers with and without it.
-    # tar's status is captured explicitly so a tar failure can never be masked
-    # by a successful gzip writing a valid archive of a truncated stream.
-    tar_rc=0
-    { tar --sort=name --owner=0 --group=0 --numeric-owner \
-          --mtime="@$epoch" -cf - -C "$stage" "$name" || tar_rc=$?; } \
-        | gzip -n > "$tmp"
-    gzip_rc=$?
-    if [ "$tar_rc" != "0" ] || [ "$gzip_rc" != "0" ]; then
-        echo "emit_bundle: archive creation failed (tar=$tar_rc gzip=$gzip_rc)" >&2
+    # tar and gzip run as SEPARATE steps over an intermediate file, deliberately
+    # not as a pipeline. `{ tar || rc=$?; } | gzip` looks like it captures tar's
+    # status but cannot: a pipeline component runs in a SUBSHELL, so the
+    # assignment never reaches the caller and rc is always 0 — a tar failure
+    # would be masked by gzip happily compressing a truncated stream into a
+    # valid-looking archive. PIPESTATUS would work but is bash-only, and this
+    # file is POSIX sh sourced by more than one caller. The intermediate file
+    # costs one archive's worth of temp space and makes each status direct.
+    if ! LC_ALL=C tar --sort=name --owner=0 --group=0 --numeric-owner \
+                      --mtime="@$epoch" -cf "$stage/bundle.tar" -C "$stage" "$name"; then
+        echo "emit_bundle: tar failed" >&2
+        rm -f "$tmp"; rm -rf "$stage"; return 1
+    fi
+    if ! gzip -n -c "$stage/bundle.tar" > "$tmp"; then
+        echo "emit_bundle: gzip failed" >&2
         rm -f "$tmp"; rm -rf "$stage"; return 1
     fi
     chmod 0644 "$tmp" || { rm -f "$tmp"; rm -rf "$stage"; return 1; }

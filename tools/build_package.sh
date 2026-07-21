@@ -99,18 +99,37 @@ echo ">> version: $VERSION"
 # silently overwriting the earlier artifact. Anything named after a commit must
 # be a function of that commit alone.
 #
-# The commit timestamp is the stable source. An externally-set SOURCE_DATE_EPOCH
-# wins (the reproducible-builds convention, and it lets a caller pin the value),
-# otherwise it is derived here. Exported because dpkg-deb reads it from the
-# ENVIRONMENT: it stamps the ar container and clamps every tar entry's mtime to
-# it, which is what makes the .deb itself byte-stable.
-if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
-    SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+# The commit timestamp IS the source, and for a clean build it is the only
+# permitted value. Honouring an arbitrary externally-set SOURCE_DATE_EPOCH — the
+# usual reproducible-builds convention — would reintroduce the exact defect this
+# closes by another door: two clean builds of one commit with different epochs
+# produce different bytes under the SAME r<count>.g<sha> filename. The name
+# carries no content hash, so it can only be honest if the epoch is a function
+# of the commit. A matching override is accepted (it is a no-op, and lets a
+# caller pin the value explicitly); a differing one is refused, loudly, rather
+# than silently ignored.
+#
+# A DIRTY build may override freely: its bundle name carries the .deb's content
+# hash, so a different epoch yields a different name and nothing is masked.
+COMMIT_EPOCH="$(git log -1 --format=%ct HEAD)"
+if [ -n "${SOURCE_DATE_EPOCH:-}" ] && [ "$SOURCE_DATE_EPOCH" != "$COMMIT_EPOCH" ]; then
+    if [ -z "$DIRTY" ]; then
+        echo "refusing: SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH differs from the commit timestamp $COMMIT_EPOCH." >&2
+        echo "  A clean build is named r<count>.g<sha> with no content hash, so its bytes must be a" >&2
+        echo "  function of the commit alone. Unset it, or set it to $COMMIT_EPOCH." >&2
+        exit 1
+    fi
+    echo ">> NOTE: SOURCE_DATE_EPOCH overridden on a dirty build (name carries the content hash)"
+else
+    SOURCE_DATE_EPOCH="$COMMIT_EPOCH"
 fi
-export SOURCE_DATE_EPOCH
 case "$SOURCE_DATE_EPOCH" in
     ''|*[!0-9]*) echo "SOURCE_DATE_EPOCH is not a positive integer: '$SOURCE_DATE_EPOCH'" >&2; exit 1 ;;
 esac
+# Exported because dpkg-deb reads it from the ENVIRONMENT: it stamps the ar
+# container and clamps every tar entry's mtime to it, which is what makes the
+# .deb itself byte-stable.
+export SOURCE_DATE_EPOCH
 echo ">> source date: $SOURCE_DATE_EPOCH ($(date -u -d "@$SOURCE_DATE_EPOCH" -Is))"
 # A DIRTY tree is not described by its commit, so its bytes are not a function
 # of SOURCE_DATE_EPOCH either — the uncommitted content is what varies. Dirty

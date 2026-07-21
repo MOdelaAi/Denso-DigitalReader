@@ -73,6 +73,24 @@ case "$MANIFEST_DATE" in
     *) bad "clean: MANIFEST source-date is the COMMIT time (want '$COMMIT_DATE...', got '$MANIFEST_DATE')" ;;
 esac
 
+# A caller-set SOURCE_DATE_EPOCH would break the clean guarantee by another
+# door: same r<count>.g<sha> filename, different bytes. It must be refused for
+# a clean build, not silently honoured (the usual reproducible-builds
+# convention is wrong here — the name carries no content hash).
+if SOURCE_DATE_EPOCH=1600000000 ./tools/build_package.sh --model "$ENGINE" >/tmp/repro_override.log 2>&1; then
+    bad "clean: a MISMATCHED SOURCE_DATE_EPOCH is refused"
+else
+    grep -q "differs from the commit timestamp" /tmp/repro_override.log \
+        && ok "clean: a MISMATCHED SOURCE_DATE_EPOCH is refused, and says why" \
+        || bad "clean: refusal names the cause (see /tmp/repro_override.log)"
+fi
+# ...but a MATCHING override is a no-op, so pinning the value explicitly works.
+if SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" ./tools/build_package.sh --model "$ENGINE" >/dev/null 2>&1; then
+    is "clean: a MATCHING SOURCE_DATE_EPOCH still yields identical bytes" "$(sha_of "$(ls dist/*.deb)")" "$DEB1_SHA"
+else
+    bad "clean: a MATCHING SOURCE_DATE_EPOCH is accepted"
+fi
+
 echo "== dirty builds stay disambiguated"
 # Same tree, built twice dirty: identical inputs, so identical bytes AND an
 # identical name. Overwriting is a harmless no-op — that is the claim.
