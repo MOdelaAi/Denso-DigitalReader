@@ -248,7 +248,64 @@ the real X session (application window + camera UI + local status display), per 
 & 4. Blocked-boot cases have NO window by design (finding #2 = won't-fix), so there is
 nothing visual to confirm for them — they are verified objectively above.
 
+~~REMAINING (human, AnyDesk — the VISUAL half)~~ → **DONE, see §13.**
+
 REMAINING (deployment residual, NOT slice (b)): systemd `Restart=on-abnormal` no-loop
 check needs the --user unit installed/enabled; this dev Jetson sits at the GDM greeter
 (autologin unconfigured). Restart behaviour is reasoned-correct (on-abnormal ignores any
 clean exit incl. 78) + Codex-confirmed; verify live at real deployment via denso-setup.
+
+## 13. VISUAL GATE — PASSED on the real X session (2026-07-21)
+
+The visual half of §12 is now **complete**. The dev Jetson was no longer at the GDM
+greeter — a real GNOME session (`loginctl` session 35, seat0, `:1`, user `modela`) was
+logged in, so `denso` was launched into it over SSH (`DISPLAY=:1`) and captured.
+
+**Pre-launch safety checks (both cleared):**
+- No `denso` process was running → no single-instance conflict.
+- Boot network reassert cannot disturb the LAN/SSH: `linux_backend.cpp:145 apply_config`
+  is a deliberate throwing stub ("network apply not yet implemented for Linux"), so the
+  deferred reassert surfaces non-fatally and changes nothing.
+
+**Target: the real default-path DB** (`build/src/app/denso.db`, NOT an isolated copy) —
+`user_version 13`, `quick_check ok`, 4 cameras all `active=1 setup_complete=1
+areas_need_review=0`, 0 ROI areas.
+
+**Observed (screenshot evidence, X11 + `xwininfo`):**
+- **Main window opens.** `0x3000011 "Denso Digital Reader"`, `WM_CLASS ("denso","denso")`,
+  800x600, **`Map State: IsViewable`**, framed and composited by mutter.
+- **Camera UI renders normally.** App header ("Denso Digital Reader" + Camera / Settings
+  nav) over a 2x2 `CameraGrid`; **all four cameras stream live video** through the NVDEC
+  GStreamer ladder (`NvMMLiteBlockCreate` per stream in the log).
+- **Local status display renders normally.** Per tile: camera name (Camera1..4), green
+  status dot, timestamp overlay, and a live per-tile FPS readout — **15.1 / 14.9 / 14.9 /
+  15.0 fps**, i.e. the ~15 fps display cap, so frames are genuinely flowing, not frozen.
+- **No inhibit banner shown** — correct: `areas_need_review=0` for every camera, so
+  nothing is quarantined and no "reporting paused" banner should appear.
+- **Stability:** still running and `IsViewable` at **4m35s** elapsed (RSS ~840 MB,
+  ~200% CPU across the 4 decode+inference threads). No crash, no exit.
+
+**`status.json` written at runtime agrees with the CLI classifier:**
+```json
+{"blockers":[],"camera_causes":[],"held_zones":[],"inhibited_zones":[],
+ "issues":[{"camera_id":"0","detail":"digitv3.engine","reason":"engines_unmanifested"}],
+ "status":"degraded"}
+```
+Empty blockers / empty camera-causes / empty held+inhibited zones, and the single
+`engines_unmanifested` issue — the exact Degraded-but-serviceable state that `denso --check`
+reports as **10**, confirming end-to-end that the retained `sync_models()` directory scan
+keeps the unmanifested production appliance serviceable rather than Blocked.
+
+**Note on operator state:** the GNOME screen shield was active and DPMS had the monitor
+off; both were cleared (`xset dpms force on`, `loginctl unlock-session 35` — no credentials
+used) to capture the screen. The session was left unlocked and the app left running.
+
+Blocked-boot cases (future-schema, corrupt DB) intentionally show **no** GUI window
+(finding §9.2 = won't-fix by design), so there is nothing visual to confirm for them; they
+remain verified objectively in §12 via exit 78, unchanged `PRAGMA user_version`,
+`status.json`, and logs.
+
+**Gate status: all pre-merge verification for slice (b) is COMPLETE.** The only outstanding
+item is the deployment residual (systemd restart-loop, needs the --user unit installed at a
+real deployment) and the documented pre-existing pre-v8 `denso-setup verify` limitation —
+both explicitly out of slice (b) scope.
