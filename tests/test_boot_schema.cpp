@@ -63,7 +63,7 @@ TEST_CASE("evaluate_db_schema: a future-version database is Blocked as SchemaNew
     REQUIRE(health::exit_code_for(v.status) == 78);
 }
 
-TEST_CASE("evaluate_db_schema: an unreadable/corrupt database is Blocked as DbUnopenable",
+TEST_CASE("evaluate_db_schema: a non-SQLite file is Blocked as DbUnopenable",
           "[boot_schema]") {
     QTemporaryDir dir;
     REQUIRE(dir.isValid());
@@ -78,4 +78,47 @@ TEST_CASE("evaluate_db_schema: an unreadable/corrupt database is Blocked as DbUn
     REQUIRE(v.blockers.size() == 1);
     REQUIRE(v.blockers[0].kind == health::GlobalBlocker::Kind::DbUnopenable);
     REQUIRE(health::exit_code_for(v.status) == 78);
+}
+
+TEST_CASE("evaluate_db_schema: a structurally corrupt database is Blocked as DbUnopenable",
+          "[boot_schema]") {
+    // The nastier case (Codex High): a VALID SQLite header with a readable
+    // user_version, but a damaged b-tree page deeper in the file. A header check
+    // alone waves it through as Ready; only a structural probe (PRAGMA
+    // quick_check) catches it. A 24/7 appliance must fail CLOSED on this, not boot
+    // onto a corrupt store and discover the damage on a later query.
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("torn.db"));
+    {
+        auto rw = db::Db::open(path);
+        REQUIRE(rw.has_value());
+        REQUIRE(db::run_migrations(rw->handle()));
+        // Grow the file well past one page so there is a data page to damage while
+        // leaving page 1 (header + user_version) intact.
+        QSqlQuery ins(rw->handle());
+        for (int i = 0; i < 400; ++i) {
+            ins.prepare(QStringLiteral("INSERT INTO settings(key, value) VALUES(?, ?)"));
+            ins.addBindValue(QStringLiteral("k%1").arg(i));
+            ins.addBindValue(QString(64, QLatin1Char('x')));
+            REQUIRE(ins.exec());
+        }
+        // Force the WAL into the main file so corrupting the .db actually damages
+        // the data (Db::open uses WAL — rows would otherwise sit in the -wal).
+        QSqlQuery ck(rw->handle());
+        REQUIRE(ck.exec(QStringLiteral("PRAGMA wal_checkpoint(TRUNCATE)")));
+    }
+    {
+        // Overwrite the whole of page 2 — its page header and cells — leaving
+        // page 1 (the file header + user_version at offset 60) untouched.
+        QFile f(path);
+        REQUIRE(f.size() >= 8192);
+        REQUIRE(f.open(QIODevice::ReadWrite));
+        REQUIRE(f.seek(4096));
+        REQUIRE(f.write(QByteArray(4096, '\xFF')) == 4096);
+    }
+    const auto v = health::evaluate_db_schema(path);
+    REQUIRE(v.status == health::Readiness::Blocked);
+    REQUIRE(v.blockers.size() == 1);
+    REQUIRE(v.blockers[0].kind == health::GlobalBlocker::Kind::DbUnopenable);
 }

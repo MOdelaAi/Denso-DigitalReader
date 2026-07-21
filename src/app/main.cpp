@@ -94,8 +94,10 @@ denso::health::IntegrityVerdict db_blocker(denso::health::GlobalBlocker::Kind ki
 
 // Emit a pre-window boot blocker: log it (to the file sink + stderr), write an
 // inspectable status.json so a headless field box's fault is visible over SSH,
-// and return EX_CONFIG (78) — systemd then treats it as a configuration fault no
-// restart fixes, instead of restart-looping a process it reads as having crashed.
+// and return EX_CONFIG (78) — the conventional "configuration error" code. The
+// shipped systemd unit uses Restart=on-abnormal, which already declines to
+// restart ANY clean exit; the distinct code is so an operator / denso-setup can
+// tell a configuration fault from a crash, not a lever over systemd's restart.
 int report_db_blocker(const denso::health::IntegrityVerdict& v, const QString& status_path) {
     for (const auto& b : v.blockers) {
         qCritical().noquote() << "[startup] BLOCKED:" << denso::health::reason_code(b.kind)

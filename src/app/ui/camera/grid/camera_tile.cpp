@@ -52,7 +52,7 @@ QString inhibit_banner(uint32_t causes) {
         return QStringLiteral("⚠ Camera offline — zones inhibited");
     if (has(ZoneCause::InferenceWorkerFailed))
         return QStringLiteral("⚠ Detection stopped — zones inhibited");
-    if (has(ZoneCause::ModelUnavailable) || has(ZoneCause::ModelInvalid))
+    if (has(ZoneCause::ModelUnavailable))
         return QStringLiteral("⚠ Model unavailable — zones inhibited");
     return QString();
 }

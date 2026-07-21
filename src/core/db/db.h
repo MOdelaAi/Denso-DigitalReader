@@ -67,6 +67,13 @@ int supported_schema_version();
 /// is not a SQLite database). Never mutates the database.
 std::optional<int> read_user_version(const QSqlDatabase& db);
 
+/// Read-only structural integrity probe (`PRAGMA quick_check`). Returns false if
+/// the database is corrupt OR the probe itself cannot run. Cheaper than
+/// integrity_check (it skips index/table cross-checks) but still reads every
+/// page, so it catches a damaged b-tree page that a bare header + user_version
+/// read would wave through. Never mutates the database.
+bool quick_check(const QSqlDatabase& db);
+
 /// Apply any pending schema migrations, gated by `PRAGMA user_version` so
 /// repeated runs are no-ops. Safe to call on every startup.
 ///

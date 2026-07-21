@@ -14,10 +14,13 @@
 
 namespace denso::health {
 
+// ONLY causes with a real producer are declared (the no-speculative-enum rule).
+// Bit values are stable — assign the NEXT free bit when adding one, never renumber
+// (status.json consumers read the bitmask). 1u << 2 is intentionally free: it was
+// a speculative ModelInvalid with no producer, removed rather than left dangling.
 enum class ZoneCause : uint32_t {
     AreasNeedReview       = 1u << 0,
     ModelUnavailable      = 1u << 1,
-    ModelInvalid          = 1u << 2,
     CaptureOffline        = 1u << 3,
     InferenceWorkerFailed = 1u << 4,
 };

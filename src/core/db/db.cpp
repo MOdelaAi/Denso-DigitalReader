@@ -125,6 +125,16 @@ std::optional<int> read_user_version(const QSqlDatabase& db) {
     return q.value(0).toInt();
 }
 
+bool quick_check(const QSqlDatabase& db) {
+    QSqlQuery q(db);
+    // A healthy database answers with a single row "ok". Corruption yields one or
+    // more error rows (and can span pages) — the first non-"ok" row is enough.
+    if (!q.exec(QStringLiteral("PRAGMA quick_check")) || !q.next()) {
+        return false;
+    }
+    return q.value(0).toString().compare(QLatin1String("ok"), Qt::CaseInsensitive) == 0;
+}
+
 bool run_migrations(const QSqlDatabase& db) {
     if (!db.isValid() || !db.isOpen()) {
         qWarning().noquote() << "run_migrations: db not open/valid:" << db.lastError().text();

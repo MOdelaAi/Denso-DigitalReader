@@ -87,7 +87,18 @@ IntegrityVerdict evaluate_db_schema(const QString& db_path) {
         v.status = Readiness::Blocked;
         return v;
     }
-    return v;  // Ready — an older-or-equal schema migrates normally
+
+    // A valid header + readable user_version does NOT prove the store is sound: a
+    // damaged b-tree page deeper in the file would otherwise be waved through as
+    // Ready and only surface on a later query. Probe structurally so a corrupt DB
+    // fails CLOSED here (DbUnopenable), not mid-run on the appliance.
+    if (!denso::db::quick_check(ro->handle())) {
+        v.blockers.push_back({GlobalBlocker::Kind::DbUnopenable,
+            QStringLiteral("database failed integrity check (quick_check): %1").arg(db_path)});
+        v.status = Readiness::Blocked;
+        return v;
+    }
+    return v;  // Ready — an older-or-equal, structurally sound schema migrates normally
 }
 
 IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& models_dir) {

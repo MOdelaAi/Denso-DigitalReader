@@ -51,10 +51,12 @@ int launch_cold_with_splash(QApplication& app, QSqlDatabase db,
     // (clear message, non-zero exit) instead of std::terminate on the worker.
     QObject::connect(worker, &WarmupWorker::failed, &app, [&app](const QString& err) {
         qCritical().noquote() << "[fatal] model warm-up failed:" << err;
-        // EX_CONFIG, not 1: a missing/invalid engine is a configuration fault no
-        // restart fixes (engine-only, no fallback), so systemd must not
-        // restart-loop it (spec §2.2).
-        app.exit(health::exit_code_for(health::Readiness::Blocked));
+        // Keep exit 1 (Jetson-verified fail-loud): the shipped systemd unit
+        // documents "exit 1 = warm-up found a missing/invalid engine" and does not
+        // restart on it (Restart=on-abnormal ignores any clean exit). EX_CONFIG is
+        // reserved for the readiness-VERDICT paths (evaluate_db_schema / integrity
+        // Blocked), which is where a distinct config-fault code earns its keep.
+        app.exit(1);
     });
     QObject::connect(worker, &WarmupWorker::finished, &app,
                      [&window, &splash, thread, worker, db, state, engines]() {
@@ -103,10 +105,12 @@ int launch_warm_ui_first(QApplication& app, QSqlDatabase db,
     // Engine-only, no fallback: a fatal warm-up failure aborts startup cleanly.
     QObject::connect(&warmup, &WarmupState::failed, &app, [&app](const QString& err) {
         qCritical().noquote() << "[fatal] model warm-up failed:" << err;
-        // EX_CONFIG, not 1: a missing/invalid engine is a configuration fault no
-        // restart fixes (engine-only, no fallback), so systemd must not
-        // restart-loop it (spec §2.2).
-        app.exit(health::exit_code_for(health::Readiness::Blocked));
+        // Keep exit 1 (Jetson-verified fail-loud): the shipped systemd unit
+        // documents "exit 1 = warm-up found a missing/invalid engine" and does not
+        // restart on it (Restart=on-abnormal ignores any clean exit). EX_CONFIG is
+        // reserved for the readiness-VERDICT paths (evaluate_db_schema / integrity
+        // Blocked), which is where a distinct config-fault code earns its keep.
+        app.exit(1);
     });
 
     warmup.start();
