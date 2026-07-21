@@ -639,6 +639,28 @@ interface, implemented **per platform** (selected via the `BackendEngine` alias 
   `app.exit(1)`). Class names come from a `<engine>.names.json` sidecar; inference
   is mutex-guarded across cameras. `warm_up()` scans `models/*.engine`.
 
+  **Where the plan comes from, and how far it travels.** It is built with
+  `trtexec` on the aarch64 build host and **shipped inside the `.deb`** — not
+  rebuilt per appliance — so the bundle is qualified only for the supported
+  configuration (Orin Nano / L4T R36.5.0 / TRT 10.3 / CUDA 12.6 / `sm_87`). A
+  plan is a compiled artifact: matching `sm_87` is necessary, not sufficient.
+
+  **The `[trt] Using an engine plan file across different models of devices`
+  warning is non-diagnostic.** Measured 2026-07-21 on the build host, loading the
+  engine that host built: the app prints it, and so does TensorRT's own
+  `trtexec --loadEngine`, which then executes the plan at 140 qps / 7.48 ms mean
+  / `PASSED`. Since it fires on the builder itself it cannot discriminate builder
+  from target, so it is **not** evidence about any particular appliance — it was
+  briefly mistaken for exactly that. The internal device-property comparison
+  responsible is unidentified; treat it as a benign TRT-10.3-on-Orin artifact,
+  actionable only alongside a real failure (deserialization error, CUDA error,
+  wrong output) or a changed platform baseline.
+
+  **Loading ≠ inferring.** `--check` builds the engine and validates bindings,
+  shapes and class names, but never calls `infer()`; `warm_up()` runs the first
+  real inference and discards its output. So neither proves *correct* detection
+  — a newly commissioned appliance still wants one known-answer inference.
+
 Each detection camera starts only after its models finish warming, so warm-up
 never lands on a capture thread. `EngineRegistry` keeps one shared engine per
 model filename (lazy; failed loads cached as `nullptr`). `model_sync` catalogs

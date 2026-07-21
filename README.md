@@ -162,8 +162,12 @@ sudo denso-setup configure --user <username>
 sudo denso-setup verify                                   # expect: verify: PASS
 ```
 
-**On any other appliance**, move the one bundle instead — it carries the `.deb`,
-its guard, a `SHA256SUMS` and a generated `INSTALL.txt` with these same steps.
+**On another compatible, validated appliance**, move the one bundle instead — it
+carries the `.deb`, its guard, a `SHA256SUMS` and a generated `INSTALL.txt` with
+these same steps. "Compatible" is load-bearing: the `.deb` ships a prebuilt
+TensorRT plan, which is a compiled artifact tied to its platform, so a bundle is
+qualified only for the supported configuration (Jetson Orin Nano, L4T R36.5.0,
+TensorRT 10.3, CUDA 12.6, `sm_87`) — see *Engine compatibility* in `AGENTS.md`.
 The `.deb` and its guard are useless apart (the guard refuses any other `.deb`),
 so they travel as one file rather than as a runbook instruction to remember:
 
@@ -182,6 +186,15 @@ cat INSTALL.txt
 identical version string — without the suffix two materially different archives
 would share a name and silently overwrite each other. The exact name is printed
 at the end of the build; `ls dist/*.tar.gz` also has it.
+
+This path is **verified on a second appliance** (192.168.1.81, 2026-07-21):
+checksums OK → preflight PASS → `apt` resolved and installed 14 Qt dependencies
+→ `configure` seeded the engine → `verify: PASS`. Two lines in that output are
+expected and are **not** faults: `DEGRADED (serviceable) (exit 10)` is the
+non-blocking `EnginesUnmanifested` condition on a fresh install, and the
+`[trt] Using an engine plan file across different models of devices` warning
+appears even on the build host (measured — `trtexec` prints it there too, then
+runs the plan at 140 qps). Neither indicates a problem with the target box.
 
 **Clean builds are reproducible**, which is what makes the plain name a
 truthful identifier: rebuilding one commit on one machine produces a

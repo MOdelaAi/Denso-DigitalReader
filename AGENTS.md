@@ -89,8 +89,9 @@ by SHA-256; guards the JetPack stack) → `sudo apt install --no-install-recomme
 (`cmd_verify` calls `need_root`; a non-sudo `verify` cannot work).
 **Never `dpkg -i`** — no dependency resolution.
 
-To install on an appliance that is **not** the build host, move the single
-`dist/<name>.tar.gz` bundle (the `.deb`, its preflight guard, `SHA256SUMS` and a
+To install on **another compatible, validated appliance** — not merely any box
+that is not the build host; see the engine-compatibility note below — move the
+single `dist/<name>.tar.gz` bundle (the `.deb`, its preflight guard, `SHA256SUMS` and a
 generated `INSTALL.txt`) and follow the `INSTALL.txt` inside it. The `.deb` and
 its guard are useless apart — the guard refuses any other `.deb` by embedded
 SHA-256 — so they ship as one file. Assembled by `packaging/lib/gen_bundle.sh`
@@ -130,14 +131,60 @@ the stable public command; it exports `DENSO_DATA_DIR`) · `/usr/bin/denso-setup
 **Verified on hardware** (192.168.1.15, 2026-07-17): build → preflight → install
 → configure → `verify: PASS` → `apt remove` keeps data → upgrade keeps data →
 `apt purge` removes it. Bundle + reproducibility gated natively 2026-07-21
-(packaging 130/130, repro 19/19, ctest 485/485). **NOT verified:** `denso-setup
-configure --autostart --enable-autologin` and `unconfigure`'s GDM restore — the
-XDG/GDM path has never run on a real box; and an actual `apt install` of a
-*bundled* `.deb` on a second appliance, since only one Jetson exists (the bundle's
-shape, checksums and extraction are proven, the install-from-bundle is not). Do
-not represent either as working.
+(packaging 130/130, repro 19/19, ctest 485/485).
+
+**Second-appliance bundle install verified** (192.168.1.81, 2026-07-21) — the
+first time the `.deb` was ever installed on a box that did not build it. Exact
+sequence that passed: transfer + `tar xzf` → `sha256sum -c SHA256SUMS` (both
+entries OK) → `sudo ./preflight-denso-<ver>.sh ./<deb>` → **PASS** → `sudo apt
+install --no-install-recommends ./<deb>` (resolved and pulled 14 Qt packages,
+`0 upgraded, 15 newly installed`) → `sudo denso-setup configure --user modela`
+(seeded `digitv3.engine`) → `sudo denso-setup verify` → **`verify: PASS`**. That
+proves bundle transport, checksum, guard, dependency resolution, seeding and
+engine *deserialization* on a non-build box. It does **not** prove application
+inference correctness there — see the engine-compatibility note below.
+
+**NOT verified:** `denso-setup configure --autostart --enable-autologin` and
+`unconfigure`'s GDM restore — the XDG/GDM path has never run on a real box. Do
+not represent it as working.
+
+**Engine compatibility — the bundle is NOT universal.** The `.deb` ships a
+prebuilt TensorRT plan. A plan is a compiled artifact tied to the platform it was
+built for, so a bundle is qualified only for the **supported deployment
+configuration**: Jetson Orin Nano, L4T R36.5.0, TensorRT 10.3, CUDA 12.6,
+`sm_87`. Denso ships on that one hardware model; anything else is out of support,
+and matching `sm_87` alone is necessary, not sufficient. The platform contract in
+`build_package.sh` and the preflight check versions, **not** the device SKU.
+
+- **The `[trt] Using an engine plan file across different models of devices`
+  warning is NOT a portability signal — do not chase it.** It appears on the
+  build host itself. Measured 2026-07-21 on `.15`, loading the very engine `.15`
+  built: the app's `--check` prints it, and so does TensorRT's own
+  `trtexec --loadEngine`, which then runs the plan at **140 qps, 7.48 ms mean,
+  `PASSED`**. So it cannot distinguish "same device as the builder" from
+  "different device", and it says nothing about any particular target. The
+  specific internal device-property comparison that trips it is **unidentified**;
+  treat it as a benign platform artifact of TRT 10.3 on Orin. It becomes
+  actionable only if it arrives *with* a deserialization failure, CUDA errors,
+  wrong results, or a changed platform baseline.
+- **Deserializing is not inferring.** `--check` constructs the engine and
+  validates bindings, shapes and class names but never calls `infer()`
+  (`run_headless.cpp`); `EngineRegistry::warm_up()` is the first real inference,
+  and it discards the result. So `verify: PASS` proves the plan *loads*, not that
+  it *reads digits correctly*. On a newly commissioned appliance, run one
+  known-answer inference through the app before trusting it in production.
 
 Facts that will bite whoever touches this:
+- **Never replace `/opt/denso/data/models/<stem>.engine` alone.** `verify`
+  compares the data-dir pair against the package-installed pair
+  (`seed_decision_pair` in `packaging/lib/policy.sh` hashes engine *and*
+  sidecar), so overwriting just the engine makes the appliance run a model the
+  package did not approve — `verify` then WARNs "DIFFERS from the packaged one"
+  while still able to end `PASS`, and the stale sidecar keeps the old class
+  order, which can make readings silently *wrong* rather than failing. If a
+  target-built engine is ever needed, rebuild the whole consistent set
+  (engine + sidecar + `models.approved` + `.deb` + guard + bundle), or adopt the
+  packaged one with `sudo denso-setup replace-model <stem>`.
 - **Dependencies are DERIVED**, not hand-written: `packaging/debian/shlibs.local`
   supplies the metadata NVIDIA omits (`libcudart`, `libopencv` ship no
   `.shlibs`/`.symbols`), after which `dpkg-shlibdeps` exits 0 and emits the full

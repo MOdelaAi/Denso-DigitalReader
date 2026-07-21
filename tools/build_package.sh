@@ -439,4 +439,14 @@ echo ">> checksums: $OUT.sha256"
 echo ">> to install on ANOTHER appliance, move the one bundle and follow the"
 echo "   INSTALL.txt inside it (it carries the .deb, its guard and SHA256SUMS):"
 echo "     $BUNDLE_OUT"
-echo "     scp $BUNDLE_OUT <user>@<host>:~/  &&  tar xzf ${BUNDLE}.tar.gz  &&  cd $BUNDLE"
+# Printed as TWO blocks, deliberately. These used to be one `scp ... && tar ...
+# && cd ...` line, which cannot work: only the scp runs here, so the tar ran on
+# the BUILD box, in the repo root, where the bundle is not (it is under dist/) —
+# an operator following the hint verbatim got "Cannot open: No such file or
+# directory" right after a successful transfer, which reads like the copy failed.
+echo "   here:"
+echo "     scp $BUNDLE_OUT <user>@<host>:~/"
+echo "   then ON THAT APPLIANCE:"
+echo "     ssh <user>@<host>"
+echo "     tar xzf ${BUNDLE}.tar.gz && cd $BUNDLE && sha256sum -c SHA256SUMS"
+echo "     cat INSTALL.txt        # then follow it"

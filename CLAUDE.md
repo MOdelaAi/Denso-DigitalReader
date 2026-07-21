@@ -185,8 +185,10 @@ warm-up worker (`EngineRegistry::warm_up()`), never a capture thread. `model_syn
 catalogs `models/*.onnx` (class names from ONNX metadata).
 
 **Linux / Jetson Orin Nano (real target) — native TensorRT (`TrtEngine`, links
-`nvinfer` + `CUDA::cudart`):** loads a **prebuilt `.engine` ONLY** — the operator
-builds it on-device with `trtexec` for TRT 10.3 / `sm_87`. The app **never builds
+`nvinfer` + `CUDA::cudart`):** loads a **prebuilt `.engine` ONLY** — built with
+`trtexec` on the aarch64 build host for TRT 10.3 / `sm_87` and then **shipped
+inside the `.deb`** (not rebuilt per appliance), so it is qualified only for the
+supported platform; see *Engine compatibility* in `AGENTS.md`. The app **never builds
 one at runtime and has NO fallback**: a missing/incompatible/invalid engine
 **fails loud** at startup (throwing `TrtEngine` ctor → `WarmupWorker` catches →
 `app.exit(1)`). Class names come from a `<engine>.names.json` **sidecar**
