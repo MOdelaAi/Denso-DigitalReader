@@ -10,6 +10,10 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # The standalone preflight-denso.sh emitted below is the same generator the
 # test harness calls, so the two never drift apart — see gen_preflight.sh.
 . "$HERE/packaging/lib/gen_preflight.sh"
+# Same split, same reason: the transport bundle is assembled by a sourceable
+# emitter so tests/packaging/run.sh can prove its shape on the dev box, which
+# can never run this script (aarch64/JetPack contract below).
+. "$HERE/packaging/lib/gen_bundle.sh"
 
 MODELS=()
 ALLOW_DIRTY=0
@@ -296,6 +300,10 @@ mkdir -p dist
 OUT="dist/denso-digitalreader_${VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$OUT" >/dev/null
 sha256sum "$OUT" > "$OUT.sha256"
+# A `>` redirect takes the builder's umask (002 on the Jetson -> 0664). No
+# emitted integrity artifact should depend on ambient umask; the bundle's
+# SHA256SUMS is pinned for the same reason.
+chmod 0644 "$OUT.sha256"
 DEB_SHA256="$(cut -d' ' -f1 "$OUT.sha256")"
 
 # ── PREFLIGHT GUARD, standalone: `denso-setup preflight` cannot protect a
@@ -312,6 +320,27 @@ DEB_SHA256="$(cut -d' ' -f1 "$OUT.sha256")"
 PREFLIGHT_OUT="dist/preflight-denso-${VERSION}.sh"
 emit_preflight_script "packaging/lib/policy.sh" "$PREFLIGHT_OUT" "$DEB_SHA256"
 
+# ── TRANSPORT BUNDLE: the .deb + its guard + checksums + instructions as ONE
+# file, because the .deb and the guard are useless apart (the guard refuses any
+# other .deb by embedded SHA-256) and the appliances that are NOT this build
+# host each need the whole set moved to them.
+#
+# The loose files above are NOT superseded: the FIRST appliance is this build
+# box itself, and its operator installs straight out of dist/ without ever
+# unpacking an archive. Two audiences, two artifacts — see README "Deploy".
+#
+# A dirty build gets the .deb's own hash appended. Every `--allow-dirty` build
+# at one commit produces the IDENTICAL version string, so two materially
+# different archives would share a filename and a top-level directory name —
+# one silently overwriting the other in dist/, or being unpacked over it. The
+# .deb's version field is deliberately left alone (it is a dpkg ordering key);
+# only the transport name disambiguates. Clean builds keep the plain name:
+# there the version already identifies the commit.
+BUNDLE="denso-digitalreader_${VERSION}_${ARCH}"
+[ -z "$DIRTY" ] || BUNDLE="${BUNDLE}.$(printf %.12s "$DEB_SHA256")"
+BUNDLE_OUT="dist/${BUNDLE}.tar.gz"
+emit_bundle "$OUT" "$PREFLIGHT_OUT" "$BUNDLE" "$BUNDLE_OUT"
+
 echo
 echo ">> built $OUT"
 dpkg-deb --info "$OUT" | sed -n '1,12p'
@@ -319,8 +348,12 @@ dpkg-deb --info "$OUT" | sed -n '1,12p'
 # with preflight as an optional extra -- invites the operator to skip the
 # protected-stack guard entirely, which is the same as not having one. The
 # preflight is bound to THIS .deb by its SHA-256 and refuses any other.
-echo ">> install with (both steps, in this order):"
+echo ">> install ON THIS BOX with (both steps, in this order):"
 echo "     sudo ./$PREFLIGHT_OUT $OUT"
 echo "     sudo apt install --no-install-recommends ./$OUT"
 echo ">>   (never 'dpkg -i' — it does not resolve dependencies)"
 echo ">> checksums: $OUT.sha256"
+echo ">> to install on ANOTHER appliance, move the one bundle and follow the"
+echo "   INSTALL.txt inside it (it carries the .deb, its guard and SHA256SUMS):"
+echo "     $BUNDLE_OUT"
+echo "     scp $BUNDLE_OUT <user>@<host>:~/  &&  tar xzf ${BUNDLE}.tar.gz  &&  cd $BUNDLE"

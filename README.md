@@ -148,8 +148,12 @@ aarch64 Jetson** — there is no cross-toolchain, and the engines are `sm_87`/TR
 tools/build_package.sh --model models/digitv3.engine     # -> dist/
 ```
 
-Then, on the target (the preflight is bound to that exact `.deb` by SHA-256 and
-guards the JetPack stack — run it first):
+That writes four artifacts to `dist/`: the `.deb`, its checksum, a
+`preflight-denso-<version>.sh` guard, and a `<name>.tar.gz` transport bundle.
+
+**On the build box itself** (which is the first appliance), install from the
+loose files. The preflight is bound to that exact `.deb` by SHA-256 and guards
+the JetPack stack — run it first:
 
 ```sh
 sudo ./dist/preflight-denso-<version>.sh ./dist/denso-digitalreader_<version>_arm64.deb
@@ -157,6 +161,27 @@ sudo apt install --no-install-recommends ./dist/denso-digitalreader_<version>_ar
 sudo denso-setup configure --user <username>
 sudo denso-setup verify                                   # expect: verify: PASS
 ```
+
+**On any other appliance**, move the one bundle instead — it carries the `.deb`,
+its guard, a `SHA256SUMS` and a generated `INSTALL.txt` with these same steps.
+The `.deb` and its guard are useless apart (the guard refuses any other `.deb`),
+so they travel as one file rather than as a runbook instruction to remember:
+
+```sh
+scp dist/<bundle>.tar.gz <user>@<host>:~/
+# then on the appliance:
+tar xzf <bundle>.tar.gz
+cd <bundle>
+sha256sum -c SHA256SUMS
+cat INSTALL.txt
+```
+
+`<bundle>` is `denso-digitalreader_<version>_arm64` for a clean build. A
+`--allow-dirty` build appends the `.deb`'s hash
+(`..._arm64.<12-hex>`), because every dirty build at one commit produces the
+identical version string — without the suffix two materially different archives
+would share a name and silently overwrite each other. The exact name is printed
+at the end of the build; `ls dist/*.tar.gz` also has it.
 
 Never `dpkg -i` — it does not resolve dependencies. `apt remove` keeps
 `/opt/denso/data` (database, engines); `apt purge` removes it.

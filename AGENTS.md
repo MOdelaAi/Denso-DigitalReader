@@ -85,8 +85,17 @@ Built **on an aarch64 Jetson** (no cross-toolchain; engines are `sm_87`/TRT 10.3
 pinned). `tools/build_package.sh --model models/digitv3.engine` → `dist/`.
 Install: `sudo ./dist/preflight-denso-<ver>.sh <deb>` (bound to that exact `.deb`
 by SHA-256; guards the JetPack stack) → `sudo apt install --no-install-recommends
-./dist/<deb>` → `sudo denso-setup configure --user <u>` → `denso-setup verify`.
+./dist/<deb>` → `sudo denso-setup configure --user <u>` → `sudo denso-setup verify`
+(`cmd_verify` calls `need_root`; a non-sudo `verify` cannot work).
 **Never `dpkg -i`** — no dependency resolution.
+
+To install on an appliance that is **not** the build host, move the single
+`dist/<name>.tar.gz` bundle (the `.deb`, its preflight guard, `SHA256SUMS` and a
+generated `INSTALL.txt`) and follow the `INSTALL.txt` inside it. The `.deb` and
+its guard are useless apart — the guard refuses any other `.deb` by embedded
+SHA-256 — so they ship as one file. Assembled by `packaging/lib/gen_bundle.sh`
+(a sourceable emitter, like `gen_preflight.sh`, so `tests/packaging/run.sh` can
+prove its shape off-Jetson).
 
 Layout: `/opt/denso/bin/denso` (package-owned) · `/opt/denso/data` (**operator**-
 owned: db, log, models, lock) · `/usr/bin/denso-digitalreader` (the launcher —

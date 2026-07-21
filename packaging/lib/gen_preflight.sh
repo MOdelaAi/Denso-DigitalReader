@@ -90,6 +90,11 @@ fi
 exit 1
 DRIVER
     } > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod +x "$tmp" || { rm -f "$tmp"; return 1; }
+    # 0755, not `chmod +x`: mktemp creates 0600, so `+x` yielded 0711 — the
+    # loose dist/ guard was not readable by anyone but its owner, and disagreed
+    # with the 0755 copy inside the transport bundle. It runs under sudo either
+    # way, so this was cosmetic, but two modes for one artifact is a question
+    # someone eventually has to answer.
+    chmod 0755 "$tmp" || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$out" || { rm -f "$tmp"; return 1; }
 )
