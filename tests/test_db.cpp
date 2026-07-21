@@ -33,6 +33,12 @@ int user_version(const QSqlDatabase& db) {
     return q.value(0).toInt();
 }
 
+void set_user_version(const QSqlDatabase& db, int v) {
+    // PRAGMA can't be parameterized; v is a trusted test constant.
+    QSqlQuery q(db);
+    REQUIRE(q.exec(QStringLiteral("PRAGMA user_version = %1").arg(v)));
+}
+
 Db migrated() {
     auto db = Db::open_in_memory();
     REQUIRE(db.has_value());
@@ -76,6 +82,39 @@ TEST_CASE("migration v13 creates model_migration_receipt", "[db]") {
     const Db db = migrated();
     REQUIRE(table_count(db.handle(), QStringLiteral("model_migration_receipt")) == 1);
     REQUIRE(user_version(db.handle()) == 13);
+}
+
+TEST_CASE("read_user_version reports the migrated schema version", "[db][schema]") {
+    const Db db = migrated();
+    const auto v = denso::db::read_user_version(db.handle());
+    REQUIRE(v.has_value());
+    REQUIRE(*v == denso::db::supported_schema_version());
+}
+
+TEST_CASE("run_migrations refuses a future schema without mutating it", "[db][schema]") {
+    // A DB written by a NEWER app build must never be migrated or silently
+    // downgraded by an older one. run_migrations must refuse and leave both the
+    // schema version AND the (absent) tables untouched.
+    auto db = Db::open_in_memory();
+    REQUIRE(db.has_value());
+    const int future = denso::db::supported_schema_version() + 5;
+    set_user_version(db->handle(), future);
+
+    REQUIRE_FALSE(run_migrations(db->handle()));                 // refused
+    REQUIRE(user_version(db->handle()) == future);              // NOT downgraded
+    // Proof no migration ran: the very first migration's table is still absent.
+    REQUIRE(table_count(db->handle(), QStringLiteral("settings")) == 0);
+}
+
+TEST_CASE("run_migrations still migrates an older schema normally", "[db][schema]") {
+    // Regression guard for the future-schema check: a fresh (version 0) DB is
+    // OLDER than supported, so it must migrate all the way and stamp the version.
+    auto db = Db::open_in_memory();
+    REQUIRE(db.has_value());
+    REQUIRE(user_version(db->handle()) == 0);
+    REQUIRE(run_migrations(db->handle()));
+    REQUIRE(user_version(db->handle()) == denso::db::supported_schema_version());
+    REQUIRE(table_count(db->handle(), QStringLiteral("settings")) == 1);
 }
 
 TEST_CASE("open enables WAL mode") {

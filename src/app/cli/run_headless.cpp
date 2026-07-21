@@ -4,6 +4,7 @@
 #include "db/db.h"
 #include "detection/engine_registry.h"   // denso::ui::BackendEngine
 #include "detection/repo.h"
+#include "health/integrity.h"
 #include "instance/single_instance.h"
 #include "paths/paths.h"
 
@@ -190,6 +191,21 @@ int run_migrate_model(const denso::cli::Command& cmd) {
 }
 
 int run_check(const QStringList& extra_engines) {
+    // DB-stage readiness preflight, shared with GUI boot: a primary database
+    // written by a NEWER build (SchemaNewer) or an unreadable one (DbUnopenable)
+    // is a configuration fault no restart fixes. Read-only — never mutates or
+    // migrates (the --check contract). Same classifier and same EX_CONFIG exit
+    // code as boot (health::evaluate_db_schema / exit_code_for), so both agree on
+    // a future-schema appliance. Runs first: nothing below is meaningful once the
+    // DB itself is incompatible.
+    if (const auto v = denso::health::evaluate_db_schema(denso::paths::db_file());
+        v.status == denso::health::Readiness::Blocked) {
+        for (const auto& b : v.blockers) {
+            std::fprintf(stderr, "check: BLOCKED: %s\n", qPrintable(b.detail));
+        }
+        return denso::health::exit_code_for(v.status);
+    }
+
     if (!data_dir_writable()) return 1;
 
     const auto configured = configured_models();

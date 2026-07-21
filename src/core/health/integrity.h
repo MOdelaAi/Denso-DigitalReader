@@ -46,6 +46,16 @@ struct IntegrityVerdict {
     std::vector<ZoneIssue>     issues;
 };
 
+/// DB-stage readiness, evaluated WITHOUT mutating the database (opens read-only).
+/// Shared by GUI boot (main.cpp) and --check (run_headless.cpp) so both classify
+/// a future-schema database IDENTICALLY and return the same EX_CONFIG exit code.
+/// A missing file is Ready (fresh install — nothing to migrate); an unreadable
+/// file is Blocked{DbUnopenable}; a user_version greater than
+/// db::supported_schema_version() is Blocked{SchemaNewer}. Run this BEFORE
+/// run_migrations() on the primary DB — it is the producer of the SchemaNewer /
+/// DbUnopenable global blockers.
+IntegrityVerdict evaluate_db_schema(const QString& db_path);
+
 /// Evaluate the installation. `db` must already be open and migrated.
 IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& models_dir);
 

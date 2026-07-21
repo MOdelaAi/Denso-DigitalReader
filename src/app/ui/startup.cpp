@@ -2,6 +2,8 @@
 
 #include "detection/repo.h"
 #include "detection/engine_registry.h"
+#include "health/integrity.h"
+#include "health/status_file.h"
 #include "paths/paths.h"
 #include "ui/mainwindow.h"
 #include "ui/startup_mode.h"
@@ -11,6 +13,7 @@
 
 #include <QApplication>
 #include <QDebug>
+#include <QDir>
 #include <QThread>
 
 #include <memory>
@@ -48,7 +51,10 @@ int launch_cold_with_splash(QApplication& app, QSqlDatabase db,
     // (clear message, non-zero exit) instead of std::terminate on the worker.
     QObject::connect(worker, &WarmupWorker::failed, &app, [&app](const QString& err) {
         qCritical().noquote() << "[fatal] model warm-up failed:" << err;
-        app.exit(1);
+        // EX_CONFIG, not 1: a missing/invalid engine is a configuration fault no
+        // restart fixes (engine-only, no fallback), so systemd must not
+        // restart-loop it (spec §2.2).
+        app.exit(health::exit_code_for(health::Readiness::Blocked));
     });
     QObject::connect(worker, &WarmupWorker::finished, &app,
                      [&window, &splash, thread, worker, db, state, engines]() {
@@ -97,7 +103,10 @@ int launch_warm_ui_first(QApplication& app, QSqlDatabase db,
     // Engine-only, no fallback: a fatal warm-up failure aborts startup cleanly.
     QObject::connect(&warmup, &WarmupState::failed, &app, [&app](const QString& err) {
         qCritical().noquote() << "[fatal] model warm-up failed:" << err;
-        app.exit(1);
+        // EX_CONFIG, not 1: a missing/invalid engine is a configuration fault no
+        // restart fixes (engine-only, no fallback), so systemd must not
+        // restart-loop it (spec §2.2).
+        app.exit(health::exit_code_for(health::Readiness::Blocked));
     });
 
     warmup.start();
@@ -108,6 +117,26 @@ int launch_warm_ui_first(QApplication& app, QSqlDatabase db,
 
 int launch(QApplication& app, QSqlDatabase db,
            std::shared_ptr<settings::Settings> state) {
+    // Boot readiness gate. A WHOLE-MACHINE blocker (models dir unreadable, a
+    // corrupt manifest, a failed catalog query) is a configuration fault no
+    // restart fixes: fail with EX_CONFIG BEFORE building the window or warming
+    // engines, leaving an inspectable status.json. Per-zone / Degraded issues do
+    // NOT stop boot — CameraGrid installs those as inhibit causes (spec §8), and
+    // it rewrites status.json with the live causes once the grid is up. The
+    // DB-stage blockers (schema newer / unopenable / migration failed) were
+    // already handled in main.cpp before the DB was opened.
+    const auto verdict = denso::health::evaluate_integrity(db, denso::paths::models_dir());
+    if (verdict.status == denso::health::Readiness::Blocked) {
+        const QString status_path =
+            QDir(denso::paths::data_dir()).filePath(QStringLiteral("status.json"));
+        denso::health::write_status_file(status_path, verdict, {}, {}, {});
+        for (const auto& b : verdict.blockers) {
+            qCritical().noquote() << "[startup] BLOCKED:"
+                                  << denso::health::reason_code(b.kind) << "—" << b.detail;
+        }
+        return denso::health::exit_code_for(verdict.status);
+    }
+
     const std::string models_dir = denso::paths::models_dir().toStdString();
     const std::string cache_dir = denso::paths::trt_cache_dir().toStdString();
     // The models configured cameras actually need — warm_up fails loud if any is

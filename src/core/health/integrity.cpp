@@ -1,5 +1,6 @@
 #include "health/integrity.h"
 
+#include "db/db.h"
 #include "models/manifest.h"
 
 #include <QDir>
@@ -7,6 +8,7 @@
 #include <QFileInfo>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -49,6 +51,43 @@ int exit_code_for(Readiness r) {
         case Readiness::Blocked:  return 78;   // EX_CONFIG
     }
     return 78;
+}
+
+IntegrityVerdict evaluate_db_schema(const QString& db_path) {
+    IntegrityVerdict v;
+
+    // A missing DB is a fresh install: there is nothing to migrate and nothing
+    // is newer. Classifying must NOT create it (mirrors the --check contract).
+    if (!QFileInfo::exists(db_path)) {
+        return v;  // Ready
+    }
+
+    // Read-only so this preflight never mutates the primary database — the same
+    // call is safe for --check and for boot BEFORE its read-write open+migrate.
+    auto ro = denso::db::Db::open_read_only(db_path);
+    if (!ro) {
+        v.blockers.push_back({GlobalBlocker::Kind::DbUnopenable, db_path});
+        v.status = Readiness::Blocked;
+        return v;
+    }
+    const std::optional<int> ver = denso::db::read_user_version(ro->handle());
+    if (!ver) {
+        // The file exists and opened but its schema version is unreadable — it is
+        // not a usable SQLite database. A no-restart-fixes configuration fault.
+        v.blockers.push_back({GlobalBlocker::Kind::DbUnopenable,
+            QStringLiteral("cannot read schema version: %1").arg(db_path)});
+        v.status = Readiness::Blocked;
+        return v;
+    }
+    const int supported = denso::db::supported_schema_version();
+    if (*ver > supported) {
+        v.blockers.push_back({GlobalBlocker::Kind::SchemaNewer,
+            QStringLiteral("database schema v%1 is newer than supported v%2 (%3)")
+                .arg(*ver).arg(supported).arg(db_path)});
+        v.status = Readiness::Blocked;
+        return v;
+    }
+    return v;  // Ready — an older-or-equal schema migrates normally
 }
 
 IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& models_dir) {

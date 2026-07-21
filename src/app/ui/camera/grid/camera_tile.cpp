@@ -1,6 +1,7 @@
 #include "ui/camera/grid/camera_tile.h"
 
 #include "camera/camera_stream.h"  // Status enum
+#include "health/zone_health.h"    // ZoneCause
 #include "ui/camera/shared/roi_geometry.h"   // to_widget
 
 #include <QColor>
@@ -37,6 +38,24 @@ StatusLook look_for(int status) {
             return {QColor(250, 204, 21), QStringLiteral("Connecting…")};  // gold
     }
 }
+
+// The single reason to show for an inhibited camera. Multiple causes can be set;
+// show the most operator-actionable one. Empty when not inhibited.
+QString inhibit_banner(uint32_t causes) {
+    using health::ZoneCause;
+    auto has = [causes](ZoneCause c) {
+        return (causes & static_cast<uint32_t>(c)) != 0;
+    };
+    if (has(ZoneCause::AreasNeedReview))
+        return QStringLiteral("⚠ Areas need review — reporting paused");
+    if (has(ZoneCause::CaptureOffline))
+        return QStringLiteral("⚠ Camera offline — zones inhibited");
+    if (has(ZoneCause::InferenceWorkerFailed))
+        return QStringLiteral("⚠ Detection stopped — zones inhibited");
+    if (has(ZoneCause::ModelUnavailable) || has(ZoneCause::ModelInvalid))
+        return QStringLiteral("⚠ Model unavailable — zones inhibited");
+    return QString();
+}
 }
 
 CameraTile::CameraTile(const QString& name, QWidget* parent)
@@ -57,8 +76,8 @@ void CameraTile::set_frame(const QImage& frame) {
     update();
 }
 
-void CameraTile::set_review_paused(bool on) {
-    review_ = on;
+void CameraTile::set_inhibited(uint32_t causes) {
+    causes_ = causes;
     update();
 }
 
@@ -110,15 +129,15 @@ void CameraTile::paintEvent(QPaintEvent*) {
         p.drawText(rect(), Qt::AlignCenter, QStringLiteral("📷"));
     }
 
-    // ROI-quarantine banner across the bottom — persistent while areas await
-    // re-verification after a source edit (zone reporting is paused meanwhile).
-    if (review_) {
+    // Inhibit banner across the bottom — persistent while this camera's zones are
+    // suppressed (areas quarantined, camera offline, detection stopped, …).
+    const QString banner = inhibit_banner(causes_);
+    if (!banner.isEmpty()) {
         const int bh = 26;
         const QRectF bar(0, height() - bh, width(), bh);
         p.fillRect(bar, QColor(180, 83, 9, 220));  // amber
         p.setPen(QColor(255, 255, 255));
-        p.drawText(bar, Qt::AlignCenter,
-                   QStringLiteral("⚠ Areas need review — reporting paused"));
+        p.drawText(bar, Qt::AlignCenter, banner);
     }
 
     // Overlays: name (top-left) + status dot & label (top-right). While preparing
