@@ -149,3 +149,44 @@ Change any of these only with the owner's agreement.
 
 The repo convention is to have Codex review each completed logical unit — every task
 above was reviewed that way, and it caught real defects at every single one.
+
+## 8. Verification — 2026-07-21 (push checkpoint)
+
+Branch pushed to `origin/feature/zone-readiness-inhibition` @ `2cc0b23` as a checkpoint
+(NOT merged). Windows suite 485 pass + 1 known symlink SKIP; native Jetson suite 485/485;
+Codex APPROVE on the integration.
+
+**GUI boot smoke — Jetson, offscreen QPA (real `denso` binary through main.cpp →
+startup.cpp launch() → QApplication → window/event loop), isolated DENSO_DATA_DIR:**
+- normal migrated v13 DB (no cameras) → boots and STAYS up (event loop alive @7s). PASS.
+- future-schema DB (user_version=14) → exits **78**; `status.json` reason `schema_newer`;
+  log records `BLOCKED schema_newer`. PASS. status.json matches the CLI classifier.
+- corrupt DB (torn page 2) → exits **78**; `status.json` reason `db_unopenable`
+  ("database failed integrity check (quick_check)"). PASS.
+
+**RESIDUAL (human, via AnyDesk):** on-monitor visual confirmation was NOT done — the dev
+Jetson sits at the GDM greeter (autologin unconfigured), and offscreen validates boot
+LOGIC/exit/status.json, not physical pixels. Also the production-DB-on-the-real-display
+boot + restore is a human step (autonomous SSH boot would conflict with the live
+single-instance + trigger network reassert).
+
+## 9. OPEN FINDINGS discovered during verification — resolve BEFORE merge
+
+1. **`--check` exit-code contract is contradictory (blocking).** `exit_code_for` defines
+   Degraded=10, and §7.4 above says the Jetson `--check` "must exit 10 (degraded,
+   unmanifested engines)." BUT the implemented `run_check` returns only 0/1/78 (no 10 —
+   evaluate_integrity was scoped out of --check), AND `packaging/denso-setup:319` runs
+   `if "$DENSO" --check; then ok; else FAIL`, i.e. treats non-zero (incl. 10) as failure.
+   So exit 10 from --check would ABORT denso-setup verify on the unmanifested production
+   appliance — the opposite of the compatibility guarantee. Exit 10 is currently dead
+   (boot runs on Degraded rather than exiting; --check is its only caller). Decision
+   needed: (A/recommended) --check returns 0 for Ready+Degraded (serviceable), 78 only
+   for Blocked, 1 for hard errors, and REPORTS degraded issues on stdout — then correct
+   §7.4's "must exit 10"; or (B) --check returns 10 and denso-setup is updated to accept
+   0 and 10 (a Slice-2 packaging change).
+2. **No visible on-screen error on a Blocked boot (UX).** The Blocked boot path logs +
+   writes status.json + exits with NO GUI dialog/screen, so the operator at the kiosk
+   sees a blank desktop, not an error. The §3-GUI-smoke criterion "the visible startup
+   error agrees with the CLI classifier" has no on-screen error to compare. Decision:
+   accept (headless/remote-managed; status.json + log are the channel, spec §7) or add a
+   brief startup error screen (scope add).
