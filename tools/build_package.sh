@@ -10,6 +10,10 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # The standalone preflight-denso.sh emitted below is the same generator the
 # test harness calls, so the two never drift apart — see gen_preflight.sh.
 . "$HERE/packaging/lib/gen_preflight.sh"
+# Same split, same reason: the transport bundle is assembled by a sourceable
+# emitter so tests/packaging/run.sh can prove its shape on the dev box, which
+# can never run this script (aarch64/JetPack contract below).
+. "$HERE/packaging/lib/gen_bundle.sh"
 
 MODELS=()
 ALLOW_DIRTY=0
@@ -87,6 +91,50 @@ COUNT="$(git rev-list --count HEAD)"
 VERSION="${APP_VERSION}+r${COUNT}.g${SHA}${DIRTY}"
 version_ok "$VERSION" || { echo "computed version is not a safe path component: $VERSION" >&2; exit 1; }
 echo ">> version: $VERSION"
+
+# ── REPRODUCIBILITY. A clean build's version is r<count>.g<sha> — a claim that
+# the artifact is identified by its commit. That claim was FALSE: the MANIFEST
+# embedded `date -Is` and dpkg-deb stamped the current time into the archive,
+# so rebuilding one commit produced different bytes under the SAME filename,
+# silently overwriting the earlier artifact. Anything named after a commit must
+# be a function of that commit alone.
+#
+# The commit timestamp IS the source, and for a clean build it is the only
+# permitted value. Honouring an arbitrary externally-set SOURCE_DATE_EPOCH — the
+# usual reproducible-builds convention — would reintroduce the exact defect this
+# closes by another door: two clean builds of one commit with different epochs
+# produce different bytes under the SAME r<count>.g<sha> filename. The name
+# carries no content hash, so it can only be honest if the epoch is a function
+# of the commit. A matching override is accepted (it is a no-op, and lets a
+# caller pin the value explicitly); a differing one is refused, loudly, rather
+# than silently ignored.
+#
+# A DIRTY build may override freely: its bundle name carries the .deb's content
+# hash, so a different epoch yields a different name and nothing is masked.
+COMMIT_EPOCH="$(git log -1 --format=%ct HEAD)"
+if [ -n "${SOURCE_DATE_EPOCH:-}" ] && [ "$SOURCE_DATE_EPOCH" != "$COMMIT_EPOCH" ]; then
+    if [ -z "$DIRTY" ]; then
+        echo "refusing: SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH differs from the commit timestamp $COMMIT_EPOCH." >&2
+        echo "  A clean build is named r<count>.g<sha> with no content hash, so its bytes must be a" >&2
+        echo "  function of the commit alone. Unset it, or set it to $COMMIT_EPOCH." >&2
+        exit 1
+    fi
+    echo ">> NOTE: SOURCE_DATE_EPOCH overridden on a dirty build (name carries the content hash)"
+else
+    SOURCE_DATE_EPOCH="$COMMIT_EPOCH"
+fi
+case "$SOURCE_DATE_EPOCH" in
+    ''|*[!0-9]*) echo "SOURCE_DATE_EPOCH is not a positive integer: '$SOURCE_DATE_EPOCH'" >&2; exit 1 ;;
+esac
+# Exported because dpkg-deb reads it from the ENVIRONMENT: it stamps the ar
+# container and clamps every tar entry's mtime to it, which is what makes the
+# .deb itself byte-stable.
+export SOURCE_DATE_EPOCH
+echo ">> source date: $SOURCE_DATE_EPOCH ($(date -u -d "@$SOURCE_DATE_EPOCH" -Is))"
+# A DIRTY tree is not described by its commit, so its bytes are not a function
+# of SOURCE_DATE_EPOCH either — the uncommitted content is what varies. Dirty
+# builds stay disambiguated by the .deb-hash suffix on the bundle name (below);
+# reproducibility is a CLEAN-build guarantee only, and the docs say so.
 
 # ── models: explicit, and hash-checked against the tracked approval manifest.
 # The PAIR is approved, never the engine alone: TrtEngine's ctor reads
@@ -259,7 +307,13 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$
     echo "version: $VERSION"
     echo "arch: $ARCH"
     echo "source-sha: $SHA${DIRTY:+ (DIRTY TREE)}"
-    echo "built: $(date -Is)"
+    # NOT `date -Is`. A wall-clock build time is the single field that would
+    # make every rebuild of one commit differ, defeating the whole point of
+    # naming the artifact after that commit. Named `source-date`, not `built`,
+    # so it does not claim to be something it is not: it is the COMMIT's
+    # timestamp, and for a dirty tree it describes the commit the tree is
+    # based on, not when anyone pressed build.
+    echo "source-date: $(date -u -d "@$SOURCE_DATE_EPOCH" -Is) (commit time; this file is reproducible, so it is NOT the wall-clock build time)"
     echo "builder: $(uname -sr) $(uname -m)"
     echo "l4t: $(sed -n 's/^# R\([0-9]*\).*REVISION: \([0-9.]*\).*/\1.\2/p' /etc/nv_tegra_release 2>/dev/null | head -1)"
     echo "cmake: $(cmake --version | head -1)"
@@ -275,8 +329,17 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$
         echo "model-recipe: $stem $(awk -v s="$stem" '$1==s {$1="";$2="";$3="";print}' packaging/models.approved | sed 's/^  *//')"
     done
     echo "--- ldd report (diagnostic evidence, not a dependency source) ---"
-    ldd "$EXE"
+    # The load ADDRESSES are stripped. ldd prints where each library happened to
+    # be mapped in that one run, and ASLR randomizes it every time — so the raw
+    # output made the MANIFEST, and therefore the .deb, different on every build
+    # of identical sources. That defeats naming an artifact after its commit,
+    # and it is invisible: the file looks stable because only the hex changes.
+    # The mapping (soname -> resolved path) is the diagnostic value; the
+    # addresses carry none.
+    ldd "$EXE" | sed 's/ (0x[0-9a-f]*)$//'
 } > "$STAGE/opt/denso/MANIFEST"
+# Pinned, not umask-inherited: this shipped 0664 from the Jetson's default 002.
+chmod 0644 "$STAGE/opt/denso/MANIFEST"
 
 # md5sums: MUST be the LAST payload write before dpkg-deb --build. Generating
 # it any earlier (e.g. before MANIFEST is staged) means `dpkg -V` never
@@ -296,6 +359,10 @@ mkdir -p dist
 OUT="dist/denso-digitalreader_${VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$OUT" >/dev/null
 sha256sum "$OUT" > "$OUT.sha256"
+# A `>` redirect takes the builder's umask (002 on the Jetson -> 0664). No
+# emitted integrity artifact should depend on ambient umask; the bundle's
+# SHA256SUMS is pinned for the same reason.
+chmod 0644 "$OUT.sha256"
 DEB_SHA256="$(cut -d' ' -f1 "$OUT.sha256")"
 
 # ── PREFLIGHT GUARD, standalone: `denso-setup preflight` cannot protect a
@@ -312,6 +379,34 @@ DEB_SHA256="$(cut -d' ' -f1 "$OUT.sha256")"
 PREFLIGHT_OUT="dist/preflight-denso-${VERSION}.sh"
 emit_preflight_script "packaging/lib/policy.sh" "$PREFLIGHT_OUT" "$DEB_SHA256"
 
+# ── TRANSPORT BUNDLE: the .deb + its guard + checksums + instructions as ONE
+# file, because the .deb and the guard are useless apart (the guard refuses any
+# other .deb by embedded SHA-256) and the appliances that are NOT this build
+# host each need the whole set moved to them.
+#
+# The loose files above are NOT superseded: the FIRST appliance is this build
+# box itself, and its operator installs straight out of dist/ without ever
+# unpacking an archive. Two audiences, two artifacts — see README "Deploy".
+#
+# A dirty build gets the .deb's own hash appended. Every `--allow-dirty` build
+# at one commit produces the IDENTICAL version string, so two materially
+# different archives would share a filename and a top-level directory name —
+# one silently overwriting the other in dist/, or being unpacked over it. The
+# .deb's version field is deliberately left alone (it is a dpkg ordering key);
+# only the transport name disambiguates.
+#
+# Clean builds keep the plain name, and that is now TRUE rather than assumed:
+# with SOURCE_DATE_EPOCH pinned, one commit yields one set of bytes, so the
+# plain name cannot collide with a different artifact. Before that it could —
+# a rebuild silently replaced the earlier .deb under an identical filename.
+# The suffix is a CONTENT hash, so two dirty builds of an unchanged tree now
+# land on the same name with the same bytes (a harmless no-op), while any real
+# difference in the working tree produces a different name.
+BUNDLE="denso-digitalreader_${VERSION}_${ARCH}"
+[ -z "$DIRTY" ] || BUNDLE="${BUNDLE}.$(printf %.12s "$DEB_SHA256")"
+BUNDLE_OUT="dist/${BUNDLE}.tar.gz"
+emit_bundle "$OUT" "$PREFLIGHT_OUT" "$BUNDLE" "$BUNDLE_OUT" "$SOURCE_DATE_EPOCH"
+
 echo
 echo ">> built $OUT"
 dpkg-deb --info "$OUT" | sed -n '1,12p'
@@ -319,8 +414,12 @@ dpkg-deb --info "$OUT" | sed -n '1,12p'
 # with preflight as an optional extra -- invites the operator to skip the
 # protected-stack guard entirely, which is the same as not having one. The
 # preflight is bound to THIS .deb by its SHA-256 and refuses any other.
-echo ">> install with (both steps, in this order):"
+echo ">> install ON THIS BOX with (both steps, in this order):"
 echo "     sudo ./$PREFLIGHT_OUT $OUT"
 echo "     sudo apt install --no-install-recommends ./$OUT"
 echo ">>   (never 'dpkg -i' — it does not resolve dependencies)"
 echo ">> checksums: $OUT.sha256"
+echo ">> to install on ANOTHER appliance, move the one bundle and follow the"
+echo "   INSTALL.txt inside it (it carries the .deb, its guard and SHA256SUMS):"
+echo "     $BUNDLE_OUT"
+echo "     scp $BUNDLE_OUT <user>@<host>:~/  &&  tar xzf ${BUNDLE}.tar.gz  &&  cd $BUNDLE"

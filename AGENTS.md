@@ -85,8 +85,32 @@ Built **on an aarch64 Jetson** (no cross-toolchain; engines are `sm_87`/TRT 10.3
 pinned). `tools/build_package.sh --model models/digitv3.engine` → `dist/`.
 Install: `sudo ./dist/preflight-denso-<ver>.sh <deb>` (bound to that exact `.deb`
 by SHA-256; guards the JetPack stack) → `sudo apt install --no-install-recommends
-./dist/<deb>` → `sudo denso-setup configure --user <u>` → `denso-setup verify`.
+./dist/<deb>` → `sudo denso-setup configure --user <u>` → `sudo denso-setup verify`
+(`cmd_verify` calls `need_root`; a non-sudo `verify` cannot work).
 **Never `dpkg -i`** — no dependency resolution.
+
+To install on an appliance that is **not** the build host, move the single
+`dist/<name>.tar.gz` bundle (the `.deb`, its preflight guard, `SHA256SUMS` and a
+generated `INSTALL.txt`) and follow the `INSTALL.txt` inside it. The `.deb` and
+its guard are useless apart — the guard refuses any other `.deb` by embedded
+SHA-256 — so they ship as one file. Assembled by `packaging/lib/gen_bundle.sh`
+(a sourceable emitter, like `gen_preflight.sh`, so `tests/packaging/run.sh` can
+prove its shape off-Jetson).
+
+**Clean builds are byte-reproducible on one machine** — required, because the
+clean artifact name carries no content hash, so a non-reproducible rebuild
+silently replaced a different artifact under an identical filename. Sources of
+variance that had to be closed, all of them non-obvious: `SOURCE_DATE_EPOCH`
+(**must** equal the commit time on a clean build — a differing one is refused,
+since honouring it would give two clean builds of one commit different bytes
+under the same name) for the MANIFEST date *and* dpkg-deb's mtime clamping;
+every file **and directory** mode pinned rather than umask-inherited;
+`tar --mtime/--sort/--owner/--group` plus **`gzip -n`** (gzip writes
+its own timestamp into its header, so `tar -czf` is not reproducible even when
+every tar entry is pinned); and **stripping ASLR load addresses from the
+MANIFEST's `ldd` output** — that one alone re-randomized the .deb on every
+build and is invisible, since only the hex changes. Gate:
+`tests/manual/repro_build.sh <engine>` (Jetson-only).
 
 Layout: `/opt/denso/bin/denso` (package-owned) · `/opt/denso/data` (**operator**-
 owned: db, log, models, lock) · `/usr/bin/denso-digitalreader` (the launcher —

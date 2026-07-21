@@ -21,7 +21,7 @@ case "$1" in
 
     echo "denso: installed. Next:"
     echo "  sudo denso-setup configure --user <username> [--autostart] [--enable-autologin]"
-    echo "  denso-setup verify"
+    echo "  sudo denso-setup verify"
     ;;
   abort-upgrade|abort-remove|abort-deconfigure)
     ;;

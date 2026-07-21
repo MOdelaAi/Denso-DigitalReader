@@ -1,11 +1,16 @@
 #!/bin/sh
 # Denso appliance setup: everything `apt install` cannot do.
 #
-#   denso-setup preflight <path-to.deb>
-#   denso-setup configure --user <u> [--autostart] [--enable-autologin]
-#   denso-setup verify
-#   denso-setup unconfigure
-#   denso-setup replace-model <stem>
+# EVERY subcommand calls need_root — run them all under sudo. (An earlier draft
+# documented non-sudo invocations that could not have worked; the code was
+# fixed and the call-to-action strings were not, so a customer following the
+# printed instructions hit "must run as root" at the last step.)
+#
+#   sudo denso-setup preflight <path-to.deb>
+#   sudo denso-setup configure --user <u> [--autostart] [--enable-autologin]
+#   sudo denso-setup verify
+#   sudo denso-setup unconfigure
+#   sudo denso-setup replace-model <stem>
 set -eu
 
 . /opt/denso/lib/policy.sh
@@ -51,7 +56,7 @@ cmd_configure() {
     # old->new transition isn't worth building for v1; refusal is correct.
     prev="$(cat "$STATE/user" 2>/dev/null || echo "")"
     if [ -n "$prev" ] && [ "$prev" != "$user" ]; then
-        die "already configured for user '$prev' — run 'denso-setup unconfigure' first to switch to '$user'"
+        die "already configured for user '$prev' — run 'sudo denso-setup unconfigure' first to switch to '$user'"
     fi
 
     mkdir -p "$STATE"
@@ -87,7 +92,7 @@ cmd_configure() {
                 echo "denso-setup: seeded $stem.engine" ;;
             same)    echo "denso-setup: $stem.engine already present (identical)" ;;
             differs) echo "denso-setup: $stem.engine present but DIFFERENT — keeping yours."
-                     echo "             run 'denso-setup replace-model $stem' to overwrite." ;;
+                     echo "             run 'sudo denso-setup replace-model $stem' to overwrite." ;;
             # No default before this fix: a policy/tool error producing an
             # unexpected string skipped every branch and configuration silently
             # continued as if the model were fine.
@@ -159,7 +164,8 @@ cmd_configure() {
         echo "denso-setup: WARNING — anyone with physical access now gets $user's desktop."
     fi
 
-    echo "denso-setup: configured. Run 'denso-setup verify' next."
+    # `sudo` is not decoration: cmd_verify calls need_root four lines below.
+    echo "denso-setup: configured. Run 'sudo denso-setup verify' next."
 }
 
 cmd_verify() {
@@ -168,7 +174,7 @@ cmd_verify() {
     need_root
     rc=0
     user="$(cat "$STATE/user" 2>/dev/null || echo "")"
-    [ -n "$user" ] || die "not configured yet — run 'denso-setup configure --user <u>' first"
+    [ -n "$user" ] || die "not configured yet — run 'sudo denso-setup configure --user <u>' first"
     group="$(id -gn "$user")"
 
     echo "== platform"
@@ -227,10 +233,10 @@ cmd_verify() {
             # FAIL, not WARN: --check below validates every packaged engine by
             # name, so an absent one fails verify anyway. Warning here and then
             # failing there would be an incoherent contract.
-            seed) echo "  FAIL $stem is packaged but ABSENT from $DATA/models — run 'denso-setup configure --user <u>'"; rc=1 ;;
+            seed) echo "  FAIL $stem is packaged but ABSENT from $DATA/models — run 'sudo denso-setup configure --user <u>'"; rc=1 ;;
             differs) echo "  WARN $stem in $DATA/models DIFFERS from the packaged one."
                      echo "       The appliance is NOT running the model this package approved."
-                     echo "       Keep yours, or adopt the packaged one: denso-setup replace-model $stem" ;;
+                     echo "       Keep yours, or adopt the packaged one: sudo denso-setup replace-model $stem" ;;
         esac
     done
 
