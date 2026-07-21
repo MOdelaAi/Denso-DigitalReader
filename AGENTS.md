@@ -101,8 +101,11 @@ prove its shape off-Jetson).
 clean artifact name carries no content hash, so a non-reproducible rebuild
 silently replaced a different artifact under an identical filename. Sources of
 variance that had to be closed, all of them non-obvious: `SOURCE_DATE_EPOCH`
-(defaults to the commit time) for the MANIFEST date *and* dpkg-deb's mtime
-clamping; `tar --mtime/--sort/--owner/--group` plus **`gzip -n`** (gzip writes
+(**must** equal the commit time on a clean build — a differing one is refused,
+since honouring it would give two clean builds of one commit different bytes
+under the same name) for the MANIFEST date *and* dpkg-deb's mtime clamping;
+every file **and directory** mode pinned rather than umask-inherited;
+`tar --mtime/--sort/--owner/--group` plus **`gzip -n`** (gzip writes
 its own timestamp into its header, so `tar -czf` is not reproducible even when
 every tar entry is pinned); and **stripping ASLR load addresses from the
 MANIFEST's `ldd` output** — that one alone re-randomized the .deb on every

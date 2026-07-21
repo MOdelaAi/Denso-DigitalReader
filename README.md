@@ -186,10 +186,12 @@ at the end of the build; `ls dist/*.tar.gz` also has it.
 **Clean builds are reproducible**, which is what makes the plain name a
 truthful identifier: rebuilding one commit on one machine produces a
 byte-identical `.deb` *and* bundle, so a rebuild can never silently replace a
-different artifact under the same filename. The build date comes from
-`SOURCE_DATE_EPOCH` (defaulting to the commit timestamp, overridable), `tar`
-and `gzip -n` are pinned, and the MANIFEST's `ldd` report has its ASLR load
-addresses stripped. Reproducibility is per-machine — the MANIFEST records the
+different artifact under the same filename. The build date is the **commit
+timestamp**; a clean build refuses a `SOURCE_DATE_EPOCH` that differs from it
+(the name carries no content hash, so the bytes must follow from the commit
+alone — a dirty build may override freely). `tar`, `gzip -n` and every file
+mode are pinned, and the MANIFEST's `ldd` report has its ASLR load addresses
+stripped. Reproducibility is per-machine — the MANIFEST records the
 toolchain and JetPack versions, so a different box legitimately differs.
 Verify with `tests/manual/repro_build.sh models/digitv3.engine` (Jetson-only).
 

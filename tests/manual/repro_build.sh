@@ -13,6 +13,10 @@
 # artifact — including one an operator may already have shipped and recorded.
 # The unit-level half is in tests/packaging/run.sh; only a real double build
 # proves the .deb itself.
+#
+# RUN EXCLUSIVELY. It refuses to start against a dirty tree, but it then makes
+# and reverts its own edits to packaging/lib/policy.sh — so editing that file
+# while this gate runs means the restore discards your change.
 set -u
 
 ENGINE="${1-}"
