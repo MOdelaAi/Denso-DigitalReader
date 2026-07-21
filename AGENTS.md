@@ -104,9 +104,10 @@ variance that had to be closed, all of them non-obvious: `SOURCE_DATE_EPOCH`
 (**must** equal the commit time on a clean build — a differing one is refused,
 since honouring it would give two clean builds of one commit different bytes
 under the same name) for the MANIFEST date *and* dpkg-deb's mtime clamping;
-modes pinned rather than umask-inherited — for the bundle and the payload, but
-**not yet** `DEBIAN/control`/`md5sums`, so the guarantee currently holds per
-machine *at a fixed umask* (see ARCHITECTURE's "Known gap");
+every bundle, payload and Debian-metadata mode pinned rather than
+umask-inherited (`DEBIAN/control`/`md5sums` explicitly `0644`), gated by a
+two-umask rebuild — note `dpkg-deb` normalizes *control* modes for you but
+**not** payload modes, so a `>`-created payload file is the one that would bite;
 `tar --mtime/--sort/--owner/--group` plus **`gzip -n`** (gzip writes
 its own timestamp into its header, so `tar -czf` is not reproducible even when
 every tar entry is pinned); and **stripping ASLR load addresses from the
@@ -117,7 +118,7 @@ build and is invisible, since only the hex changes.
 `tests/packaging/run.sh` (130 assertions natively; 124 on MSYS2, where the
 file-mode ones are skipped) is the harness to run for *any* packaging change, and
 `tests/manual/repro_build.sh <engine>` is the Jetson-only reproducibility gate
-(11). The latter must run **exclusively**: it refuses a dirty tree, then makes and
+(19). The latter must run **exclusively**: it refuses a dirty tree, then makes and
 reverts its own edits to `packaging/lib/policy.sh`, so a concurrent edit to that
 file is discarded by its restore. Design rationale for all of the above is
 **Packaging & ship pipeline** in `docs/ARCHITECTURE.md`.
@@ -129,7 +130,7 @@ the stable public command; it exports `DENSO_DATA_DIR`) · `/usr/bin/denso-setup
 **Verified on hardware** (192.168.1.15, 2026-07-17): build → preflight → install
 → configure → `verify: PASS` → `apt remove` keeps data → upgrade keeps data →
 `apt purge` removes it. Bundle + reproducibility gated natively 2026-07-21
-(packaging 130/130, repro 11/11, ctest 485/485). **NOT verified:** `denso-setup
+(packaging 130/130, repro 19/19, ctest 485/485). **NOT verified:** `denso-setup
 configure --autostart --enable-autologin` and `unconfigure`'s GDM restore — the
 XDG/GDM path has never run on a real box; and an actual `apt install` of a
 *bundled* `.deb` on a second appliance, since only one Jetson exists (the bundle's

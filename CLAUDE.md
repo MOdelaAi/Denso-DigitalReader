@@ -235,9 +235,10 @@ device-specific as it is.
   content hash, so a rebuild would otherwise replace a shipped artifact under an
   identical filename). Anything a build writes must therefore be derived from the
   commit, not the clock, the umask, or the process — see the variance sources in
-  `docs/ARCHITECTURE.md`, including the one **still open** (`DEBIAN/control` and
-  `md5sums` inherit the umask). Gate: `tests/manual/repro_build.sh` — note it
-  rebuilds in a single environment, so it cannot catch umask-class variance.
+  `docs/ARCHITECTURE.md`. Gate: `tests/manual/repro_build.sh`, which rebuilds the
+  same commit under two umasks. If you add a **payload** file written by `>`
+  rather than `install -m`, chmod it: `dpkg-deb` normalizes control-archive modes
+  but leaves data-archive modes exactly as staged.
 
 ## Workflow
 

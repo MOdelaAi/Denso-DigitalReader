@@ -184,24 +184,23 @@ would share a name and silently overwrite each other. The exact name is printed
 at the end of the build; `ls dist/*.tar.gz` also has it.
 
 **Clean builds are reproducible**, which is what makes the plain name a
-truthful identifier: rebuilding one commit **on one machine at a fixed umask**
-produces a byte-identical `.deb` *and* bundle, so a rebuild does not silently
-replace a different artifact under the same filename. The build date is the
-**commit timestamp**; a clean build refuses a `SOURCE_DATE_EPOCH` that differs
-from it (the name carries no content hash, so the bytes must follow from the
-commit alone — a dirty build may override freely). `tar`, `gzip -n`, and the
-bundle and payload file modes are pinned, and the MANIFEST's `ldd` report has
-its ASLR load addresses stripped.
+truthful identifier: rebuilding one commit on one machine produces a
+byte-identical `.deb` *and* bundle, so a rebuild does not silently replace a
+different artifact under the same filename. The build date is the **commit
+timestamp**; a clean build refuses a `SOURCE_DATE_EPOCH` that differs from it
+(the name carries no content hash, so the bytes must follow from the commit
+alone — a dirty build may override freely). `tar`, `gzip -n`, and every bundle,
+payload and Debian-metadata file mode are pinned — `DEBIAN/control` and
+`DEBIAN/md5sums` explicitly `0644` — and the MANIFEST's `ldd` report has its
+ASLR load addresses stripped.
 
-Two limits on that guarantee, both deliberate to state:
+The builder's **umask does not affect the artifact**, and the gate proves it by
+rebuilding the same clean commit under two different umasks (002 and 077) and
+comparing bytes, plus asserting modes inside the real control and data archives.
 
-- **Per machine.** The MANIFEST records toolchain and JetPack versions, so a
-  different box legitimately differs.
-- **At a fixed umask — a known open gap.** `DEBIAN/control` and `DEBIAN/md5sums`
-  are still created by redirection and inherit the caller's umask, so building
-  one clean commit twice at *different* umasks still yields different `.deb`
-  bytes under an identical name. `tests/manual/repro_build.sh` cannot detect this
-  class: it rebuilds under a single environment and never varies the umask.
+Reproducibility is still scoped **per machine**, deliberately: the MANIFEST
+records the local toolchain and JetPack stack, so an artifact built on a
+different box legitimately differs — that is the field being useful, not a leak.
 
 Verify with `tests/manual/repro_build.sh models/digitv3.engine` (Jetson-only).
 

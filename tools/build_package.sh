@@ -299,6 +299,17 @@ SHLIBS_DEPENDS="${SHLIBS_LINE#shlibs:Depends=}"
 echo "   derived: $SHLIBS_DEPENDS"
 
 sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$SHLIBS_DEPENDS|"     packaging/debian/control.in > "$STAGE/DEBIAN/control"
+# A `>` redirect inherits the caller's umask, so this file is 0600 in a
+# umask-077 shell and 0664 under the Jetson's default 002. That does NOT reach
+# the .deb: `dpkg-deb --build` normalizes CONTROL-archive members to 0644
+# regardless (verified on-device: staged 0600 -> 0644 inside the .deb). This
+# chmod is therefore defense-in-depth, not a bug fix — it makes the staging tree
+# say what ships instead of leaving the result to an external tool's
+# normalization, which nothing here would notice changing.
+# NOTE the asymmetry, because it is the part that actually bites: dpkg-deb does
+# NOT normalize the DATA archive (staged 0600 -> 0600 in the .deb). Any future
+# `>`-created PAYLOAD file needs its own chmod, as MANIFEST has below.
+chmod 0644 "$STAGE/DEBIAN/control"
 
 # ── MANIFEST: what this artifact IS, for after-the-fact diagnosis. Written
 # BEFORE md5sums so md5sums covers it too (see below).
@@ -348,6 +359,12 @@ chmod 0644 "$STAGE/opt/denso/MANIFEST"
 # itself does not generate md5sums, and without them `dpkg -V` verifies
 # nothing.
 ( cd "$STAGE" && find . -type f ! -path './DEBIAN/*' -printf '%P\0'     | xargs -0 md5sum > DEBIAN/md5sums )
+# Same defense-in-depth pin as DEBIAN/control above (also normalized by
+# dpkg-deb). The class that genuinely can vary is the payload, and every path
+# there arrives via `install -m` or an explicit chmod. The gate for all of it is
+# the two-umask rebuild in tests/manual/repro_build.sh, which asserts modes in
+# the real control AND data archives rather than trusting either rule.
+chmod 0644 "$STAGE/DEBIAN/md5sums"
 
 # ── build the .deb
 # Outputs go to dist/, NOT the repo root. Writing them beside the sources made
