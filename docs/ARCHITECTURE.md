@@ -223,7 +223,7 @@ database pass as a fresh install.
 Not CMake targets: POSIX shell, so they are proven by their own harnesses rather
 than ctest — `tests/packaging/run.sh` (130 assertions natively, 124 under MSYS2:
 the file-mode ones are Linux-only) and, Jetson-only, `tests/manual/repro_build.sh`
-(11). AGENTS.md holds the operator runbook and the derived-dependency rules;
+(19). AGENTS.md holds the operator runbook and the derived-dependency rules;
 README.md holds the copy-paste install. This section is the *why*.
 
 | Path | Role |
@@ -279,15 +279,21 @@ Four independent sources of variance had to be closed, each sufficient on its ow
 - **Modes set explicitly rather than umask-inherited.** The bundle's top-level
   directory came out 0775 on the Jetson (umask 002) and 0755 elsewhere — a byte
   difference under an identical name, caused by an entry that holds no data.
-  **Known gap:** this is closed for the bundle and for the payload
-  (`install -m`/`install -d`, plus an explicit `chmod` on the redirect-created
-  `MANIFEST`), but `DEBIAN/control` and `DEBIAN/md5sums` are still created by
-  plain redirect (`build_package.sh:301`, `:350`) and inherit the caller's umask.
-  So two clean builds of one commit **on one machine at different umasks** still
-  differ — `repro_build.sh` cannot see this, since it rebuilds in one environment.
-  The fix is the `chmod 0644` idiom already used one line above `MANIFEST`; it
-  needs a Jetson run to land, so treat the guarantee as holding **per machine at
-  a fixed umask** until then.
+  Everything staged into the `.deb` is now pinned too: the payload via
+  `install -m`/`install -d` plus an explicit `chmod` on the redirect-created
+  `MANIFEST`, and `DEBIAN/control`/`md5sums` at `0644`.
+
+  **Know the asymmetry, because it decides where the risk is.** `dpkg-deb
+  --build` normalizes **control**-archive members to 0644 whatever the staged
+  mode (measured on-device: staged 0600 → 0644 in the `.deb`), but it does
+  **not** touch the **data** archive — a payload file staged 0600 ships 0600. So
+  the control-file pins are defense-in-depth against an implicit dependency on
+  another tool's behaviour, while the payload pins are the ones actually holding
+  the guarantee up. A future `>`-created payload file with no `chmod` is a real
+  reproducibility defect; the same mistake in `DEBIAN/` is silently absorbed.
+  This was established by measurement after a review predicted the opposite —
+  see the two-umask checks in `repro_build.sh`, which assert modes in both real
+  archives rather than trusting either rule.
 - **ASLR addresses stripped from the MANIFEST's `ldd` output.** This one
   re-randomized the `.deb` on *every* build and is invisible, since only the hex
   in `(0x0000ffff91f00000)` changes. It defeated all the timestamp work until it
