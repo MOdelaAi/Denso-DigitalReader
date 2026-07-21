@@ -45,6 +45,18 @@ apt_plan_ok "$T/ubuntucv" >/dev/null; rc_is "apt: Ubuntu OpenCV is refused (must
 printf 'Inst libopencv (4.8.0-1-g6371ee1 [arm64])\n' > "$T/nvcv"
 apt_plan_ok "$T/nvcv" >/dev/null; rc_is "apt: NVIDIA libopencv itself is NOT the Ubuntu one" $? 0
 
+# ── check_verdict: map `denso --check`'s exit code to a verify action. The
+# readiness contract is 0 Ready / 10 Degraded-serviceable / 78 Blocked; verify
+# must warn-and-continue on Degraded (the unmanifested-engines production Jetson),
+# STOP on a Blocked configuration fault, and treat any other non-zero as an
+# unexpected check failure — never silently continue on an unknown code.
+is "check: 0 -> ok (continue)"                 "$(check_verdict 0)"  ok
+is "check: 10 -> degraded (warn, continue)"    "$(check_verdict 10)" degraded
+is "check: 78 -> blocked (stop)"               "$(check_verdict 78)" blocked
+is "check: 1 -> failed (unexpected)"           "$(check_verdict 1)"  failed
+is "check: 2 -> failed (unexpected)"           "$(check_verdict 2)"  failed
+is "check: 127 -> failed (unexpected)"         "$(check_verdict 127)" failed
+
 # ── seed_decision: never silently overwrite an operator's engine.
 mkdir -p "$T/s" "$T/d"
 printf 'aaa' > "$T/s/m.engine"; printf '{"0":"a"}' > "$T/s/m.names.json"

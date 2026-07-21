@@ -190,3 +190,24 @@ single-instance + trigger network reassert).
    error agrees with the CLI classifier" has no on-screen error to compare. Decision:
    accept (headless/remote-managed; status.json + log are the channel, spec §7) or add a
    brief startup error screen (scope add).
+
+## 10. Findings resolved (2026-07-21)
+
+- **§9.1 `--check` exit-code contract — RESOLVED (kept 0/10/78; patched denso-setup).**
+  `run_check` now returns the readiness verdict: engine deep-load failure stays a hard
+  exit 1 (unexpected), and the final code is `exit_code_for(evaluate_integrity(...))` —
+  0 Ready / **10 Degraded-serviceable** / 78 Blocked — evaluated against a READ-ONLY DB
+  handle (or a throwaway in-memory migrated DB on a fresh install), never migrating the
+  real DB. `packaging/lib/policy.sh::check_verdict` (0→ok / 10→degraded / 78→blocked /
+  *→failed) is TDD'd in `tests/packaging/run.sh` (6 cases) and `denso-setup cmd_verify`
+  now branches on it: exit 10 WARNS and continues (the unmanifested-engines production
+  Jetson is serviceable, not a blocker), 78 STOPS, other non-zero = unexpected failure.
+  This makes §7.4's "must exit 10" ACCURATE (it was unmet before). Codex-reviewed.
+- **§9.2 no visible on-screen error on a Blocked boot — RESOLVED as WON'T-FIX (by design,
+  Option B).** The approved scope specifies status.json + logs + exit 78 for a globally
+  blocked boot; it does NOT require an on-screen pre-window error page. Recorded as "not
+  implemented by design," NOT a failed test. A kiosk-safe startup error screen may be a
+  later, separate UI enhancement. GUI-smoke criteria (§8) updated: for a normal DB the
+  window/camera-UI/status open (confirmed visually via AnyDesk); for future-schema /
+  corrupt DBs NO window is expected — verified objectively via exit 78, unchanged
+  PRAGMA user_version, status.json, and logs.

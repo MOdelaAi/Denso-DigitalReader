@@ -222,26 +222,60 @@ int run_check(const QStringList& extra_engines) {
     std::sort(targets.begin(), targets.end());
     targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
 
-    if (targets.empty()) {
-        std::printf("check: PASS (fresh install; no engines required)\n");
-        return 0;
+    // Deep-load each configured/packaged engine (only if there are any — a fresh
+    // install with no engines is fine; the readiness verdict below still flags
+    // unmanifested engines on disk). A packaged engine that will NOT LOAD is an
+    // unexpected hard failure (exit 1), distinct from the 0/10/78 readiness
+    // contract: denso-setup treats "other non-zero" as an unexpected check failure.
+    if (!targets.empty()) {
+        // Throwaway cache: TrtEngine ignores cache_dir (trt_engine.cpp:87) but
+        // OrtEngine uses it, so this keeps the real models/trt_cache untouched on
+        // BOTH platforms.
+        QTemporaryDir cache;
+        if (!cache.isValid()) {
+            std::fprintf(stderr, "check: cannot create a temporary cache dir\n");
+            return 1;
+        }
+        bool ok = true;
+        for (const std::string& m : targets) ok = validate_model(m, cache.path()) && ok;
+        if (!ok) {
+            std::printf("check: FAIL (engine load failed; %zu attempted)\n", targets.size());
+            return 1;
+        }
+        std::printf("check: engines load ok (%zu validated)\n", targets.size());
     }
 
-    // Throwaway cache: TrtEngine ignores cache_dir (trt_engine.cpp:87) but
-    // OrtEngine uses it, so this keeps the real models/trt_cache untouched on
-    // BOTH platforms.
-    QTemporaryDir cache;
-    if (!cache.isValid()) {
-        std::fprintf(stderr, "check: cannot create a temporary cache dir\n");
+    // Readiness verdict — the machine-readable 0/10/78 contract denso-setup
+    // interprets (0 Ready / 10 Degraded-serviceable / 78 Blocked). --check must
+    // NOT migrate the primary DB, so evaluate against a READ-ONLY handle when the
+    // DB exists; on a fresh install (no DB) use a throwaway in-memory MIGRATED DB
+    // so the models-dir / manifest / unmanifested-engine checks still run (a
+    // packaged appliance ships engines before its first boot). The real DB is
+    // never created or mutated.
+    std::optional<denso::db::Db> vdb;
+    const QString vdb_path = denso::paths::db_file();
+    if (QFileInfo::exists(vdb_path)) {
+        vdb = denso::db::Db::open_read_only(vdb_path);
+    } else {
+        vdb = denso::db::Db::open_in_memory();
+        if (vdb) denso::db::run_migrations(vdb->handle());
+    }
+    if (!vdb) {
+        std::fprintf(stderr, "check: cannot open the database for the readiness verdict\n");
         return 1;
     }
-
-    bool ok = true;
-    for (const std::string& m : targets) ok = validate_model(m, cache.path()) && ok;
-
-    std::printf("check: %s (%zu model(s) validated)\n", ok ? "PASS" : "FAIL",
-                targets.size());
-    return ok ? 0 : 1;
+    const auto verdict =
+        denso::health::evaluate_integrity(vdb->handle(), denso::paths::models_dir());
+    for (const auto& b : verdict.blockers)
+        std::fprintf(stderr, "check: BLOCKED: %s\n", qPrintable(b.detail));
+    for (const auto& i : verdict.issues)
+        std::fprintf(stdout, "check: degraded: %s\n", qPrintable(i.detail));
+    const int code = denso::health::exit_code_for(verdict.status);
+    const char* label = verdict.status == denso::health::Readiness::Ready    ? "READY"
+                      : verdict.status == denso::health::Readiness::Degraded ? "DEGRADED (serviceable)"
+                      :                                                        "BLOCKED";
+    std::printf("check: %s (exit %d)\n", label, code);
+    return code;
 }
 
 } // namespace
