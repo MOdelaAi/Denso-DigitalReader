@@ -184,15 +184,25 @@ would share a name and silently overwrite each other. The exact name is printed
 at the end of the build; `ls dist/*.tar.gz` also has it.
 
 **Clean builds are reproducible**, which is what makes the plain name a
-truthful identifier: rebuilding one commit on one machine produces a
-byte-identical `.deb` *and* bundle, so a rebuild can never silently replace a
-different artifact under the same filename. The build date is the **commit
-timestamp**; a clean build refuses a `SOURCE_DATE_EPOCH` that differs from it
-(the name carries no content hash, so the bytes must follow from the commit
-alone — a dirty build may override freely). `tar`, `gzip -n` and every file
-mode are pinned, and the MANIFEST's `ldd` report has its ASLR load addresses
-stripped. Reproducibility is per-machine — the MANIFEST records the
-toolchain and JetPack versions, so a different box legitimately differs.
+truthful identifier: rebuilding one commit **on one machine at a fixed umask**
+produces a byte-identical `.deb` *and* bundle, so a rebuild does not silently
+replace a different artifact under the same filename. The build date is the
+**commit timestamp**; a clean build refuses a `SOURCE_DATE_EPOCH` that differs
+from it (the name carries no content hash, so the bytes must follow from the
+commit alone — a dirty build may override freely). `tar`, `gzip -n`, and the
+bundle and payload file modes are pinned, and the MANIFEST's `ldd` report has
+its ASLR load addresses stripped.
+
+Two limits on that guarantee, both deliberate to state:
+
+- **Per machine.** The MANIFEST records toolchain and JetPack versions, so a
+  different box legitimately differs.
+- **At a fixed umask — a known open gap.** `DEBIAN/control` and `DEBIAN/md5sums`
+  are still created by redirection and inherit the caller's umask, so building
+  one clean commit twice at *different* umasks still yields different `.deb`
+  bytes under an identical name. `tests/manual/repro_build.sh` cannot detect this
+  class: it rebuilds under a single environment and never varies the umask.
+
 Verify with `tests/manual/repro_build.sh models/digitv3.engine` (Jetson-only).
 
 Never `dpkg -i` — it does not resolve dependencies. `apt remove` keeps
@@ -233,7 +243,7 @@ both the exe and the tests, and `denso_tests`:
 ```
 src/
 ├─ core/   → denso_core  (library; Qt Core/Sql + std)
-│  ├─ db/        SQLite base + version-gated migrations (currently v12)
+│  ├─ db/        SQLite base + version-gated migrations (currently v13)
 │  ├─ hardware/  host spec (QSysInfo / QStorageInfo)
 │  ├─ network/   domain + persistence + OS backends
 │  │  ├─ windows/  netsh / parse / wifi + Windows backend

@@ -52,6 +52,11 @@ dirs (the subsystem libs). Note two `camera/` dirs coexist — `src/core/camera/
 separate include roots. Bounded 24/7 file logging lives in `src/app/logging/`
 (see [Logging](#logging)).
 
+Outside the CMake graph: `packaging/` and `tools/` are the POSIX-shell ship
+pipeline (see [Packaging & ship pipeline](#packaging--ship-pipeline-packaging-tools)),
+tested by their own harnesses — `tests/packaging/run.sh` and the Jetson-only
+`tests/manual/repro_build.sh` — because ctest covers only the C++ targets.
+
 ## Boot sequence (`src/app/main.cpp`)
 
 A thin orchestrator:
@@ -79,10 +84,19 @@ A thin orchestrator:
    numerals (๐–๙).
 4. `db::Db::open(paths::db_file())` opens `denso.db` **in the data dir** (see
    [Mutable paths](#mutable-paths)) in WAL mode; `db::run_migrations` applies the
-   `user_version`-gated chain. Both failures `qCritical` + `return 1` rather than
-   `qFatal`: `qFatal` aborts without unwinding, which would strand the lock file
-   with a dead pid and make the operator's next attempt report "already running"
-   instead of the real cause.
+   `user_version`-gated chain. These are **DB-stage readiness faults, not generic
+   failures**: an unreadable database (`DbUnopenable`), one written by a newer
+   build (`SchemaNewer` — classified *before* normal startup, so boot and
+   `--check` agree on a future-schema appliance) and a failed migration
+   (`MigrationFailed`) all `qCritical`, write the reason to the log **and
+   `status.json`**, and exit **78** (`EX_CONFIG`) — a configuration fault no
+   restart fixes, which is what tells an operator (and a service supervisor) to
+   stop retrying and look at the data dir. Ordinary runtime and warm-up failures
+   keep their own separately defined exit behaviour (e.g. a missing TensorRT
+   engine still `app.exit(1)`s from `WarmupWorker`). None of these use `qFatal`:
+   it aborts without unwinding, which would strand the lock file with a dead pid
+   and make the operator's next attempt report "already running" instead of the
+   real cause.
 5. `settings::import_legacy` does a one-time import of any pre-SQLite
    `settings.json` in the data dir (`paths::legacy_settings_json()`).
 6. `ui::sync_models` scans the data dir's `models/` (`paths::models_dir()`) and upserts each into
@@ -149,17 +163,31 @@ under a `QCoreApplication`, so none needs a display. They are the gates the
 | Mode | Contract |
 |---|---|
 | `--version` | prints `APP_VERSION`; takes no lock; no mutation |
-| `--check [--engine <file>]...` | validates the data dir + every model the DB references **and** each `--engine` named; does not mutate the primary database or app-managed state — see the ownership caveat below |
+| `--check [--engine <file>]...` | validates the data dir + every model the DB references **and** each `--engine` named; **tri-state** exit (`0`/`10`/`78`, below); does not mutate the primary database or app-managed state — see the ownership caveat below |
 | `--check-running` | liveness; **the sole mode that takes the lock** — answering requires `tryLock` |
 | `--check-migrations <db-path>` | runs the migration chain against **that path only** |
 
 Exit codes (Slice 2's maintainer scripts depend on these): **0** ok — and for
-`--check-running`, *an instance is running*; **1** failed — and for
+`--check-running`, *an instance is running*; **1** generic failure — and for
 `--check-running`, *nothing is running*; **2** bad usage; **3** the GUI refused
 to start because another instance holds the lock; **4** (`--check-running`
 only) *cannot determine* — the lock file itself is unusable (missing dir,
 permissions, ...). This must never be reported as the clean 1 a caller like
 Slice 2's `prerm` needs to see before it will proceed with an upgrade.
+
+**`--check` is tri-state**, mapped from `health::Readiness` by
+`health::exit_code` (`src/core/health/integrity.cpp`) — a plain pass/fail would
+force the caller to choose between blocking a serviceable appliance and shipping
+a broken one:
+
+| Code | Readiness | Meaning |
+|---|---|---|
+| **0** | `Ready` | every referenced model resolves and the schema is sound |
+| **10** | `Degraded` | serviceable but not clean — *issues*, not *blockers* (e.g. engines on disk the manifest does not describe). Callers may proceed; this is why `sync_models`' directory scan is retained rather than treated as a fault. |
+| **78** | `Blocked` | `EX_CONFIG` — a blocker (`DbUnopenable`, `SchemaNewer`, a missing/invalid engine the DB references). Same code the boot path uses for the same conditions, deliberately: boot and `--check` must agree. |
+
+`1` remains the generic-failure code and is **not** a readiness verdict; the
+`--check-running` meanings above are a separate contract and unaffected.
 
 **Ownership caveat for `--check`:** "does not mutate the primary database or
 app-managed state" is deliberately narrower than "no mutation at all" — see
@@ -189,6 +217,102 @@ cameras, so it legitimately requires no engines) and is never created; a
 `detection::try_attached_model_filenames` returns an `optional` — the older
 `attached_model_filenames` returns `{}` for both, which would let a corrupt
 database pass as a fresh install.
+
+## Packaging & ship pipeline (`packaging/`, `tools/`)
+
+Not CMake targets: POSIX shell, so they are proven by their own harnesses rather
+than ctest — `tests/packaging/run.sh` (130 assertions natively, 124 under MSYS2:
+the file-mode ones are Linux-only) and, Jetson-only, `tests/manual/repro_build.sh`
+(11). AGENTS.md holds the operator runbook and the derived-dependency rules;
+README.md holds the copy-paste install. This section is the *why*.
+
+| Path | Role |
+|---|---|
+| `tools/build_package.sh` | The whole build. Refuses a non-aarch64 host outright and a dirty tree unless `--allow-dirty`, stages `/opt/denso`, derives deps via `dpkg-shlibdeps`, emits `dist/` = `<deb>` + `<deb>.sha256` + `preflight-denso-<ver>.sh` + `<name>.tar.gz`. |
+| `packaging/lib/policy.sh` | The ONE definition of "would this transaction damage the JetPack stack?" (`apt_plan_ok`). |
+| `packaging/lib/gen_preflight.sh` | Emits the standalone preflight guard. |
+| `packaging/lib/gen_bundle.sh` | Emits the transport bundle. |
+| `packaging/denso-setup` | Post-install operator tool (`configure` / `verify` / `preflight` / …). |
+| `packaging/debian/` | `control.in`, `postinst`/`prerm`/`postrm`, `shlibs.local`. |
+
+**The preflight guard is generated, never hand-written.** `denso-setup preflight`
+cannot protect a *first* install — `denso-setup` ships inside the very `.deb` it
+would vet, so by the time it exists the transaction is already done. Hence a
+standalone twin beside the `.deb`. It is assembled by concatenating `policy.sh`
+**verbatim**, so both routes share ONE definition of the protected-package
+decision (`apt_plan_ok`); a hand-copy would drift from `policy.sh`, and a second
+emitter would let the two callers' generated scripts drift from each other.
+Concatenation rather than sourcing because the guard must run on a box where
+`/opt/denso` does not exist. Note what this does **not** guarantee: the two
+drivers around that shared decision (apt simulation, path normalization, error
+handling) are separately implemented in `gen_preflight.sh` and `denso-setup` and
+*can* drift — `tests/packaging/run.sh` checks them against representative plan
+fixtures, which is regression coverage, not proof. Version skew is also normal
+and expected: an installed `denso-setup` uses the installed package's policy,
+while a freshly generated guard embeds the *prospective* package's.
+
+**The `.deb` and its guard ship as one bundle** because they are useless apart:
+the guard embeds the SHA-256 of the exact `.deb` it was generated for and refuses
+any other. Pairing an old guard with a new `.deb` used to be silent (every build
+overwrote one `preflight-denso.sh`), producing a PASS for an artifact never
+inspected. The `.tar.gz` makes "these travel together" a property of the artifact
+instead of a step in a runbook. `SHA256SUMS` inside it is **regenerated with bare
+filenames** — copying `dist/<deb>.sha256` would record the path `dist/…`, so
+`sha256sum -c` would fail on a perfectly intact bundle unpacked in `$HOME`.
+
+**Clean builds are byte-reproducible on one machine, and must be.** A clean
+artifact is named `r<count>.g<sha>` with no content hash, so that name is a
+truthful identifier only if one commit yields one set of bytes. It did not:
+rebuilding a commit produced different bytes under an *identical* filename,
+silently replacing an artifact an operator may already have shipped and recorded.
+Four independent sources of variance had to be closed, each sufficient on its own:
+
+- `SOURCE_DATE_EPOCH` — pinned to the **commit** timestamp, feeding both the
+  MANIFEST date and `dpkg-deb`'s mtime clamping (it reads the variable from the
+  environment). A clean build **refuses** a differing caller-supplied value:
+  honouring it, as the reproducible-builds convention would, hands two clean
+  builds of one commit different bytes under one name — the original defect by
+  another door. A dirty build may override, since its name carries a content hash.
+- **`gzip -n`.** gzip writes its own timestamp and filename into its header, so
+  `tar -czf` is non-reproducible even when every tar entry is pinned
+  (`--sort=name --owner=0 --group=0 --numeric-owner --mtime=@epoch`).
+- **Modes set explicitly rather than umask-inherited.** The bundle's top-level
+  directory came out 0775 on the Jetson (umask 002) and 0755 elsewhere — a byte
+  difference under an identical name, caused by an entry that holds no data.
+  **Known gap:** this is closed for the bundle and for the payload
+  (`install -m`/`install -d`, plus an explicit `chmod` on the redirect-created
+  `MANIFEST`), but `DEBIAN/control` and `DEBIAN/md5sums` are still created by
+  plain redirect (`build_package.sh:301`, `:350`) and inherit the caller's umask.
+  So two clean builds of one commit **on one machine at different umasks** still
+  differ — `repro_build.sh` cannot see this, since it rebuilds in one environment.
+  The fix is the `chmod 0644` idiom already used one line above `MANIFEST`; it
+  needs a Jetson run to land, so treat the guarantee as holding **per machine at
+  a fixed umask** until then.
+- **ASLR addresses stripped from the MANIFEST's `ldd` output.** This one
+  re-randomized the `.deb` on *every* build and is invisible, since only the hex
+  in `(0x0000ffff91f00000)` changes. It defeated all the timestamp work until it
+  was found; the soname→path mapping, which is the actual diagnostic value, stays.
+
+Reproducibility is scoped **per-machine and clean-only** — the MANIFEST records
+toolchain and JetPack versions, so a different box legitimately differs, and a
+dirty build is disambiguated by a hash suffix rather than made reproducible.
+
+**Shell rules these scripts follow**, each from a real defect:
+
+- Emitters are **subshell-bodied functions** `f() ( … )`, not `{ … }`: POSIX shell
+  variables are global, so a brace body's working variables clobber a caller's of
+  the same name. A subshell still writes its output file and propagates status.
+- **`{ cmd || rc=$?; } | other` cannot capture `rc`** — a pipeline component runs
+  in its own subshell, so the assignment never reaches the caller and `rc` stays
+  0. `tar | gzip` was written that way with a comment claiming a failing tar could
+  not be masked; it could, and gzip would compress the truncated stream into a
+  valid-looking archive. Split into separate steps over an intermediate file.
+  (`PIPESTATUS` is bash-only and these are POSIX sh.)
+- **The emitters** (`gen_preflight.sh`, `gen_bundle.sh` — not every packaging
+  output; `dpkg-deb` writes the `.deb` straight to its final path) write to a temp
+  file in the **destination directory**, chmod it, then `mv`: a generator dying
+  mid-heredoc must never leave a partial-but-executable script where an operator
+  might run it, and a same-directory `mv` is an atomic rename.
 
 ## UI ↔ domain boundary (`src/core/ui/`)
 
@@ -654,6 +778,12 @@ box that runs for months must never fill the disk or lose the tail.
   sweepable); the pattern closed it. It also stopped a subtler bug: an unignored
   new model permanently dirties the tree, and `tools/build_package.sh` refuses to
   package a dirty tree — so dropping in `digitv3.onnx` silently blocked the build.
+- **`ctest` does not cover `packaging/` or `tools/`** — they are shell, proven by
+  `tests/packaging/run.sh`. Run it for any packaging change; a green `ctest` says
+  nothing about them. `tests/manual/repro_build.sh` is stricter still: it refuses
+  to start on a dirty tree, then makes and reverts its own edits to
+  `packaging/lib/policy.sh`, so it must run **exclusively** — a concurrent edit to
+  that one file is discarded by its restore.
 - **QSQLITE keeps a read cursor alive until the `QSqlQuery` is finished or
   destroyed.** A live read cursor (e.g. an un-scoped `PRAGMA user_version`
   query) makes a later schema change on the same connection fail with

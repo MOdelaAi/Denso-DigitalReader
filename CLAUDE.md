@@ -72,6 +72,17 @@ into `denso_core`, the `denso` exe, and **three static subsystem libs**
 Each target dir is its own include root, so includes read `network/model.h`,
 `ui/convert.h`, `ui/theme.h`, etc.
 
+Two trees sit **outside** the CMake graph and so outside `ctest`:
+
+| Path | Role |
+|---|---|
+| `packaging/`, `tools/` | The POSIX-shell `.deb` ship pipeline: `tools/build_package.sh` (the whole build), `packaging/lib/` (`policy.sh` = the one JetPack-damage rule + the `gen_preflight.sh`/`gen_bundle.sh` emitters), `packaging/denso-setup`, `packaging/debian/`. |
+| `tests/packaging/`, `tests/manual/` | Their harnesses: `run.sh` (130 assertions natively, 124 on MSYS2 — file modes are Linux-only) and the Jetson-only `repro_build.sh` (proves clean builds are byte-reproducible). |
+
+Run `tests/packaging/run.sh` for any packaging change — a green `ctest` says
+nothing about that tree. See **Packaging & ship pipeline** in
+`docs/ARCHITECTURE.md` for the design, AGENTS.md for the operator runbook.
+
 ### `src/core/` (library)
 
 | Path | Responsibility |
@@ -216,6 +227,17 @@ device-specific as it is.
   DB I/O inline. Since inference was decoupled from display, `on_reading()` fires
   on the **inference worker thread**, not the capture thread
   (`camera/frame_processor.h:59` is the authoritative contract).
+- Packaging keeps **one** definition of each rule: `packaging/lib/policy.sh` is
+  the sole JetPack-damage check and is *concatenated verbatim* into the generated
+  preflight guard — never hand-copy it, and never add a second emitter, or the
+  standalone guard and `denso-setup preflight` can silently disagree.
+- A **clean** build must stay byte-reproducible (the artifact name carries no
+  content hash, so a rebuild would otherwise replace a shipped artifact under an
+  identical filename). Anything a build writes must therefore be derived from the
+  commit, not the clock, the umask, or the process — see the variance sources in
+  `docs/ARCHITECTURE.md`, including the one **still open** (`DEBIAN/control` and
+  `md5sums` inherit the umask). Gate: `tests/manual/repro_build.sh` — note it
+  rebuilds in a single environment, so it cannot catch umask-class variance.
 
 ## Workflow
 

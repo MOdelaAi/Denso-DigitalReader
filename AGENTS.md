@@ -104,13 +104,23 @@ variance that had to be closed, all of them non-obvious: `SOURCE_DATE_EPOCH`
 (**must** equal the commit time on a clean build — a differing one is refused,
 since honouring it would give two clean builds of one commit different bytes
 under the same name) for the MANIFEST date *and* dpkg-deb's mtime clamping;
-every file **and directory** mode pinned rather than umask-inherited;
+modes pinned rather than umask-inherited — for the bundle and the payload, but
+**not yet** `DEBIAN/control`/`md5sums`, so the guarantee currently holds per
+machine *at a fixed umask* (see ARCHITECTURE's "Known gap");
 `tar --mtime/--sort/--owner/--group` plus **`gzip -n`** (gzip writes
 its own timestamp into its header, so `tar -czf` is not reproducible even when
 every tar entry is pinned); and **stripping ASLR load addresses from the
 MANIFEST's `ldd` output** — that one alone re-randomized the .deb on every
-build and is invisible, since only the hex changes. Gate:
-`tests/manual/repro_build.sh <engine>` (Jetson-only).
+build and is invisible, since only the hex changes.
+
+**Testing this tree** — it is shell, so **`ctest` does not cover it**:
+`tests/packaging/run.sh` (130 assertions natively; 124 on MSYS2, where the
+file-mode ones are skipped) is the harness to run for *any* packaging change, and
+`tests/manual/repro_build.sh <engine>` is the Jetson-only reproducibility gate
+(11). The latter must run **exclusively**: it refuses a dirty tree, then makes and
+reverts its own edits to `packaging/lib/policy.sh`, so a concurrent edit to that
+file is discarded by its restore. Design rationale for all of the above is
+**Packaging & ship pipeline** in `docs/ARCHITECTURE.md`.
 
 Layout: `/opt/denso/bin/denso` (package-owned) · `/opt/denso/data` (**operator**-
 owned: db, log, models, lock) · `/usr/bin/denso-digitalreader` (the launcher —
@@ -118,9 +128,13 @@ the stable public command; it exports `DENSO_DATA_DIR`) · `/usr/bin/denso-setup
 
 **Verified on hardware** (192.168.1.15, 2026-07-17): build → preflight → install
 → configure → `verify: PASS` → `apt remove` keeps data → upgrade keeps data →
-`apt purge` removes it. **NOT verified:** `denso-setup configure --autostart
---enable-autologin` and `unconfigure`'s GDM restore — the XDG/GDM path has never
-run on a real box. Do not represent it as working.
+`apt purge` removes it. Bundle + reproducibility gated natively 2026-07-21
+(packaging 130/130, repro 11/11, ctest 485/485). **NOT verified:** `denso-setup
+configure --autostart --enable-autologin` and `unconfigure`'s GDM restore — the
+XDG/GDM path has never run on a real box; and an actual `apt install` of a
+*bundled* `.deb` on a second appliance, since only one Jetson exists (the bundle's
+shape, checksums and extraction are proven, the install-from-bundle is not). Do
+not represent either as working.
 
 Facts that will bite whoever touches this:
 - **Dependencies are DERIVED**, not hand-written: `packaging/debian/shlibs.local`
@@ -176,7 +190,9 @@ Facts that will bite whoever touches this:
   sweepable); the pattern closed it. It also stopped a subtler bug: an unignored
   new model permanently dirties the tree, and `tools/build_package.sh` refuses to
   package a dirty tree — so dropping in `digitv3.onnx` silently blocked the build.
-- The DB migration chain is at **v12** (`camera.setup_complete`; **v11** was
+- The DB migration chain is at **v13** (`model_migration_receipt` — the
+  rollback-complete receipt for a model-generation swap; **v12** was
+  `camera.setup_complete`; **v11** was
   `camera.areas_need_review`, added for the
   editable-source / ROI-quarantine feature). Add a new migration — never edit a
   shipped one.
