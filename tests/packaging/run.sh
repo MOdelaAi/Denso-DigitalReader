@@ -355,7 +355,10 @@ B="$T/bundle"
 mkdir -p "$B/out"
 BNAME="denso-digitalreader_0.1.0+r400.gabc1234_arm64"
 BOUT="$B/out/$BNAME.tar.gz"
-emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$BOUT"
+# A FIXED epoch, never `date +%s`: the whole point is that the archive is a
+# function of its inputs, so the test's own inputs must be fixed too.
+EPOCH=1700000000
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$BOUT" "$EPOCH"
 rc_is "bundle: emits" $? 0
 [ -f "$BOUT" ] && ok "bundle: archive exists" || bad "bundle: archive exists"
 
@@ -374,11 +377,11 @@ printf '%s\n' "$ENTRIES" | grep -q '\.\.' \
 
 # An unsafe name must be REFUSED, not sanitised: the caller passing one is a
 # bug, and quietly rewriting it would hide that while still shipping.
-emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "../escape" "$B/out/x.tar.gz"
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "../escape" "$B/out/x.tar.gz" "$EPOCH"
 rc_is "bundle: refuses a traversing bundle name" $? 1
-emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "a/b" "$B/out/x.tar.gz"
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "a/b" "$B/out/x.tar.gz" "$EPOCH"
 rc_is "bundle: refuses a bundle name with a slash" $? 1
-emit_bundle "$PF/nonesuch.deb" "$PF/preflight-denso.sh" "$BNAME" "$B/out/x.tar.gz"
+emit_bundle "$PF/nonesuch.deb" "$PF/preflight-denso.sh" "$BNAME" "$B/out/x.tar.gz" "$EPOCH"
 rc_is "bundle: refuses a missing .deb" $? 1
 
 mkdir -p "$B/x" && ( cd "$B/x" && tar xzf "$BOUT" )
@@ -447,13 +450,52 @@ case "$(uname -s 2>/dev/null)" in
     *) echo "skip - bundle: extracted file modes (POSIX bits are not modelled on $(uname -s 2>/dev/null || echo unknown))" ;;
 esac
 
+# ── REPRODUCIBILITY. The clean bundle name carries no content hash, so the
+# name is only a truthful identifier if identical inputs give identical bytes.
+# This was FALSE before: the .deb embedded a wall-clock build time and gzip
+# stamped its own header, so a rebuild silently replaced an earlier artifact
+# under the same filename. Proven here at the emitter level (the full
+# build-twice proof needs a Jetson — tests/manual/repro_build.sh).
+R1="$B/out/repro1.tar.gz"; R2="$B/out/repro2.tar.gz"
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$R1" "$EPOCH" >/dev/null
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$R2" "$EPOCH" >/dev/null
+is "repro: same inputs + same epoch -> BYTE-IDENTICAL archive" \
+   "$(sha256sum < "$R1")" "$(sha256sum < "$R2")"
+
+# ...and the epoch is genuinely applied, not merely accepted. Without this a
+# hardcoded/ignored --mtime would pass the test above for the wrong reason:
+# two archives built in the same second are identical by luck.
+R3="$B/out/repro3.tar.gz"
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$R3" "1600000000" >/dev/null
+if [ "$(sha256sum < "$R1")" != "$(sha256sum < "$R3")" ]; then
+    ok "repro: a DIFFERENT epoch changes the bytes (the mtime is really applied)"
+else
+    bad "repro: a DIFFERENT epoch changes the bytes (the mtime is really applied)"
+fi
+is "repro: entry mtime is the epoch, not the staging time" \
+   "$(TZ=UTC tar tzvf "$R1" | awk '/INSTALL.txt$/{print $4}')" \
+   "$(TZ=UTC date -u -d @$EPOCH +%Y-%m-%d)"
+
+# gzip writes a TIMESTAMP into its own header, so a `tar -czf` archive differs
+# between runs even when every tar entry is pinned — the easy-to-miss half of
+# this fix. Byte 5..8 of a gzip stream is that MTIME field; `gzip -n` zeroes it.
+is "repro: gzip header timestamp is zeroed (gzip -n)" \
+   "$(od -An -tx1 -j4 -N4 "$R1" | tr -d ' ')" "00000000"
+
+# An unusable epoch must be REFUSED, never defaulted to "now": silently
+# falling back is exactly how the non-reproducibility would creep back.
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$B/out/x.tar.gz" ""
+rc_is "repro: refuses an empty epoch (never defaults to now)" $? 1
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$B/out/x.tar.gz" "not-a-number"
+rc_is "repro: refuses a non-numeric epoch" $? 1
+
 # Finding-1 regression class: emit_bundle must run in a SUBSHELL like every
 # other function here — build_package.sh sources policy.sh, gen_preflight.sh
 # and gen_bundle.sh into ONE shell, and it uses $deb/$out/$tmp/$stage itself.
 deb="SENTINEL_deb"; pre="SENTINEL_pre"; name="SENTINEL_name"; out="SENTINEL_out"
 stage="SENTINEL_stage"; root="SENTINEL_root"; tmp="SENTINEL_tmp"
 deb_base="SENTINEL_deb_base"; pre_base="SENTINEL_pre_base"
-emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$B/out/leak.tar.gz" >/dev/null
+emit_bundle "$PF/fake.deb" "$PF/preflight-denso.sh" "$BNAME" "$B/out/leak.tar.gz" "$EPOCH" >/dev/null
 for v in deb pre name out stage root tmp deb_base pre_base; do
     eval "got=\$$v"
     is "leak: $v unchanged after emit_bundle" "$got" "SENTINEL_$v"

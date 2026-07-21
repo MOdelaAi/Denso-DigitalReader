@@ -97,6 +97,18 @@ SHA-256 — so they ship as one file. Assembled by `packaging/lib/gen_bundle.sh`
 (a sourceable emitter, like `gen_preflight.sh`, so `tests/packaging/run.sh` can
 prove its shape off-Jetson).
 
+**Clean builds are byte-reproducible on one machine** — required, because the
+clean artifact name carries no content hash, so a non-reproducible rebuild
+silently replaced a different artifact under an identical filename. Sources of
+variance that had to be closed, all of them non-obvious: `SOURCE_DATE_EPOCH`
+(defaults to the commit time) for the MANIFEST date *and* dpkg-deb's mtime
+clamping; `tar --mtime/--sort/--owner/--group` plus **`gzip -n`** (gzip writes
+its own timestamp into its header, so `tar -czf` is not reproducible even when
+every tar entry is pinned); and **stripping ASLR load addresses from the
+MANIFEST's `ldd` output** — that one alone re-randomized the .deb on every
+build and is invisible, since only the hex changes. Gate:
+`tests/manual/repro_build.sh <engine>` (Jetson-only).
+
 Layout: `/opt/denso/bin/denso` (package-owned) · `/opt/denso/data` (**operator**-
 owned: db, log, models, lock) · `/usr/bin/denso-digitalreader` (the launcher —
 the stable public command; it exports `DENSO_DATA_DIR`) · `/usr/bin/denso-setup`.

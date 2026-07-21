@@ -92,6 +92,31 @@ VERSION="${APP_VERSION}+r${COUNT}.g${SHA}${DIRTY}"
 version_ok "$VERSION" || { echo "computed version is not a safe path component: $VERSION" >&2; exit 1; }
 echo ">> version: $VERSION"
 
+# ── REPRODUCIBILITY. A clean build's version is r<count>.g<sha> — a claim that
+# the artifact is identified by its commit. That claim was FALSE: the MANIFEST
+# embedded `date -Is` and dpkg-deb stamped the current time into the archive,
+# so rebuilding one commit produced different bytes under the SAME filename,
+# silently overwriting the earlier artifact. Anything named after a commit must
+# be a function of that commit alone.
+#
+# The commit timestamp is the stable source. An externally-set SOURCE_DATE_EPOCH
+# wins (the reproducible-builds convention, and it lets a caller pin the value),
+# otherwise it is derived here. Exported because dpkg-deb reads it from the
+# ENVIRONMENT: it stamps the ar container and clamps every tar entry's mtime to
+# it, which is what makes the .deb itself byte-stable.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+fi
+export SOURCE_DATE_EPOCH
+case "$SOURCE_DATE_EPOCH" in
+    ''|*[!0-9]*) echo "SOURCE_DATE_EPOCH is not a positive integer: '$SOURCE_DATE_EPOCH'" >&2; exit 1 ;;
+esac
+echo ">> source date: $SOURCE_DATE_EPOCH ($(date -u -d "@$SOURCE_DATE_EPOCH" -Is))"
+# A DIRTY tree is not described by its commit, so its bytes are not a function
+# of SOURCE_DATE_EPOCH either — the uncommitted content is what varies. Dirty
+# builds stay disambiguated by the .deb-hash suffix on the bundle name (below);
+# reproducibility is a CLEAN-build guarantee only, and the docs say so.
+
 # ── models: explicit, and hash-checked against the tracked approval manifest.
 # The PAIR is approved, never the engine alone: TrtEngine's ctor reads
 # <stem>.names.json for class names, so a wrong/modified sidecar changes
@@ -263,7 +288,13 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$
     echo "version: $VERSION"
     echo "arch: $ARCH"
     echo "source-sha: $SHA${DIRTY:+ (DIRTY TREE)}"
-    echo "built: $(date -Is)"
+    # NOT `date -Is`. A wall-clock build time is the single field that would
+    # make every rebuild of one commit differ, defeating the whole point of
+    # naming the artifact after that commit. Named `source-date`, not `built`,
+    # so it does not claim to be something it is not: it is the COMMIT's
+    # timestamp, and for a dirty tree it describes the commit the tree is
+    # based on, not when anyone pressed build.
+    echo "source-date: $(date -u -d "@$SOURCE_DATE_EPOCH" -Is) (commit time; this file is reproducible, so it is NOT the wall-clock build time)"
     echo "builder: $(uname -sr) $(uname -m)"
     echo "l4t: $(sed -n 's/^# R\([0-9]*\).*REVISION: \([0-9.]*\).*/\1.\2/p' /etc/nv_tegra_release 2>/dev/null | head -1)"
     echo "cmake: $(cmake --version | head -1)"
@@ -279,8 +310,17 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/"     -e "s|@SHLIBS_DEPENDS@|$
         echo "model-recipe: $stem $(awk -v s="$stem" '$1==s {$1="";$2="";$3="";print}' packaging/models.approved | sed 's/^  *//')"
     done
     echo "--- ldd report (diagnostic evidence, not a dependency source) ---"
-    ldd "$EXE"
+    # The load ADDRESSES are stripped. ldd prints where each library happened to
+    # be mapped in that one run, and ASLR randomizes it every time — so the raw
+    # output made the MANIFEST, and therefore the .deb, different on every build
+    # of identical sources. That defeats naming an artifact after its commit,
+    # and it is invisible: the file looks stable because only the hex changes.
+    # The mapping (soname -> resolved path) is the diagnostic value; the
+    # addresses carry none.
+    ldd "$EXE" | sed 's/ (0x[0-9a-f]*)$//'
 } > "$STAGE/opt/denso/MANIFEST"
+# Pinned, not umask-inherited: this shipped 0664 from the Jetson's default 002.
+chmod 0644 "$STAGE/opt/denso/MANIFEST"
 
 # md5sums: MUST be the LAST payload write before dpkg-deb --build. Generating
 # it any earlier (e.g. before MANIFEST is staged) means `dpkg -V` never
@@ -334,12 +374,19 @@ emit_preflight_script "packaging/lib/policy.sh" "$PREFLIGHT_OUT" "$DEB_SHA256"
 # different archives would share a filename and a top-level directory name —
 # one silently overwriting the other in dist/, or being unpacked over it. The
 # .deb's version field is deliberately left alone (it is a dpkg ordering key);
-# only the transport name disambiguates. Clean builds keep the plain name:
-# there the version already identifies the commit.
+# only the transport name disambiguates.
+#
+# Clean builds keep the plain name, and that is now TRUE rather than assumed:
+# with SOURCE_DATE_EPOCH pinned, one commit yields one set of bytes, so the
+# plain name cannot collide with a different artifact. Before that it could —
+# a rebuild silently replaced the earlier .deb under an identical filename.
+# The suffix is a CONTENT hash, so two dirty builds of an unchanged tree now
+# land on the same name with the same bytes (a harmless no-op), while any real
+# difference in the working tree produces a different name.
 BUNDLE="denso-digitalreader_${VERSION}_${ARCH}"
 [ -z "$DIRTY" ] || BUNDLE="${BUNDLE}.$(printf %.12s "$DEB_SHA256")"
 BUNDLE_OUT="dist/${BUNDLE}.tar.gz"
-emit_bundle "$OUT" "$PREFLIGHT_OUT" "$BUNDLE" "$BUNDLE_OUT"
+emit_bundle "$OUT" "$PREFLIGHT_OUT" "$BUNDLE" "$BUNDLE_OUT" "$SOURCE_DATE_EPOCH"
 
 echo
 echo ">> built $OUT"

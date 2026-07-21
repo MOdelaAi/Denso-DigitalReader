@@ -17,7 +17,7 @@
 #
 # POSIX sh, sourceable by build_package.sh (bash) and run.sh (bash) alike.
 #
-#   emit_bundle <deb-path> <preflight-path> <bundle-name> <output.tar.gz>
+#   emit_bundle <deb-path> <preflight-path> <bundle-name> <output.tar.gz> <source-date-epoch>
 #
 # <bundle-name> is BOTH the archive's single top-level directory and the stem
 # an operator will `cd` into. It must already be a safe path component — the
@@ -30,10 +30,15 @@
 # variables of the same name — the defect already fixed across every function
 # in policy.sh, and build_package.sh sources all three files into one shell.
 emit_bundle() (
-    deb="$1"; pre="$2"; name="$3"; out="$4"
+    deb="$1"; pre="$2"; name="$3"; out="$4"; epoch="$5"
 
     [ -f "$deb" ] || { echo "emit_bundle: no such .deb: $deb" >&2; return 1; }
     [ -f "$pre" ] || { echo "emit_bundle: no such preflight: $pre" >&2; return 1; }
+    # Required, not defaulted: silently falling back to "now" would make the
+    # archive quietly non-reproducible again — the exact defect this closes.
+    case "${epoch:-}" in
+        ''|*[!0-9]*) echo "emit_bundle: SOURCE_DATE_EPOCH must be a positive integer, got '${epoch:-}'" >&2; return 1 ;;
+    esac
     # The name becomes a directory inside an archive an operator unpacks with
     # elevated intent. A slash or a traversal here is an extraction escape.
     case "${name:-}" in
@@ -104,18 +109,32 @@ emit_bundle() (
     } > "$root/INSTALL.txt" || { rm -rf "$stage"; return 1; }
     chmod 0644 "$root/INSTALL.txt" || { rm -rf "$stage"; return 1; }
 
-    # --sort=name + fixed 0/0 ownership so the archive's metadata does not
-    # carry the build user, and repeated builds of the same inputs differ only
-    # where the inputs do. This is TIDINESS, not reproducibility — the .deb
-    # inside embeds `built: <timestamp>` in its MANIFEST by design, so chasing
-    # deterministic outer bytes would buy nothing.
+    # BYTE-REPRODUCIBLE, given the same inputs and epoch. Four separate sources
+    # of variance, all of which have to be closed or the guarantee is worthless:
+    #   --sort=name    directory read order is filesystem-dependent
+    #   --owner/group  otherwise the build user's name+uid land in the archive
+    #   --mtime        otherwise every entry carries the staging time (the
+    #                  files were literally just created by mktemp+cp)
+    #   gzip -n        gzip writes a TIMESTAMP and the source filename into its
+    #                  own header, so `tar -czf` is non-reproducible even when
+    #                  every tar entry is pinned. This is the one that is easy
+    #                  to miss: the tar stream is identical and the .gz differs.
+    # Piping to an explicit `gzip -n` is why -cf is used here, not -czf.
     #
     # Write to a temp name in the SAME directory as $out and rename, so an
     # interrupted tar can never leave a truncated .tar.gz sitting at the path
     # an operator is about to scp.
     tmp="$(mktemp "$(dirname "$out")/.bundle.XXXXXX")" || { rm -rf "$stage"; return 1; }
-    if ! tar --sort=name --owner=0 --group=0 --numeric-owner \
-             -czf "$tmp" -C "$stage" "$name"; then
+    # No pipefail assumption: this is sourced into callers with and without it.
+    # tar's status is captured explicitly so a tar failure can never be masked
+    # by a successful gzip writing a valid archive of a truncated stream.
+    tar_rc=0
+    { tar --sort=name --owner=0 --group=0 --numeric-owner \
+          --mtime="@$epoch" -cf - -C "$stage" "$name" || tar_rc=$?; } \
+        | gzip -n > "$tmp"
+    gzip_rc=$?
+    if [ "$tar_rc" != "0" ] || [ "$gzip_rc" != "0" ]; then
+        echo "emit_bundle: archive creation failed (tar=$tar_rc gzip=$gzip_rc)" >&2
         rm -f "$tmp"; rm -rf "$stage"; return 1
     fi
     chmod 0644 "$tmp" || { rm -f "$tmp"; rm -rf "$stage"; return 1; }
