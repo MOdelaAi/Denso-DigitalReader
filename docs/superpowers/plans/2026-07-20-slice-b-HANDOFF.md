@@ -211,3 +211,21 @@ single-instance + trigger network reassert).
   window/camera-UI/status open (confirmed visually via AnyDesk); for future-schema /
   corrupt DBs NO window is expected — verified objectively via exit 78, unchanged
   PRAGMA user_version, status.json, and logs.
+
+## 11. Codex review of the --check/denso-setup change (54ff7ca)
+
+APPROVED the exit-handling contract itself: production v13 + unmanifested engines →
+Degraded/10; fresh install (in-memory migrated) still flags on-disk unmanifested engines
+as 10; the primary DB is never created or migrated (read-only / in-memory only, WAL-safe);
+`crc=0` + `cmd || crc=$?` is set-e-safe and only 0 and 10 continue; blocked/unknown codes
+stop; engine deep-load failure stays a hard exit 1.
+
+**PRE-EXISTING limitation Codex surfaced (NOT introduced here; documented, not fixed):**
+a DB from a schema PRE-v8 (before `camera_model` existed) makes `configured_models()`'s
+query fail → `run_check` exits 1 → `denso-setup verify` reports FAIL, even though the
+`--check-migrations` copy migrated cleanly. Behaviour is IDENTICAL to before this change
+(the old `if --check` also FAILed on exit 1), fails safe/loud (no corruption, no false
+launch), and only affects upgrades from a very old (pre-v8) install; v8–v13 are fine.
+Fixing it cleanly means schema-version-dependent routing of configured_models + the
+verdict (evaluate an older-than-supported DB via an in-memory migrated view) — deferred
+as a separate small hardening, out of slice (b)'s finding-#1 scope.
