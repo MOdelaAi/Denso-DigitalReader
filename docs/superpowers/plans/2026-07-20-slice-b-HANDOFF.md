@@ -229,3 +229,26 @@ launch), and only affects upgrades from a very old (pre-v8) install; v8–v13 ar
 Fixing it cleanly means schema-version-dependent routing of configured_models + the
 verdict (evaluate an older-than-supported DB via an in-memory migrated view) — deferred
 as a separate small hardening, out of slice (b)'s finding-#1 scope.
+
+## 12. Collaborative pre-merge gate — objective half DONE (2026-07-21)
+
+Driven over SSH on the Jetson (aarch64), isolated DENSO_DATA_DIR, production data
+untouched. 11/11 objective checks pass:
+- FINDING #1 on real hardware: `denso --check` → 0 (clean/Ready), **10 (unmanifested
+  engine → Degraded)**, degraded diagnostic printed; `check_verdict` maps 0/10/78/other
+  so `denso-setup` WARNS-and-continues on 10.
+- GUI boot (offscreen), future-schema DB: exit **78**, **PRAGMA user_version 14→14
+  unchanged** (no migration/downgrade), status.json `schema_newer`, log `BLOCKED
+  schema_newer`.
+- GUI boot, corrupt DB: exit **78**, status.json `db_unopenable`.
+- GUI boot, normal migrated v13: boots and stays up (event loop alive @7s).
+
+REMAINING (human, AnyDesk — the VISUAL half): confirm the normal-DB startup renders on
+the real X session (application window + camera UI + local status display), per steps 1
+& 4. Blocked-boot cases have NO window by design (finding #2 = won't-fix), so there is
+nothing visual to confirm for them — they are verified objectively above.
+
+REMAINING (deployment residual, NOT slice (b)): systemd `Restart=on-abnormal` no-loop
+check needs the --user unit installed/enabled; this dev Jetson sits at the GDM greeter
+(autologin unconfigured). Restart behaviour is reasoned-correct (on-abnormal ignores any
+clean exit incl. 78) + Codex-confirmed; verify live at real deployment via denso-setup.
