@@ -29,6 +29,26 @@ version_ok() (
     return 0
 )
 
+# --- check_verdict <exit-code> ----------------------------------------------
+# Map `denso --check`'s exit code to a verify action. The readiness contract
+# (src/core/health/integrity.cpp exit_code_for) is:
+#   0  = Ready               -> "ok"       verify continues
+#   10 = Degraded serviceable -> "degraded" verify WARNS but continues (the
+#        production Jetson runs unmanifested engines by design — a warning, not a
+#        blocker; see the §2.3 compatibility decision)
+#   78 = Blocked (EX_CONFIG)  -> "blocked"  verify STOPS: a configuration fault
+#   *  = anything else        -> "failed"   an UNEXPECTED check failure -> stop
+# Fail closed on unknown codes: never silently continue on a code we do not model.
+# Echoes the token; the caller branches on it. Subshell body — see version_ok.
+check_verdict() (
+    case "${1-}" in
+        0)  echo ok ;;
+        10) echo degraded ;;
+        78) echo blocked ;;
+        *)  echo failed ;;
+    esac
+)
+
 # --- apt_plan_ok <plan-file> -------------------------------------------------
 # Reads `LC_ALL=C apt-get -s install ...` output. A Depends: declaration does
 # NOT stop apt from removing or replacing a protected package to satisfy

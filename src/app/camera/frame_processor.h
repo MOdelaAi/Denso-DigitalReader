@@ -22,6 +22,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -84,11 +85,21 @@ public:
         std::vector<denso::detection::ModelClassSelection> classes;  // id → conf
     };
 
+    /// Raised when consecutive inference failures cross kInferFailInhibitAfter,
+    /// and cleared once inference recovers. CONTRACT: invoked on the INFERENCE
+    /// WORKER THREAD — the wiring must marshal to the GUI thread
+    /// (common::post_to_gui) before touching ZoneHealth, which is single-threaded
+    /// by design. Passed at construction (not via a setter) so it is set before
+    /// the worker thread starts: the worker reads it every frame, so a later write
+    /// from another thread would be a data race on the std::function.
+    using WorkerFailedFn = std::function<void(int64_t camera_id, bool failed)>;
+
     DetectionProcessor(int degrees, double pitch, double roll,
                        std::vector<ModelRun> models,
                        std::vector<denso::camera::CameraArea> areas = {},
                        int64_t camera_id = 0, ReadingSink* sink = nullptr,
-                       ZoneSink* zone_sink = nullptr);
+                       ZoneSink* zone_sink = nullptr,
+                       WorkerFailedFn on_worker_failed = {});
     ~DetectionProcessor() override;  // stops + joins the inference worker
 
     DetectionProcessor(const DetectionProcessor&) = delete;
@@ -108,6 +119,7 @@ private:
     int64_t camera_id_ = 0;
     ReadingSink* sink_ = nullptr;     // non-owning; null = no reading capture
     ZoneSink* zone_sink_ = nullptr;   // non-owning; null = no zone reporting
+    WorkerFailedFn on_worker_failed_; // empty = no inference-failure escalation
 
     // Latest-frame slot handed to the inference worker (drop-oldest).
     std::mutex slot_mtx_;
@@ -125,6 +137,9 @@ private:
     // Consecutive inference-failure count (worker thread only; no lock needed).
     // Throttles the failure log to once per this many consecutive throws.
     static constexpr int kInferFailLogEvery = 60;
+    // Consecutive inference failures before the camera is escalated as failed
+    // (on_worker_failed_ fires once at this exact count; cleared on recovery).
+    static constexpr int kInferFailInhibitAfter = 10;
     int infer_fail_streak_ = 0;
 
     std::thread worker_;  // started last in the ctor

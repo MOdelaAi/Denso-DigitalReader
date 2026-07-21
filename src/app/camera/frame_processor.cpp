@@ -28,11 +28,14 @@ DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
                                        std::vector<ModelRun> models,
                                        std::vector<denso::camera::CameraArea> areas,
                                        int64_t camera_id, ReadingSink* sink,
-                                       ZoneSink* zone_sink)
+                                       ZoneSink* zone_sink,
+                                       WorkerFailedFn on_worker_failed)
     : degrees_(degrees), pitch_(pitch), roll_(roll),
       models_(std::move(models)), areas_(std::move(areas)),
-      camera_id_(camera_id), sink_(sink), zone_sink_(zone_sink) {
-    // Start the inference worker LAST, once every member is initialized.
+      camera_id_(camera_id), sink_(sink), zone_sink_(zone_sink),
+      on_worker_failed_(std::move(on_worker_failed)) {
+    // Start the inference worker LAST, once every member is initialized — the
+    // worker reads on_worker_failed_ every frame, so it must be set before start.
     worker_ = std::thread([this] { infer_loop(); });
 }
 
@@ -170,7 +173,17 @@ void DetectionProcessor::infer_loop() {
                     << "[infer] camera" << camera_id_ << "inference failed ("
                     << infer_fail_streak_ << " in a row):" << e.what();
             }
+            // Escalate exactly once, when the streak first reaches the threshold —
+            // a persistent GPU/engine fault inhibits the camera's zones rather than
+            // holding a stale reading forever. The handler marshals to the GUI.
+            if (infer_fail_streak_ == kInferFailInhibitAfter && on_worker_failed_) {
+                on_worker_failed_(camera_id_, true);
+            }
             continue;
+        }
+        // Clear the escalation on the first good frame after we had inhibited.
+        if (infer_fail_streak_ >= kInferFailInhibitAfter && on_worker_failed_) {
+            on_worker_failed_(camera_id_, false);
         }
         infer_fail_streak_ = 0;  // recovered
 

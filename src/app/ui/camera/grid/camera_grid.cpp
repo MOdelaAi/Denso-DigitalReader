@@ -11,12 +11,15 @@
 #include "ui/camera/grid/grid_layout.h"
 #include "brazing/zone_reporter.h"
 #include "detection/engine_registry.h"
+#include "health/status_file.h"
+#include "paths/paths.h"
 #include "ui/common/async_runner.h"  // post_to_gui
 #include "ui/warmup_state.h"
 
 #include <QCoreApplication>
 #include <QColor>
 #include <QDebug>
+#include <QDir>
 #include <QGridLayout>
 #include <QPainter>
 #include <QPaintEvent>
@@ -68,6 +71,7 @@ void CameraGrid::clear() {
         delete t;
     }
     tiles_.clear();
+    tiles_by_cam_.clear();   // the tiles it pointed at were just deleted
     // Safe to tear down now: deleting each stream above destroyed the
     // FrameProcessor it owns, and ~DetectionProcessor joins its INFERENCE worker
     // — the thread that actually calls on_zones (capture threads never do). That
@@ -75,6 +79,11 @@ void CameraGrid::clear() {
     // reach the reporter. Tear down the reporter, then the client it posts to.
     reporter_.reset();
     brazing_reporter_.reset();
+    // health_ last: its callback references reporter_. No worker can fire it now
+    // (workers joined above), and its destructor raises no cause, so this is safe.
+    health_.reset();
+    last_applied_seq_ = 0;
+    verdict_ = health::IntegrityVerdict{};
     rows_ = 0;
     cols_ = 0;
     grid_->setContentsMargins(0, 0, 0, 0);
@@ -98,6 +107,20 @@ void CameraGrid::reload() {
         return;
     }
 
+    // Boot readiness verdict, computed once per reload: drives the per-camera
+    // ModelUnavailable cause below and status.json. Read-only (spec §2).
+    verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir());
+
+    // Per-camera inhibit owner (GUI thread, no mutex). Any cause transition gates
+    // the reporter, repaints the camera's tile, and rewrites status.json. Created
+    // even without brazing so tiles + status.json still reflect faults.
+    health_ = std::make_unique<health::ZoneHealth>(
+        [this](int64_t camera_id, bool inhibited) {
+            if (reporter_) reporter_->set_camera_inhibited(camera_id, inhibited);
+            refresh_tile_inhibit(camera_id);
+            refresh_status_file();
+        });
+
     // Brazing zone reporting: when enabled, a single machine-wide ZoneReporter
     // collects every camera's assembled zones and POSTs the combined snapshot on
     // change. The reporter is called from capture threads; its callback hops to
@@ -108,9 +131,19 @@ void CameraGrid::reload() {
             std::make_unique<BrazingClient>(bcfg.base_url));
         BrazingReporter* reporter = brazing_reporter_.get();
         reporter_ = std::make_unique<ZoneReporter>(
-            [reporter](const std::map<int, int>& snap) {
-                common::post_to_gui(reporter,
-                                    [reporter, snap] { reporter->submit(snap); });
+            [this, reporter](const std::map<int, int>& snap, uint64_t seq) {
+                // Marshal to `reporter` (not `this`) so Qt drops the queued call if
+                // the BrazingReporter is torn down; `reporter` is owned by this
+                // grid, so `this` (for last_applied_seq_) is valid whenever it runs.
+                common::post_to_gui(reporter, [this, reporter, snap, seq] {
+                    // Callbacks fire outside the reporter mutex and marshal from
+                    // several threads, so an older eviction can overtake a newer
+                    // recovery. Drop the stale one rather than let whole-snapshot
+                    // latest-wins clobber the recovery (spec §3.3d).
+                    if (seq <= last_applied_seq_) return;
+                    last_applied_seq_ = seq;
+                    reporter->submit(snap);
+                });
             });
     }
 
@@ -124,6 +157,20 @@ void CameraGrid::reload() {
 
         grid_->addWidget(tile, i / dims.cols, i % dims.cols);
         tiles_.push_back(tile);
+        tiles_by_cam_[cam.id] = tile;
+
+        // Install the static causes BEFORE the camera can publish (spec §8): the
+        // tile is now in tiles_by_cam_, so the cause transition paints it. A
+        // renumbered/quarantined ROI (areas_need_review) and a camera whose engine
+        // is missing from disk (per-zone EngineMissing issue) both boot inhibited.
+        health_->set_cause(cam.id, health::ZoneCause::AreasNeedReview,
+                           cam.areas_need_review);
+        for (const auto& iss : verdict_.issues) {
+            if (iss.kind == health::ZoneIssue::Kind::EngineMissing &&
+                iss.camera_id == cam.id) {
+                health_->set_cause(cam.id, health::ZoneCause::ModelUnavailable, true);
+            }
+        }
 
         const detection::CameraDetection det = detection::detection_for(db_, cam.id);
         if (det.models.empty() || warmup_ == nullptr) {
@@ -152,6 +199,9 @@ void CameraGrid::reload() {
     rows_ = dims.rows;
     cols_ = dims.cols;
     relayout_letterbox();
+    // Write status.json once now that every boot cause is installed, even if none
+    // fired (a healthy machine still publishes a "ready" file for SSH inspection).
+    refresh_status_file();
     // Streams are created + started per camera in start_one (now or as models
     // warm), so there is no batch start here.
 }
@@ -200,7 +250,17 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
                     static_cast<int>(cam.rotation), cam.pitch, cam.roll,
                     std::move(runs), std::move(areas), cam.id,
                     /*ReadingSink*/ nullptr,
-                    /*ZoneSink*/ review ? nullptr : reporter_.get());
+                    /*ZoneSink*/ review ? nullptr : reporter_.get(),
+                    // Consecutive inference failures inhibit the camera. The handler
+                    // fires on the INFERENCE WORKER THREAD, so marshal to the GUI
+                    // before touching ZoneHealth (single-threaded by design).
+                    /*WorkerFailedFn*/ [this, id = cam.id](int64_t, bool failed) {
+                        common::post_to_gui(this, [this, id, failed] {
+                            if (!health_) return;
+                            health_->set_cause(
+                                id, health::ZoneCause::InferenceWorkerFailed, failed);
+                        });
+                    });
             }
         } catch (const std::exception& e) {
             qCritical().noquote()
@@ -212,10 +272,23 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
         }
     }
     tile->set_preparing(false);
-    tile->set_review_paused(review);
+    // The inhibit banner is driven by health_ causes (AreasNeedReview was set in
+    // reload()), not set here — set_inhibited superseded set_review_paused.
     auto* stream = new CameraStream(cam, std::move(proc));
     connect(stream, &CameraStream::frame_ready, tile, &CameraTile::set_frame);
     connect(stream, &CameraStream::status_changed, tile, &CameraTile::set_status);
+    // Camera-offline is a CAMERA-level cause: it drops the whole observation and
+    // evicts the camera's zones immediately. Receiver is this grid (GUI thread) so
+    // the AutoConnection is queued from the capture thread — the queued delivery is
+    // what keeps ZoneHealth single-owner (mutex-free); a DirectConnection here
+    // would break that invariant.
+    connect(stream, &CameraStream::status_changed, this,
+            [this, id = cam.id](int s) {
+                if (!health_) return;
+                health_->set_cause(
+                    id, health::ZoneCause::CaptureOffline,
+                    s == static_cast<int>(CameraStream::Status::Offline));
+            });
     tile->set_frame_counter(stream->frame_counter());
     streams_.push_back(stream);
     stream->start();
@@ -240,6 +313,22 @@ void CameraGrid::on_warmup_finished() {
         start_one(it->second.cam, it->second.tile);
         pending_cams_.erase(it);
     }
+}
+
+void CameraGrid::refresh_tile_inhibit(int64_t camera_id) {
+    const auto it = tiles_by_cam_.find(camera_id);
+    if (it == tiles_by_cam_.end()) return;
+    it->second->set_inhibited(health_ ? health_->causes(camera_id) : 0u);
+}
+
+void CameraGrid::refresh_status_file() {
+    if (!health_) return;
+    // Reuse the boot verdict (per-zone issues do not change at runtime); only the
+    // runtime camera causes move. held/inhibited zone lists are not surfaced yet
+    // (no producer this slice), so they stay empty.
+    health::write_status_file(
+        QDir(denso::paths::data_dir()).filePath(QStringLiteral("status.json")),
+        verdict_, health_->all(), {}, {});
 }
 
 void CameraGrid::release_streams() {

@@ -8,11 +8,14 @@
 #include "camera/camera.h"
 #include "camera/warmup_gate.h"
 #include "detection/engine_registry.h"
+#include "health/integrity.h"     // IntegrityVerdict
+#include "health/zone_health.h"   // ZoneHealth, ZoneCause
 
 #include <QSqlDatabase>
 #include <QString>
 #include <QWidget>
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -50,6 +53,8 @@ private:
     void start_one(const camera::Camera& cam, CameraTile* tile);  // build proc+stream, start
     void on_model_ready(const QString& filename);
     void on_warmup_finished();
+    void refresh_tile_inhibit(int64_t camera_id);  // push a camera's causes to its tile
+    void refresh_status_file();                    // rewrite status.json (verdict + causes)
 
     QSqlDatabase db_;
     QGridLayout* grid_ = nullptr;
@@ -66,6 +71,12 @@ private:
     std::map<int64_t, PendingCam> pending_cams_;
     std::unique_ptr<BrazingReporter> brazing_reporter_;  // GUI-thread reliable sender
     std::unique_ptr<ZoneReporter> reporter_;             // shared ZoneSink (machine)
+    // Per-camera inhibit cause owner (GUI thread, no mutex). Drives the reporter
+    // gate, the tile banners, and status.json. Rebuilt each reload().
+    std::unique_ptr<health::ZoneHealth> health_;
+    health::IntegrityVerdict verdict_;                   // boot readiness (per reload)
+    std::map<int64_t, CameraTile*> tiles_by_cam_;        // camera id -> its tile
+    uint64_t last_applied_seq_ = 0;   // drop-stale guard on the snapshot sequence
     int rows_ = 0;  // current grid dims (0 = empty); drives the letterbox aspect
     int cols_ = 0;
 };

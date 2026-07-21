@@ -23,14 +23,17 @@ target_include_directories(denso_detection PUBLIC
 target_link_libraries(denso_detection PUBLIC denso_core Qt6::Core ${OpenCV_LIBS})
 
 # ── denso_brazing: the pure, testable reporting logic (combined-zone payload
-#    builder, single-flight retry policy, machine-wide zone aggregator) with NO
-#    Qt-Network dependency. Both `denso` and `denso_tests` LINK it. The Qt-Network
-#    transport (brazing_client/reporter) + the ZoneSink impl (zone_reporter) stay
-#    in `denso`.
+#    builder, single-flight retry policy, machine-wide zone aggregator, and the
+#    ZoneSink impl zone_reporter) with NO Qt-Network dependency. Both `denso` and
+#    `denso_tests` LINK it. zone_reporter has zero Qt deps (chrono/mutex/map/set/
+#    functional only), so it belongs here — and denso_tests links this lib but not
+#    the denso exe, so it must live here for the reporter tests to link. The
+#    Qt-Network transport (brazing_client/reporter) stays in `denso`.
 add_library(denso_brazing STATIC
     brazing/brazing_payload.cpp
     brazing/brazing_retry_policy.cpp
     brazing/zone_aggregator.cpp
+    brazing/zone_reporter.cpp
 )
 target_include_directories(denso_brazing PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(denso_brazing PUBLIC denso_core Qt6::Core)
@@ -100,11 +103,10 @@ add_executable(denso WIN32
     ui/camera/grid/camera_grid.cpp
     ui/camera/grid/camera_tile.cpp
     ui/camera/grid/grid_layout.cpp
-    # brazing/reporting: the Qt-Network transport + ZoneSink impl (pure logic —
-    # payload/retry_policy/aggregator — is in the denso_brazing lib below)
+    # brazing/reporting: the Qt-Network transport only (pure logic —
+    # payload/retry_policy/aggregator/zone_reporter — is in the denso_brazing lib)
     brazing/brazing_client.cpp
     brazing/brazing_reporter.cpp
-    brazing/zone_reporter.cpp
     # camera — management modal internals
     ui/camera/dialog/page_util.cpp
     ui/camera/dialog/list_page.cpp

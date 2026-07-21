@@ -2,6 +2,8 @@
 
 #include "detection/repo.h"
 #include "detection/engine_registry.h"
+#include "health/integrity.h"
+#include "health/status_file.h"
 #include "paths/paths.h"
 #include "ui/mainwindow.h"
 #include "ui/startup_mode.h"
@@ -11,6 +13,7 @@
 
 #include <QApplication>
 #include <QDebug>
+#include <QDir>
 #include <QThread>
 
 #include <memory>
@@ -48,6 +51,11 @@ int launch_cold_with_splash(QApplication& app, QSqlDatabase db,
     // (clear message, non-zero exit) instead of std::terminate on the worker.
     QObject::connect(worker, &WarmupWorker::failed, &app, [&app](const QString& err) {
         qCritical().noquote() << "[fatal] model warm-up failed:" << err;
+        // Keep exit 1 (Jetson-verified fail-loud): the shipped systemd unit
+        // documents "exit 1 = warm-up found a missing/invalid engine" and does not
+        // restart on it (Restart=on-abnormal ignores any clean exit). EX_CONFIG is
+        // reserved for the readiness-VERDICT paths (evaluate_db_schema / integrity
+        // Blocked), which is where a distinct config-fault code earns its keep.
         app.exit(1);
     });
     QObject::connect(worker, &WarmupWorker::finished, &app,
@@ -97,6 +105,11 @@ int launch_warm_ui_first(QApplication& app, QSqlDatabase db,
     // Engine-only, no fallback: a fatal warm-up failure aborts startup cleanly.
     QObject::connect(&warmup, &WarmupState::failed, &app, [&app](const QString& err) {
         qCritical().noquote() << "[fatal] model warm-up failed:" << err;
+        // Keep exit 1 (Jetson-verified fail-loud): the shipped systemd unit
+        // documents "exit 1 = warm-up found a missing/invalid engine" and does not
+        // restart on it (Restart=on-abnormal ignores any clean exit). EX_CONFIG is
+        // reserved for the readiness-VERDICT paths (evaluate_db_schema / integrity
+        // Blocked), which is where a distinct config-fault code earns its keep.
         app.exit(1);
     });
 
@@ -108,6 +121,26 @@ int launch_warm_ui_first(QApplication& app, QSqlDatabase db,
 
 int launch(QApplication& app, QSqlDatabase db,
            std::shared_ptr<settings::Settings> state) {
+    // Boot readiness gate. A WHOLE-MACHINE blocker (models dir unreadable, a
+    // corrupt manifest, a failed catalog query) is a configuration fault no
+    // restart fixes: fail with EX_CONFIG BEFORE building the window or warming
+    // engines, leaving an inspectable status.json. Per-zone / Degraded issues do
+    // NOT stop boot — CameraGrid installs those as inhibit causes (spec §8), and
+    // it rewrites status.json with the live causes once the grid is up. The
+    // DB-stage blockers (schema newer / unopenable / migration failed) were
+    // already handled in main.cpp before the DB was opened.
+    const auto verdict = denso::health::evaluate_integrity(db, denso::paths::models_dir());
+    if (verdict.status == denso::health::Readiness::Blocked) {
+        const QString status_path =
+            QDir(denso::paths::data_dir()).filePath(QStringLiteral("status.json"));
+        denso::health::write_status_file(status_path, verdict, {}, {}, {});
+        for (const auto& b : verdict.blockers) {
+            qCritical().noquote() << "[startup] BLOCKED:"
+                                  << denso::health::reason_code(b.kind) << "—" << b.detail;
+        }
+        return denso::health::exit_code_for(verdict.status);
+    }
+
     const std::string models_dir = denso::paths::models_dir().toStdString();
     const std::string cache_dir = denso::paths::trt_cache_dir().toStdString();
     // The models configured cameras actually need — warm_up fails loud if any is

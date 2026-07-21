@@ -7,6 +7,8 @@
 #include "cli/args.h"
 #include "cli/run_headless.h"
 #include "db/db.h"
+#include "health/integrity.h"
+#include "health/status_file.h"
 #include "instance/single_instance.h"
 #include "logging/log_sink.h"
 #include "network/backend.h"
@@ -20,6 +22,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
+#include <QDir>
 #include <QLocale>
 #include <QLockFile>
 #include <QMessageBox>
@@ -77,6 +80,34 @@ int level_from_env() {
     if (v == QLatin1String("off")) return 5;
     std::fprintf(stderr, "[log] unknown DENSO_LOG_LEVEL '%s' — using info\n", s);
     return 1;
+}
+
+// A Blocked verdict carrying exactly one global blocker, for the DB-stage boot
+// failures (open / schema / migrate) that each have a single cause.
+denso::health::IntegrityVerdict db_blocker(denso::health::GlobalBlocker::Kind kind,
+                                           const QString& detail) {
+    denso::health::IntegrityVerdict v;
+    v.status = denso::health::Readiness::Blocked;
+    v.blockers.push_back({kind, detail});
+    return v;
+}
+
+// Emit a pre-window boot blocker: log it (to the file sink + stderr), write an
+// inspectable status.json so a headless field box's fault is visible over SSH,
+// and return EX_CONFIG (78) — the conventional "configuration error" code. The
+// shipped systemd unit uses Restart=on-abnormal, which already declines to
+// restart ANY clean exit; the distinct code is so an operator / denso-setup can
+// tell a configuration fault from a crash, not a lever over systemd's restart.
+int report_db_blocker(const denso::health::IntegrityVerdict& v, const QString& status_path) {
+    for (const auto& b : v.blockers) {
+        qCritical().noquote() << "[startup] BLOCKED:" << denso::health::reason_code(b.kind)
+                              << "—" << b.detail;
+        // qCritical is filterable by DENSO_LOG_LEVEL; stderr always gets it so a
+        // fatal boot never exits non-zero with no output anywhere.
+        std::fprintf(stderr, "denso: fatal: %s\n", qPrintable(b.detail));
+    }
+    denso::health::write_status_file(status_path, v, {}, {}, {});
+    return denso::health::exit_code_for(v.status);
 }
 
 // Level-filter, then route to the bounded rotating file sink (+ stderr inside
@@ -163,26 +194,33 @@ int main(int argc, char** argv) {
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
 
     const QString db_path = denso::paths::db_file();
+    const QString status_path =
+        QDir(denso::paths::data_dir()).filePath(QStringLiteral("status.json"));
+
+    // DB-stage readiness preflight, BEFORE the read-write open below would create
+    // or migrate the file: a database written by a NEWER build (SchemaNewer) or
+    // an unreadable one (DbUnopenable) is a configuration fault no restart fixes.
+    // Read-only, and the SAME classifier --check uses (health::evaluate_db_schema)
+    // so boot and --check agree on a future-schema appliance and both exit 78.
+    if (auto v = denso::health::evaluate_db_schema(db_path);
+        v.status == denso::health::Readiness::Blocked) {
+        return report_db_blocker(v, status_path);
+    }
+
     auto db = denso::db::Db::open(db_path);
     if (!db) {
         // NOT qFatal: it aborts without unwinding, so instance_guard's lock file
         // would survive with a dead pid — and an operator retrying immediately
         // after (say) a permissions error on the data dir would be told "already
         // running" instead of the real cause. Expected startup failures exit
-        // cleanly; qFatal stays for genuinely unrecoverable aborts.
-        qCritical().noquote() << "[fatal] cannot open database:" << db_path;
-        // qCritical is filterable by DENSO_LOG_LEVEL=off (it is not
-        // QtFatalMsg — see message_handler above), so a genuinely fatal
-        // startup failure could otherwise exit 1 with zero output anywhere.
-        // stderr always gets it, same as the second-instance path above.
-        std::fprintf(stderr, "denso: fatal: cannot open database: %s\n", qPrintable(db_path));
-        return 1;
+        // cleanly (EX_CONFIG); qFatal stays for genuinely unrecoverable aborts.
+        return report_db_blocker(
+            db_blocker(denso::health::GlobalBlocker::Kind::DbUnopenable, db_path), status_path);
     }
     QSqlDatabase conn = db->handle();
     if (!denso::db::run_migrations(conn)) {
-        qCritical().noquote() << "[fatal] cannot run migrations on:" << db_path;
-        std::fprintf(stderr, "denso: fatal: cannot run migrations on: %s\n", qPrintable(db_path));
-        return 1;
+        return report_db_blocker(
+            db_blocker(denso::health::GlobalBlocker::Kind::MigrationFailed, db_path), status_path);
     }
 
     // ── Session marker: one line per boot to anchor field diagnosis. No

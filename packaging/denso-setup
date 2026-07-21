@@ -316,12 +316,22 @@ cmd_verify() {
         engines="$engines --engine $(basename "$eng")"
     done
     tmp="$(mktemp -d)"; chown "$user":"$group" "$tmp"
+    # Capture the exact exit code rather than a boolean: --check speaks the
+    # readiness contract (0 Ready / 10 Degraded-serviceable / 78 Blocked), and a
+    # bare `if` would collapse the serviceable-but-DEGRADED appliance (the
+    # unmanifested-engines production Jetson, exit 10) into a hard FAIL that aborts
+    # setup — the opposite of the §2.3 compatibility guarantee. `|| crc=$?`
+    # captures the code without tripping `set -e`.
+    crc=0
     # shellcheck disable=SC2086
-    if as_user "$user" env HOME="$tmp" TMPDIR="$tmp" CUDA_CACHE_PATH="$tmp/cuda" "$DENSO" --check $engines; then
-        echo "  ok  runtime + engines validate"
-    else
-        echo "  FAIL --check did not pass"; rc=1
-    fi
+    as_user "$user" env HOME="$tmp" TMPDIR="$tmp" CUDA_CACHE_PATH="$tmp/cuda" "$DENSO" --check $engines || crc=$?
+    case "$(check_verdict "$crc")" in
+        ok)       echo "  ok   runtime + engines validate" ;;
+        degraded) echo "  WARN runtime serviceable but DEGRADED (--check exit 10) — see the"
+                  echo "       check output above; continuing (not a blocker by design)" ;;
+        blocked)  echo "  FAIL runtime BLOCKED (--check exit 78, configuration fault) — do NOT launch"; rc=1 ;;
+        failed)   echo "  FAIL --check unexpected failure (exit $crc)"; rc=1 ;;
+    esac
     rm -rf "$tmp"
 
     [ "$rc" = "0" ] && echo "verify: PASS" || echo "verify: FAIL"

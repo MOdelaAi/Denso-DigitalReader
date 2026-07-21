@@ -113,26 +113,58 @@ std::optional<Db> Db::open_read_only(const QString& path) {
     return Db(name);
 }
 
+int supported_schema_version() { return SCHEMA_VERSION; }
+
+std::optional<int> read_user_version(const QSqlDatabase& db) {
+    // Own scope for the query: QSQLITE holds the read lock until the QSqlQuery is
+    // destroyed, so callers that go on to run DDL must not keep this cursor open.
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral("PRAGMA user_version")) || !q.next()) {
+        return std::nullopt;
+    }
+    return q.value(0).toInt();
+}
+
+bool quick_check(const QSqlDatabase& db) {
+    QSqlQuery q(db);
+    // A healthy database answers with a single row "ok". Corruption yields one or
+    // more error rows (and can span pages) — the first non-"ok" row is enough.
+    if (!q.exec(QStringLiteral("PRAGMA quick_check")) || !q.next()) {
+        return false;
+    }
+    return q.value(0).toString().compare(QLatin1String("ok"), Qt::CaseInsensitive) == 0;
+}
+
 bool run_migrations(const QSqlDatabase& db) {
     if (!db.isValid() || !db.isOpen()) {
         qWarning().noquote() << "run_migrations: db not open/valid:" << db.lastError().text();
         return false;
     }
 
-    // Read the schema version in its own scope: QSQLITE keeps the prepared
-    // statement (and its read lock) alive until the QSqlQuery is finished or
-    // destroyed, and a live read cursor makes the schema-changing migrations
-    // below fail with SQLITE_LOCKED ("database table is locked"). Destroying
-    // the query here releases that lock before any DDL runs.
-    int version = 0;
-    {
-        QSqlQuery q(db);
-        if (!q.exec(QStringLiteral("PRAGMA user_version")) || !q.next()) {
-            qWarning().noquote() << "run_migrations: read user_version failed:"
-                                 << q.lastError().text();
-            return false;
-        }
-        version = q.value(0).toInt();
+    // Read the schema version FIRST, before any migration statement. QSQLITE keeps
+    // the prepared statement (and its read lock) alive until the QSqlQuery is
+    // destroyed, and a live read cursor makes the schema-changing migrations below
+    // fail with SQLITE_LOCKED — read_user_version() confines the query to its own
+    // scope so the lock is released before any DDL runs.
+    const auto read = read_user_version(db);
+    if (!read) {
+        qWarning().noquote() << "run_migrations: read user_version failed:"
+                             << db.lastError().text();
+        return false;
+    }
+    const int version = *read;
+
+    // A database written by a NEWER build must never be migrated or downgraded by
+    // an older one: the `version < N` blocks below are all no-ops on a future
+    // schema, but the unconditional `PRAGMA user_version = SCHEMA_VERSION` at the
+    // end would silently REWRITE the version downward. Refuse before touching
+    // anything — no DDL, no user_version write. The boot / --check preflight
+    // (health::evaluate_db_schema) reports this as a distinct SchemaNewer blocker.
+    if (version > SCHEMA_VERSION) {
+        qWarning().noquote() << "run_migrations: REFUSING to migrate — database schema v"
+                             << version << "is newer than supported v" << SCHEMA_VERSION
+                             << "(a newer app build wrote this DB)";
+        return false;
     }
 
     // QSQLITE executes a single statement per exec(), so the Rust
