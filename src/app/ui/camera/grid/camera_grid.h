@@ -5,6 +5,7 @@
 // tearing down the tiles. Streaming stops on destruction.
 #pragma once
 
+#include "camera/callback_generation.h"
 #include "camera/camera.h"
 #include "camera/warmup_gate.h"
 #include "detection/engine_registry.h"
@@ -43,6 +44,11 @@ public:
     void release_streams();   // stop capture, keep the tiles on screen
     void start_streams();     // (re)start the existing streams
 
+    // Test-only: the current grid generation. Every authoritative teardown
+    // (clear()) advances it, so a worker callback captured before a rebuild is
+    // dropped by callback_is_current(). Consumed by the Slice-8 teardown proof.
+    uint64_t generation() const { return generation_; }
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
     void paintEvent(QPaintEvent* event) override;  // black letterbox margins
@@ -77,6 +83,7 @@ private:
     health::IntegrityVerdict verdict_;                   // boot readiness (per reload)
     std::map<int64_t, CameraTile*> tiles_by_cam_;        // camera id -> its tile
     uint64_t last_applied_seq_ = 0;   // drop-stale guard on the snapshot sequence
+    uint64_t generation_ = 0;         // bumped by clear(); guards stale worker callbacks
     int rows_ = 0;  // current grid dims (0 = empty); drives the letterbox aspect
     int cols_ = 0;
 };

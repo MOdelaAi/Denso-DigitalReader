@@ -55,6 +55,11 @@ CameraGrid::CameraGrid(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
 CameraGrid::~CameraGrid() { clear(); }
 
 void CameraGrid::clear() {
+    // Advance the generation FIRST — before any stop/delete — so every callback
+    // the workers we are about to tear down captured belongs to the now-stale
+    // epoch. A queued WorkerFailedFn / status_changed that Qt still delivers to
+    // this retained grid after the rebuild is then dropped by callback_is_current.
+    ++generation_;
     // Drop any deferred-start bookkeeping; the tiles it references are deleted
     // just below, so the dangling pointers must not outlive this call.
     pending_ = PendingStart{};
@@ -254,9 +259,12 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
                     // Consecutive inference failures inhibit the camera. The handler
                     // fires on the INFERENCE WORKER THREAD, so marshal to the GUI
                     // before touching ZoneHealth (single-threaded by design).
-                    /*WorkerFailedFn*/ [this, id = cam.id](int64_t, bool failed) {
-                        common::post_to_gui(this, [this, id, failed] {
-                            if (!health_) return;
+                    /*WorkerFailedFn*/ [this, id = cam.id, gen = generation_](int64_t, bool failed) {
+                        common::post_to_gui(this, [this, id, failed, gen] {
+                            // Drop a callback from a torn-down generation: after a
+                            // rebuild the same retained grid must not be inhibited
+                            // by a worker that no longer streams.
+                            if (!health_ || !camera::callback_is_current(gen, generation_)) return;
                             health_->set_cause(
                                 id, health::ZoneCause::InferenceWorkerFailed, failed);
                         });
@@ -283,8 +291,10 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
     // what keeps ZoneHealth single-owner (mutex-free); a DirectConnection here
     // would break that invariant.
     connect(stream, &CameraStream::status_changed, this,
-            [this, id = cam.id](int s) {
-                if (!health_) return;
+            [this, id = cam.id, gen = generation_](int s) {
+                // Generation-guarded: an old-generation status_changed is dropped
+                // even if Qt happened to deliver it after the grid rebuilt.
+                if (!health_ || !camera::callback_is_current(gen, generation_)) return;
                 health_->set_cause(
                     id, health::ZoneCause::CaptureOffline,
                     s == static_cast<int>(CameraStream::Status::Offline));

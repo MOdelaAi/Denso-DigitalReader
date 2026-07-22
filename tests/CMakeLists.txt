@@ -73,6 +73,7 @@ add_executable(denso_tests
     test_zone_health.cpp
     test_zone_reporter.cpp
     test_boot_schema.cpp
+    test_callback_generation.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),
