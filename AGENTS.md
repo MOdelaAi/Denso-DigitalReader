@@ -18,6 +18,49 @@ Keep `main.cpp` a thin orchestrator. Domain code must not depend on GUI types
 (the domain↔view boundary lives in `src/core/ui/convert.*`). DB changes are new
 version-gated migrations in `db::run_migrations` — never rewrite a shipped one.
 
+## Operating modes (`src/core/mode/`)
+
+The appliance does one job at a time, chosen by an explicit destructive action.
+`mode.target` (`digit_reader` | `ball_leveler`) lives in the `settings` key/value
+table — **no migration; the schema stays v13.** Absent/unknown/corrupt ⇒
+`digit_reader`, never the newer mode, so existing installations upgrade
+unchanged.
+
+**`ball_leveler` is an unavailable destination in this release — there is no
+Floating Ball algorithm.** It persists the mode, retains every camera
+connection, and lands on an explicit "not available in this release" page:
+no stream, no processor, no reporter, no wizard, `mode_setup_required: true`
+permanently, and the top-bar Camera button disabled.
+
+`switch_and_reset` is ONE transaction. It **preserves every `camera` row and all
+18 of its non-processing columns — `id`, `active`, and the 16 connection/capture
+fields** (the table has 20; only `setup_complete`/`areas_need_review` are reset)
+— and destroys the mode-owned workspace
+(`camera_area`, `camera_model`, `camera_model_class`, `reading`,
+`model_migration_receipt`). `brazing.enabled` is set false **inside** the
+transaction; `brazing.base_url` is kept. Since `runtime()` is
+`active AND setup_complete`, zeroing `setup_complete` makes it empty **in SQL** —
+never re-derive that with a local `if (active)`.
+
+Facts that will bite whoever touches this:
+- **Teardown must precede the transaction**, via `CameraGrid::teardown()` (the
+  one authoritative primitive). `CameraView::reload()` is NOT a valid
+  pre-transaction teardown — it re-queries `runtime()`, still the old mode's
+  rows, and restarts every camera. `release_streams()` joins only capture
+  threads, so a queued frame can still reach the `ZoneSink`.
+- **In-memory mode changes only after the commit.** A rollback re-reads the mode
+  from the DB, rebuilds the old pipeline, and surfaces the SQL error verbatim.
+- `camera_model_class` is deleted **unconditionally** — `camera::remove` orphans
+  such rows, so the scoped form would strand them.
+- The discarded undelivered snapshot is logged with **zone numbers only, never
+  values**.
+- `CameraGrid` is the **single owner** of runtime `status.json` writes (live
+  `refresh_status_file()` + idle `publish_idle_status()`); `mode` /
+  `mode_setup_required` are **omitted, never guessed**, when the DB is unreadable.
+- **On-device mode validation is `192.168.1.15` ONLY.** `192.168.1.81` is
+  reserved for manual `.deb` testing and must not be accessed by any automated or
+  remote step.
+
 ## Platform-split inference (`if(WIN32)/else()` in the top `CMakeLists.txt`)
 
 Both backends implement the `InferenceEngine` interface and are selected via the
@@ -243,7 +286,8 @@ Facts that will bite whoever touches this:
   `camera.setup_complete`; **v11** was
   `camera.areas_need_review`, added for the
   editable-source / ROI-quarantine feature). Add a new migration — never edit a
-  shipped one.
+  shipped one. **Operating modes added NO migration** — `mode.target` rides the
+  existing `settings` key/value table, so v13 is still current.
 - Logging is a bounded rotating file sink (`src/app/logging/`, ~25 MiB cap) meant
   for 24/7 runs; `qDebug/qWarning/qCritical` route through it. `DENSO_LOG_LEVEL`
   sets the floor.

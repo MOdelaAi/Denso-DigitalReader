@@ -98,6 +98,7 @@ nothing about that tree. See **Packaging & ship pipeline** in
 | `detection/` | Per-camera detection config domain: `detection.h` structs (`DetectionModel`, `CameraModel`, `ModelClassSelection`, resolved `CameraDetection`) + persistence (`repo`: model catalog, per-camera attachments, and the `detection_for` resolve query) + `class_names` JSON (de)serialization. Qt/OpenCV-free — the ORT inference runtime lives in the app. |
 | `reading/` | Append-only detection-reading log: `reading.h` (`Reading`: camera_id + ts_ms + value + conf) + `repo` (`insert`/`query` by camera + time range). Consumed by the logging/export feature; written by the app-side reading sink. Migration **v9**. |
 | `brazing/` | Brazing HTTP-reporter config: `config.{h,cpp}` (`BrazingConfig{enabled, base_url}` + `load`/`save`) over the `settings` key/value table (keys `brazing.enabled`/`brazing.base_url`). Qt-free of widgets. Per-ROI `zone` number lives on `camera_area` (migration **v10**). |
+| `mode/` | **Operating mode** (which job the appliance does): `mode.h` (`TargetMode{DigitReader,BallLeveler}` + `to_string`/`parse_target_mode`/`from_index` — any absent/unknown/corrupt token resolves to `digit_reader`, **never** the newer mode), `config.{h,cpp}` (the `mode.target` key over the `settings` table + the `mode_setup_required` predicate), and `reset.{h,cpp}` (`preview_counts` + `switch_and_reset` — the ONE atomic switch transaction). **No migration: schema stays v13**; the key rides `settings`, and is deliberately NOT a `settings::Settings` field (Reset-to-defaults would wipe it). A switch **preserves all 18 non-processing `camera` columns — `id`, `active`, and the 16 connection/capture fields** (the table has 20; only `setup_complete`/`areas_need_review` are reset) — and destroys only the mode-owned workspace. See **Operating modes** in `docs/ARCHITECTURE.md`. |
 | `util/strutil.h` | Small shared string helpers. |
 
 ### `src/app/` (GUI + subsystem libs)
@@ -229,6 +230,17 @@ device-specific as it is.
   DB I/O inline. Since inference was decoupled from display, `on_reading()` fires
   on the **inference worker thread**, not the capture thread
   (`camera/frame_processor.h:59` is the authoritative contract).
+- **Operating-mode switch ordering is load-bearing.** Teardown must call the ONE
+  authoritative primitive (`CameraGrid::teardown()` → `clear()`) and must run
+  **before** the reset transaction — never `CameraView::reload()`, which
+  re-queries `runtime()` (still the *old* mode's rows) and restarts the pipeline,
+  and never `release_streams()`, which joins only capture threads. The in-memory
+  mode is assigned **only after the commit**; a rollback re-reads it from the DB
+  and rebuilds the old pipeline. `ball_leveler` is an **unavailable destination**
+  in this release — no Floating Ball algorithm exists, and no stream, processor,
+  reporter or wizard may be constructed for it.
+- **`192.168.1.81` is excluded from all automated/remote operation** — it is
+  reserved for manual `.deb` testing. On-device validation is `192.168.1.15` only.
 - Packaging keeps **one** definition of each rule: `packaging/lib/policy.sh` is
   the sole JetPack-damage check and is *concatenated verbatim* into the generated
   preflight guard — never hand-copy it, and never add a second emitter, or the

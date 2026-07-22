@@ -568,6 +568,154 @@ double-apply a config. Moving `apply_net_config` off the GUI thread means a
 stuck `netsh` (now bounded by the backend's `QProcess` timeout) can no longer
 freeze the UI.
 
+## Operating modes (`src/core/mode/`)
+
+The appliance does exactly **one** job at a time, selected by an explicit,
+destructive operator action. Two modes exist:
+
+| Mode | Token | This release |
+|---|---|---|
+| Digital Number Reader | `digit_reader` | the shipping job — `DetectionProcessor` + zone reporting |
+| Floating Ball Leveler | `ball_leveler` | **an unavailable destination** — see below |
+
+**There is no Floating Ball algorithm.** Selecting `ball_leveler` persists the
+mode, performs the full reset, retains every camera connection, and lands on an
+explicit "setup is not available in this release" state. It constructs no
+stream, no processor and no reporter, exposes no wizard, and reports
+`mode_setup_required: true` permanently. The mode *machinery* is what exists —
+inventing a Leveler persistence model before the algorithm spec would bake in
+guesses the algorithm would then have to live with.
+
+### `mode.target` — a key, not a schema change
+
+`src/core/mode/` lives in `denso_core` — **Widgets-free, `Qt6::Core`/`Sql` only**
+(the load/save/reset entry points take a `QSqlDatabase`) — and rides the existing
+`settings` key/value table under the key **`mode.target`**, so **the schema stays
+at v13 — this feature adds no migration.**
+
+`parse_target_mode` follows the `parse_display_mode` contract: **any absent,
+unknown or corrupt token resolves to `digit_reader`, never to the newer mode**,
+so every existing installation upgrades with no operator action and no behaviour
+change.
+
+`mode.target` is deliberately **NOT** a field on `settings::Settings`.
+`MainWindow::on_reset_defaults` assigns a default-constructed `Settings`
+wholesale, so any field wired into that aggregate would be wiped by "Reset to
+defaults" — silently changing the appliance's job. `settings::save` does not
+delete unknown keys, so an independent key is untouched by that path.
+
+### What a switch preserves vs destroys
+
+**Camera connections are preserved.** A camera's connection and capture
+configuration is a property of the *appliance*, not of the job it is doing, so
+every `camera` row and its stable **`id`** survive a switch — all 18 identity /
+connection / capture columns (including `active`) are untouched. The operator
+never re-enters an RTSP URL, credential, USB index, resolution or orientation
+because the appliance changed job. Only the two **processing** columns,
+`setup_complete` and `areas_need_review`, are reset to 0.
+
+The **mode-owned processing workspace is destroyed atomically**: every row of
+`camera_area`, `camera_model`, `camera_model_class`, `reading` and
+`model_migration_receipt`. `camera_model_class` is deleted **unconditionally**,
+not scoped by `camera_model_id` — `camera::remove` already orphans such rows, so
+a scoped delete would strand them; the unconditional form also repairs
+pre-existing damage. Receipts must go because they store `camera_model_id`
+values and SQLite reuses rowids (no `AUTOINCREMENT`), so a retained receipt could
+repoint an unrelated future attachment.
+
+**Reporting is disabled.** `brazing.enabled` is set false **inside the same
+transaction**; `brazing.base_url` is preserved. Re-enabling is an explicit
+operator action — it must never resume implicitly when the new mode is later
+configured. Preserved alongside it: the display settings, `net_config`, the
+`model` catalog, and everything on disk (engines, sidecars, `trt_cache`, logs).
+
+`camera::runtime()` filters `active = 1 AND setup_complete = 1`, so zeroing
+`setup_complete` on every row makes it **empty by construction** — the guarantee
+that nothing streams after a switch lives in SQL, not in UI logic.
+
+### Ordering rules that are not locally obvious
+
+These are the invariants a reader would otherwise have to rediscover:
+
+- **Teardown must precede the transaction.** The switch calls the ONE
+  authoritative teardown primitive (`CameraGrid::teardown()` → `clear()`);
+  re-implementing the sequence is forbidden. **`CameraView::reload()` must NOT be
+  used as the pre-transaction teardown** — it clears and then immediately
+  re-queries `runtime()`, which still returns the *old* mode's cameras because
+  the transaction has not run yet, restarting every one of them.
+  `release_streams()` is also insufficient: it joins only capture threads,
+  leaving a queued frame able to reach the `ZoneSink` afterwards.
+- **The in-memory mode is updated only after the commit succeeds.** On rollback
+  the handler **re-reads** the mode from the database rather than keeping an
+  optimistically-assigned target. Otherwise SQLite's atomicity stays intact while
+  the running process disagrees with the DB about what the appliance is doing —
+  worse than either failure alone.
+- **Rollback reloads the old pipeline.** Any failed statement or commit rolls the
+  whole transaction back — mode key, reporting flag and every camera's processing
+  flags revert together — the old mode's pipeline is rebuilt, and the SQL error
+  is surfaced verbatim.
+- **Warm-up is deliberately left running** across a teardown. `warm_up()` has no
+  cancellation and `quit()` cannot interrupt a blocking call, so destroying it
+  would block the GUI thread for the remainder of a TensorRT build. Late
+  `on_model_ready`/`on_warmup_finished` are harmless no-ops.
+- A queued callback from a torn-down worker cannot inhibit a camera in the new
+  generation: `clear()` advances a **generation counter** first, and both
+  `WorkerFailedFn` and the `status_changed` lambda drop events whose captured
+  epoch is stale. This matters *because* camera ids are retained — a stale event
+  for `camera_id 3` now names a real, live row.
+
+**The reporting guarantee is narrow and precise.** Once the confirmed switch
+enters the synchronous teardown, no inference result or retry tick can *initiate*
+a new transport request: the GUI thread is blocked throughout, inference
+callbacks are posted with the `BrazingReporter` as their Qt context and that
+context is destroyed before the event loop resumes, the retry `QTimer` is
+parented to the reporter, and in-flight replies die with the
+`QNetworkAccessManager`. It is **not** claimed that a request already handed to
+the OS socket fails to reach the server. A pending-but-undelivered snapshot is
+discarded and logged — **zone count and zone numbers only, never payload
+values**.
+
+### Operator-facing surface
+
+Confirmation is up-front (real counts, stated consequence, **default Cancel**,
+no type-to-confirm). The safe action is what Enter triggers: `Cancel` is given
+`setDefault`/`setAutoDefault(true)` and initial focus, and the accept button's
+auto-default is explicitly cleared so the button box cannot promote the
+destructive action. There is no confirm/revert countdown, because the
+processing setup is deleted and a countdown that "reverts" would be a lie. The
+counts must be real — a failed count query aborts the confirmation rather than
+rendering "0".
+
+`CameraView` has **three** states, because after a switch `camera::all()` is
+non-empty while `runtime()` is empty and the old "No cameras yet" copy would be a
+lie: the empty state (+ Add Camera), the retained-connections
+setup-required state (`digit_reader`, with a Set up cameras action), and the
+retained-connections **unavailable** state (`ball_leveler`, with **no** setup
+action). In `ball_leveler` the top-bar Camera button is disabled and
+`open_camera()` short-circuits, so the wizard is unreachable by any path.
+
+`status.json` carries `mode` and `mode_setup_required`, both **omitted rather
+than guessed** when the DB cannot be read (the earliest writer runs precisely
+when the DB is unopenable, schema-newer, or migration-failed). `CameraGrid` is
+the **single owner** of runtime status writing — its live `refresh_status_file()`
+and, for an intentionally idle mode, `publish_idle_status()`; the orchestrator
+never writes `status.json` directly, and no caller ever passes a placeholder
+`IntegrityVerdict{}` that would erase real blockers.
+
+**Known limitations (documented, not defects):** the switch visibly freezes the
+UI while capture threads join (GStreamer candidates open with no timeout);
+`EngineRegistry` never unloads, so a switch frees no GPU memory; the backend
+receives no "mode changed" signal; and `evaluate_integrity` has **no
+Leveler-specific readiness checks** — it is camera/model-centric, so no amount of
+Leveler mis-configuration can register as a fault. (It still reports Degraded or
+Blocked from the mode-independent model-directory / manifest /
+unmanifested-engine checks — an idle `ball_leveler` appliance with an
+unmanifested engine reports `degraded`, not `ready`.)
+
+**Validation note:** on-device mode validation runs on the Jetson at
+`192.168.1.15` **only**. `192.168.1.81` is reserved for manual `.deb` testing and
+is excluded from all automated and remote operation.
+
 ## Persistence model (`src/core/db/`)
 
 One file, `denso.db`, WAL mode so the UI reads while a worker writes. The schema
