@@ -2,6 +2,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <vector>
+
 using denso::ui::BrazingRetryPolicy;
 using denso::ui::RetryAction;
 using Kind = denso::ui::RetryAction::Kind;
@@ -108,4 +110,78 @@ TEST_CASE("retry tick while a send is in flight is a no-op") {
     // concurrent POST (single-flight).
     REQUIRE(p.on_retry_tick().kind == Kind::None);
     REQUIRE(p.on_result(true).kind == Kind::None);       // delivered, idle
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pending_zone_numbers() — the R4 discard-logging API (spec §6.6, §11-R4).
+// An undelivered snapshot is dropped when the reporter is torn down by a mode
+// switch. That is CORRECT (the old mode's readings must not be posted afterwards)
+// but must not be silent, so the reporter logs it. This read-only accessor is what
+// it logs FROM: it exposes the pending snapshot's zone NUMBERS and nothing else —
+// never a reading value, which must never reach the log.
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("pending_zone_numbers reports the undelivered snapshot's zones, ascending",
+          "[brazing_retry]") {
+    BrazingRetryPolicy p;
+    // Submitted but never acked -> pending_ != delivered_ -> undelivered.
+    REQUIRE(p.submit(Snap{{3, 120}, {4, 35}}).kind == Kind::Send);
+
+    const auto z = p.pending_zone_numbers();
+    REQUIRE(z.has_value());
+    CHECK(*z == std::vector<int>{3, 4});   // zone NUMBERS only, ascending
+}
+
+TEST_CASE("pending_zone_numbers is nullopt before anything is submitted",
+          "[brazing_retry]") {
+    BrazingRetryPolicy p;
+    // Initial state: pending_ == delivered_ == {} -> nothing is undelivered.
+    CHECK_FALSE(p.pending_zone_numbers().has_value());
+}
+
+TEST_CASE("pending_zone_numbers is nullopt once the snapshot is acked",
+          "[brazing_retry]") {
+    BrazingRetryPolicy p;
+    REQUIRE(p.submit(Snap{{3, 120}, {4, 35}}).kind == Kind::Send);
+    REQUIRE(p.pending_zone_numbers().has_value());     // in flight, not yet acked
+    REQUIRE(p.on_result(true).kind == Kind::None);     // server 2xx-acked it
+    CHECK_FALSE(p.pending_zone_numbers().has_value()); // delivered == pending
+}
+
+TEST_CASE("a failed send leaves the snapshot pending and still reportable",
+          "[brazing_retry]") {
+    BrazingRetryPolicy p;
+    REQUIRE(p.submit(Snap{{7, 900}}).kind == Kind::Send);
+    REQUIRE(p.on_result(false).kind == Kind::ArmRetry);  // server down
+    const auto z = p.pending_zone_numbers();
+    REQUIRE(z.has_value());
+    CHECK(*z == std::vector<int>{7});
+}
+
+TEST_CASE("a newer submit after an ack is reported as pending again", "[brazing_retry]") {
+    BrazingRetryPolicy p;
+    p.submit(Snap{{1, 10}});
+    REQUIRE(p.on_result(true).kind == Kind::None);       // delivered
+    REQUIRE_FALSE(p.pending_zone_numbers().has_value());
+    p.submit(Snap{{1, 11}, {2, 22}});                    // a newer value, unacked
+    const auto z = p.pending_zone_numbers();
+    REQUIRE(z.has_value());
+    CHECK(*z == std::vector<int>{1, 2});
+}
+
+TEST_CASE("pending_zone_numbers does not change retry or send behaviour",
+          "[brazing_retry]") {
+    // The accessor is const and side-effect free: interleaving it through a full
+    // submit/fail/retry/ack cycle must leave every returned action identical to the
+    // cycle without it (compare against the existing single-flight expectations).
+    BrazingRetryPolicy p;
+    REQUIRE(p.submit(Snap{{1, 1}}).kind == Kind::Send);
+    (void)p.pending_zone_numbers();
+    REQUIRE(p.on_result(false).delay_ms == 1000);
+    (void)p.pending_zone_numbers();
+    REQUIRE(p.on_retry_tick().kind == Kind::Send);   // still re-sends the same snapshot
+    (void)p.pending_zone_numbers();
+    REQUIRE(p.on_result(true).kind == Kind::None);   // delivered, nothing left
+    (void)p.pending_zone_numbers();
+    REQUIRE(p.on_retry_tick().kind == Kind::None);   // idle stays idle
 }

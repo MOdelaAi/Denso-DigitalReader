@@ -49,4 +49,19 @@ RetryAction BrazingRetryPolicy::on_retry_tick() {
     return maybe_send();
 }
 
+std::optional<std::vector<int>> BrazingRetryPolicy::pending_zone_numbers() const {
+    if (pending_.empty() || pending_ == delivered_) {
+        return std::nullopt;  // nothing the server is still owed
+    }
+    // std::map iterates in key order, so the zone numbers come out ascending with
+    // no sort. Only the keys are copied — the values never leave this object.
+    std::vector<int> zones;
+    zones.reserve(pending_.size());
+    for (const auto& [zone_no, value] : pending_) {
+        (void)value;
+        zones.push_back(zone_no);
+    }
+    return zones;
+}
+
 } // namespace denso::ui
