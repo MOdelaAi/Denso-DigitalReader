@@ -1,9 +1,11 @@
 # Operating Modes — Digital Number Reader / Floating Ball Leveler, and `Switch and Reset Target Mode`
 
-Status: **APPROVED — Revision 3a. Ready for implementation planning; not implemented.**
-Date: 2026-07-21
-Revision: 3a (decisions A1–A4 locked by the product owner; R2 promoted to a
-mandatory prerequisite). See §13 for revision history.
+Status: **APPROVED — Revision 3b.**
+Date: 2026-07-21 (Revision 3b editorial erratum: 2026-07-22)
+Revision: 3b (decisions A1–A4 remain locked by the product owner; R2 remains a
+mandatory prerequisite; 3b is an editorial erratum to §11-R6 only — no change to
+scope, decisions, transaction behaviour or acceptance criteria). See the revision
+history at the end of this document.
 Depends on the shipped readiness/inhibition work
 (`2026-07-20-zone-readiness-inhibition-design.md`, schema v13).
 
@@ -594,10 +596,12 @@ serialized into `camera_causes`.
   counts and zone numbers only, never payload values (§6.6).
 - **R5 — no "mode changed" signal to the backend.** The numeric-only backend
   cannot distinguish "switched jobs" from "died". Documented limitation.
-- **R6 — the Leveler has no readiness vocabulary.** `evaluate_integrity` is
-  camera/model-centric, so a Leveler appliance evaluates **Ready** regardless of
-  configuration. `mode_setup_required` is a partial answer; a real Leveler fault
-  has no `ZoneIssue::Kind` and none may be added without a producer. Documented
+- **R6 — the Leveler has no Leveler-specific readiness vocabulary.**
+  `evaluate_integrity` remains camera/model-centric and may still report generic
+  infrastructure or integrity blockers. It cannot express whether Floating Ball
+  Leveler configuration is complete or healthy. In this release,
+  `mode_setup_required` remains true for `ball_leveler`. A real Leveler fault has
+  no `ZoneIssue::Kind`, and none may be added without a real producer. Documented
   limitation.
 - **R7 — SQLite primary keys are reused** (no `AUTOINCREMENT`). Now scoped to
   `camera_model.id` and `camera_area.id`, since `camera.id` is stable under A1.
@@ -707,6 +711,17 @@ Native Jetson — **`.15` only; `192.168.1.81` is reserved for the user's manual
 ---
 
 ## 14. Revision history
+
+**Revision 3b** — editorial erratum found during final validation (documentation
+only; no source change, and the specification stays **APPROVED**):
+
+| Change | Why |
+|---|---|
+| §11-R6 rewritten: "the Leveler has no **Leveler-specific** readiness vocabulary" | Revision 3a's claim that "a Leveler appliance evaluates **Ready** regardless of configuration" was **overbroad**. `evaluate_integrity` is mode-independent, so a `ball_leveler` appliance can and does still report generic infrastructure/integrity verdicts — the Slice-7 manual gate observed `"status":"degraded"` with a real `engines_unmanifested` issue in `ball_leveler`. The genuine limitation is narrower: the verdict has no vocabulary for *Leveler* configuration completeness or health. |
+
+Nothing else changes: A1–A4 and R2 are untouched, §6 transaction behaviour is
+untouched, §12 acceptance criteria are untouched, and no implemented scope is
+altered.
 
 **Revision 3** — product-owner decisions locked:
 
