@@ -1,19 +1,24 @@
 #include "ui/mainwindow.h"
 
 #include "hardware/collect.h"
+#include "mode/config.h"
+#include "mode/reset.h"
 #include "settings/repo.h"
 #include "ui/camera/camera_dialog.h"
 #include "ui/camera/camera_view.h"
 #include "ui/settings/display_confirm_dialog.h"
+#include "ui/settings/mode_confirm_dialog.h"
 #include "ui/settings/settings_dialog.h"
 #include "ui/theme.h"
 
 #include <QApplication>
+#include <QDebug>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPalette>
 #include <QPixmap>
 #include <QPushButton>
@@ -25,12 +30,31 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <exception>
+#include <utility>
 
 #ifndef APP_VERSION
 #define APP_VERSION "0.0.0"
 #endif
 
 namespace denso::ui {
+
+namespace {
+
+// Report a switch failure WITHOUT blocking. Deliberately non-modal: perform_switch
+// runs the whole teardown/transaction/rebuild synchronously on the GUI thread, and
+// entering a nested modal event loop from inside it would let queued events run
+// mid-lifecycle. The box owns itself and disappears when dismissed.
+void show_non_modal(QWidget* parent, QMessageBox::Icon icon, const QString& title,
+                    const QString& text) {
+    auto* box = new QMessageBox(icon, title, text, QMessageBox::Ok, parent);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setModal(false);
+    box->show();
+    box->raise();
+}
+
+}  // namespace
 
 MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> state,
                        std::shared_ptr<EngineRegistry> engines, WarmupState* warmup,
@@ -61,11 +85,15 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     title->setObjectName(QStringLiteral("appTitle"));
     bar->addWidget(title, 0, Qt::AlignVCenter);
     bar->addStretch(1);
-    auto* camera_btn = new QPushButton(QStringLiteral("Camera"));
-    connect(camera_btn, &QPushButton::clicked, this, &MainWindow::open_camera);
+    // Held as a member so apply_camera_button_gate() can disable it: ball_leveler
+    // exposes no camera wizard at all (spec §2.1, §7.2).
+    camera_btn_ = new QPushButton(QStringLiteral("Camera"));
+    camera_btn_->setObjectName(QStringLiteral("cameraButton"));
+    connect(camera_btn_, &QPushButton::clicked, this, &MainWindow::open_camera);
     auto* settings_btn = new QPushButton(QStringLiteral("Settings"));
+    settings_btn->setObjectName(QStringLiteral("settingsButton"));
     connect(settings_btn, &QPushButton::clicked, this, &MainWindow::open_settings);
-    bar->addWidget(camera_btn, 0);
+    bar->addWidget(camera_btn_, 0);
     bar->addWidget(settings_btn, 0);
     col->addWidget(top);
 
@@ -108,6 +136,16 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
             &MainWindow::on_theme_changed);
     connect(settings_, &SettingsDialog::reset_defaults_requested, this,
             &MainWindow::on_reset_defaults);
+    connect(settings_, &SettingsDialog::switch_mode_requested, this,
+            &MainWindow::on_switch_mode);
+
+    // Adopt the COMMITTED mode from the database. Never assume digit_reader: an
+    // appliance booting with a stored ball_leveler must come up gated, exactly as
+    // it would right after a switch. CameraView reads the mode itself (its ctor
+    // already ran reload()), so this seeds the window-owned consequences only.
+    current_mode_ = mode::load(db_);
+    settings_->set_current_mode(current_mode_);
+    apply_camera_button_gate();
 }
 
 void MainWindow::apply_startup() {
@@ -171,7 +209,258 @@ void MainWindow::open_settings() {
     settings_->activateWindow();
 }
 
+void MainWindow::apply_camera_button_gate() {
+    // digit_reader keeps the existing behavior; ball_leveler exposes no wizard.
+    camera_btn_->setEnabled(current_mode_ != mode::TargetMode::BallLeveler);
+}
+
+void MainWindow::set_switch_observer(std::function<void(SwitchEvent)> observer) {
+    switch_observer_ = std::move(observer);
+}
+
+int MainWindow::camera_view_page_index() const {
+    return camera_view_->current_page_index();
+}
+
+uint64_t MainWindow::camera_view_grid_reload_invocations() const {
+    return camera_view_->grid_reload_invocations();
+}
+
+void MainWindow::on_switch_mode(int target) {
+    // ── Refusals, cheapest first. Each one must leave EVERYTHING untouched: no
+    // preview read, no confirmation, no teardown, no transaction.
+    if (display_txn_active_) return;  // a display confirm/revert owns the window
+    if (switch_active_) return;       // a switch is already running (busy, §6.1-R1)
+
+    // Validate the raw selector index through the domain: from_index() maps any
+    // out-of-range value to DigitReader, so an invalid enum is never stored and
+    // current_mode_ can never hold garbage that to_string() would paper over.
+    const mode::TargetMode want = mode::from_index(target);
+    if (want == current_mode_) return;  // no switch to the already-active mode
+
+    // Real counts, read immediately before the dialog (§7.1, decision A3). A count
+    // query FAILURE must abort here: rendering it as "0" would let the operator
+    // authorise deleting data they were just told was empty.
+    const auto counts = mode::preview_counts(db_);
+    if (!counts) {
+        // KNOWN LIMITATION, recorded deliberately: this message cannot name the
+        // failing statement. preview_counts() answers only yes/no, and its queries
+        // are local QSqlQuery objects it discards — Qt keeps statement errors on the
+        // QSqlResult, not on the connection, so QSqlDatabase::lastError() would be
+        // empty or (worse) a stale driver-level error from something unrelated.
+        // Appending that would be misinformation, which is worse than none. Carrying
+        // the real text needs preview_counts() to return it, i.e. an API change in
+        // src/core/mode/reset.h — that belongs to the slice that owns it, not here.
+        // The ROLLBACK path, which does have the error, does surface it verbatim.
+        const QString msg = QStringLiteral(
+            "Could not read what the switch would delete, so it was not started. "
+            "No cameras or settings were changed.");
+        qWarning().noquote() << "[mode] switch aborted: preview_counts failed;"
+                             << "no teardown, no confirmation shown";
+        last_switch_error_ = msg;
+        // The operator picked a target we are refusing to act on — put the selector
+        // back on the mode that is actually in effect, so Settings never displays an
+        // uncommitted target as if it were current.
+        settings_->set_current_mode(current_mode_);
+        show_non_modal(this, QMessageBox::Warning, QStringLiteral("Switch and Reset"), msg);
+        return;  // NOTHING torn down — this is before any lifecycle step
+    }
+
+    // The dialog only asks; it reads no DB and starts no transaction.
+    ModeConfirmDialog dlg(want, *counts, this);
+    if (dlg.exec() != QDialog::Accepted) {
+        settings_->set_current_mode(current_mode_);  // Cancel restores the selector
+        return;                                      // …and changes nothing else
+    }
+
+    perform_switch(want);
+}
+
+mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
+    // ── 1. Busy state — acquired EXCLUSIVELY, not merely set.
+    //
+    // A plain "set true, clear in RAII" is not enough: this method is public (it is
+    // the dialog-free seam), and the lifecycle runs synchronously, so a re-entrant
+    // call — from the observer, or from any handler reached while the GUI thread is
+    // inside the teardown join — would take its own guard and clear the shared flag
+    // on the way out, re-admitting further switches while the OUTER one is still
+    // mid-flight. Two interleaved teardown/transaction/reload sequences is exactly
+    // what §6.1-R1 forbids. Refusing here makes exclusion a property of the
+    // lifecycle itself rather than of the one caller that happens to check first.
+    //
+    // Policy refusals (same-mode, display transaction) stay in on_switch_mode; this
+    // guard is the lifecycle invariant, not the operator policy.
+    if (switch_active_) {
+        qWarning().noquote() << "[mode] refusing a re-entrant switch:"
+                             << "one is already in progress";
+        return current_mode_;  // nothing torn down, nothing changed
+    }
+    switch_active_ = true;
+    struct BusyGuard {
+        bool* flag;
+        ~BusyGuard() { *flag = false; }
+    } busy{&switch_active_};
+
+    // Observer calls are test-only instrumentation and must never be able to change
+    // production behavior — so an exception thrown by an installed observer is
+    // contained here rather than unwinding the lifecycle it is only watching.
+    const auto fire = [this](SwitchEvent e) noexcept {
+        if (!switch_observer_) return;
+        try {
+            switch_observer_(e);
+        } catch (...) {
+        }
+    };
+
+    // What the TRANSACTION did, tracked separately from whether the rest of the
+    // handler succeeded. These are genuinely different facts: a commit followed by a
+    // failed UI update must never be reported as "rolled back, nothing was changed"
+    // — that would tell the operator their processing setup survived when it was in
+    // fact destroyed.
+    enum class Outcome { NotReached, Committed, RolledBack };
+    Outcome outcome = Outcome::NotReached;
+    QString failure;  // non-empty iff something went wrong (SQL error, or what())
+
+    try {
+        // ── 2. Teardown ONLY. CameraView::teardown_for_switch() delegates to
+        // CameraGrid's one authoritative primitive (clear()) and deliberately does
+        // NOT reload()/re-query runtime() — that would restart the OLD mode's
+        // cameras before the reset commits (spec §6.2). Joining the capture and
+        // inference threads here is what guarantees nothing can still reach the
+        // ZoneSink, and destroying the BrazingReporter is what discards (and logs)
+        // any undelivered snapshot.
+        fire(SwitchEvent::TeardownStarted);
+        camera_view_->teardown_for_switch();
+        fire(SwitchEvent::TeardownCompleted);
+
+        // ── 3. The atomic reset. Runs from this modal handler with no other writer
+        // active, so the counts shown above cannot have gone stale.
+        fire(SwitchEvent::TransactionStarted);
+        const auto r = mode::switch_and_reset(db_, target);
+        if (r.ok) {
+            outcome = Outcome::Committed;
+            fire(SwitchEvent::TransactionCommitted);
+        } else {
+            outcome = Outcome::RolledBack;
+            fire(SwitchEvent::TransactionRolledBack);
+            failure = QString::fromStdString(r.error);  // verbatim SQL error
+        }
+    } catch (const std::exception& e) {
+        failure = QString::fromUtf8(e.what());
+    } catch (...) {
+        failure = QStringLiteral("unknown error");
+    }
+    // `outcome` is still NotReached iff the teardown or the transaction call itself
+    // threw — i.e. we do not know that anything was committed.
+
+    // ── 4/5. Adopt the mode. On a commit it becomes the target — and ONLY NOW,
+    // never optimistically before (spec §12.17). On a rollback, or on a throw where
+    // the transaction's fate is unknown, RE-READ the database instead of keeping the
+    // value we were asked for: SQLite's atomicity cannot stop the running process
+    // from disagreeing with the DB, and that disagreement is worse than the failure.
+    //
+    // Everything from here is best-effort recovery, so each step is individually
+    // protected: a throw while recovering must not abandon the steps after it. This
+    // is not an absolute guarantee (recovery allocates, so std::bad_alloc can still
+    // defeat it) — it is a boundary that survives the failures actually reachable.
+    // Each protected step RECORDS its failure. Swallowing one silently would be the
+    // worst of both worlds: the operator would be shown the success path while the
+    // window was in fact left half-updated.
+    const auto note = [&failure](const QString& what) {
+        if (!failure.isEmpty()) failure += QStringLiteral("; ");
+        failure += what;
+    };
+
+    try {
+        current_mode_ = (outcome == Outcome::Committed) ? target : mode::load(db_);
+    } catch (...) {
+        note(QStringLiteral("could not determine the mode now in effect"));
+    }
+    try {
+        apply_camera_button_gate();
+        settings_->set_current_mode(current_mode_);
+    } catch (...) {
+        note(QStringLiteral("could not update the window for the new mode"));
+    }
+    last_switch_error_ = failure;
+
+    if (outcome == Outcome::Committed && failure.isEmpty()) {
+        qInfo().noquote() << "[mode] switched to" << mode::to_string(current_mode_);
+    } else if (outcome == Outcome::Committed) {
+        qCritical().noquote() << "[mode] switch COMMITTED but the window could not"
+                              << "finish updating:" << failure;
+    } else if (outcome == Outcome::RolledBack) {
+        qCritical().noquote() << "[mode] switch failed, rolled back:" << failure;
+    } else {
+        qCritical().noquote() << "[mode] switch did not complete normally; the"
+                              << "transaction's fate is UNKNOWN. Recovered from DB"
+                              << "state:" << failure;
+    }
+
+    // ── 6. Rebuild for whichever mode is now in effect. status.json is written by
+    // this reload — CameraGrid is its single runtime owner (live refresh for
+    // digit_reader, publish_idle_status() for ball_leveler) — so MainWindow never
+    // writes it and can never overwrite a real verdict with a placeholder.
+    // reload() is non-failing for this feature: per-camera engine failures are
+    // firewalled inside the grid and surface as an Offline tile. Still protected,
+    // because leaving the view torn down is the one outcome worth guarding against.
+    fire(SwitchEvent::ReloadStarted);
+    try {
+        camera_view_->reload();
+    } catch (...) {
+        note(QStringLiteral("could not rebuild the camera view"));
+        last_switch_error_ = failure;
+        // Logged HERE, not with the branches above: those ran before the reload, so
+        // a switch that committed cleanly and then failed only to rebuild would
+        // otherwise leave a lone "switched to ..." info line and no critical record.
+        qCritical().noquote() << "[mode] the camera view could not be rebuilt after"
+                              << "the switch:" << failure;
+    }
+
+    // Report only after the pipeline is back, so the operator is not reading a
+    // message box over a dead window. The three texts are genuinely different
+    // claims, and saying the wrong one about a DESTRUCTIVE operation is its own
+    // fault: "rolled back, nothing changed" is only ever said when the transaction
+    // actually reported a rollback.
+    if (!failure.isEmpty()) {
+        QString body;
+        switch (outcome) {
+            case Outcome::Committed:
+                body = QStringLiteral(
+                           "The mode switch COMPLETED, but the window could not "
+                           "finish updating. Restart the application.\n\n%1")
+                           .arg(failure);
+                break;
+            case Outcome::RolledBack:
+                body = QStringLiteral("The mode switch failed and was rolled back. "
+                                      "Nothing was changed.\n\n%1")
+                           .arg(failure);
+                break;
+            case Outcome::NotReached:
+                // We never saw the transaction resolve, so we must NOT promise a
+                // rollback. Report only what is known: the mode below was read back
+                // from the database.
+                body = QStringLiteral(
+                           "The mode switch did not complete normally, and whether "
+                           "it was applied is unknown. The application recovered "
+                           "using the mode stored in the database (%1). Restart and "
+                           "verify the configuration.\n\n%2")
+                           .arg(QString::fromLatin1(mode::to_string(current_mode_)),
+                                failure);
+                break;
+        }
+        show_non_modal(this, QMessageBox::Critical, QStringLiteral("Switch and Reset"),
+                       body);
+    }
+
+    return current_mode_;
+}
+
 void MainWindow::open_camera() {
+    // The wizard is a digit_reader concept. ball_leveler ships no processing setup
+    // (spec §2.1), so the gate lives HERE as well as on the button — a disabled
+    // button is a UI affordance, not an invariant.
+    if (current_mode_ == mode::TargetMode::BallLeveler) return;
     if (!camera_) {
         camera_ = new CameraDialog(db_, this);
         camera_->setModal(true);
