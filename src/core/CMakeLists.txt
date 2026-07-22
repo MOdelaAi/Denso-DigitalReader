@@ -33,6 +33,7 @@ add_library(denso_core STATIC
     reading/repo.cpp
     brazing/config.cpp
     mode/config.cpp
+    mode/reset.cpp
     models/hashing.cpp
     models/manifest.cpp
     models/class_map.cpp

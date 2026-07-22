@@ -75,6 +75,7 @@ add_executable(denso_tests
     test_boot_schema.cpp
     test_callback_generation.cpp
     test_mode.cpp
+    test_mode_reset.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),
