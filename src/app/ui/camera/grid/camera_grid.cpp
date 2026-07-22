@@ -107,7 +107,27 @@ void CameraGrid::teardown() {
     clear();
 }
 
+void CameraGrid::publish_idle_status() {
+    // Idle runtime status: no grid is streaming (the caller deliberately avoided
+    // reload() — e.g. ball_leveler), but status.json must still carry the REAL
+    // integrity verdict, never a default-constructed placeholder that would erase
+    // real blockers/issues. Recompute it, then write with EMPTY runtime causes/zones
+    // (nothing streams) and the committed mode + setup-required flag. For
+    // ball_leveler mode_setup_required is permanently true (spec §2.1).
+    verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir());
+    const auto m = denso::mode::load(db_);
+    health::write_status_file(
+        denso::paths::status_file(),
+        verdict_, {}, {}, {},
+        QString::fromLatin1(denso::mode::to_string(m)),
+        denso::mode::mode_setup_required(db_, m));
+}
+
 void CameraGrid::reload() {
+    // Monotonic build-path observable (test-only; no production behavior depends on
+    // it). Incremented ONLY here, so an unchanged value across a CameraView::reload()
+    // proves the grid never built a stream/processor/reporter/ZoneHealth.
+    ++reload_invocations_;
     clear();
 
     // runtime(), not all(): an unfinished camera must never stream, and the

@@ -114,6 +114,7 @@ add_executable(denso_integration_tests
     integration_main.cpp
     test_mode_teardown.cpp
     test_settings_mode.cpp
+    test_camera_view_states.cpp
 )
 target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
 

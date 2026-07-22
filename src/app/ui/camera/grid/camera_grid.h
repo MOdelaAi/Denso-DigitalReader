@@ -50,6 +50,21 @@ public:
     // does NOT re-query runtime() or restart anything (unlike reload()).
     void teardown();
 
+    // The intentionally-idle runtime status writer (spec §9, single-owner rule).
+    // Used when the view deliberately avoids the live grid (ball_leveler): computes
+    // the REAL integrity verdict (never a placeholder IntegrityVerdict{}), then
+    // writes status.json with empty runtime causes/zones (nothing streams) plus the
+    // committed mode + mode_setup_required flag. This keeps CameraGrid the sole
+    // runtime writer of status.json for both the live and idle cases.
+    void publish_idle_status();
+
+    // Test-only: how many times reload()'s build path was ENTERED (monotonic,
+    // increment-only, per-grid). Because the reporter, ZoneHealth, every
+    // DetectionProcessor and every CameraStream are constructed ONLY inside
+    // reload()/start_one, an unchanged value proves none of them was built. No
+    // production behavior depends on it. Distinct from CameraStream::constructed_count().
+    uint64_t reload_invocations() const { return reload_invocations_; }
+
     // Test-only: the current grid generation. Every authoritative teardown
     // (clear()) advances it, so a worker callback captured before a rebuild is
     // dropped by callback_is_current(). Consumed by the Slice-8 teardown proof.
@@ -94,6 +109,7 @@ private:
     std::map<int64_t, CameraTile*> tiles_by_cam_;        // camera id -> its tile
     uint64_t last_applied_seq_ = 0;   // drop-stale guard on the snapshot sequence
     uint64_t generation_ = 0;         // bumped by clear(); guards stale worker callbacks
+    uint64_t reload_invocations_ = 0; // test observable: reload() build-path entries
     int rows_ = 0;  // current grid dims (0 = empty); drives the letterbox aspect
     int cols_ = 0;
 };

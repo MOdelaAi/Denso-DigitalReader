@@ -10,9 +10,13 @@
 #include <QSqlDatabase>
 #include <QWidget>
 
+#include <cstdint>
 #include <memory>
 
+class QLabel;
+class QPushButton;
 class QStackedWidget;
+class QVBoxLayout;
 
 namespace denso::ui {
 
@@ -40,18 +44,32 @@ public:
     void teardown_for_switch();
 
     // Test-only observers of the view's non-live state after teardown_for_switch().
-    int current_page_index() const;      ///< 0 = neutral/empty page, 1 = live grid
+    int current_page_index() const;      ///< 0 = empty, 1 = live grid, 2 = retained/unavailable
     bool grid_has_live_streams() const;  ///< whether the grid still holds a stream
+    uint64_t grid_reload_invocations() const;  ///< delegate to CameraGrid::reload_invocations()
 
 signals:
     void add_camera_requested();
 
 private:
+    // (Re)build page 2's retained-connection list + mode-specific header/message/
+    // action from the current DB rows. `ball_leveler` selects the unavailable
+    // variant (read-only list, no setup action); digit_reader shows the
+    // setup-required variant with a "Set up cameras" action.
+    void populate_retained_page(bool ball_leveler);
+
     QSqlDatabase db_;
     QStackedWidget* stack_ = nullptr;
     CameraGrid* grid_ = nullptr;
     std::shared_ptr<EngineRegistry> engines_;
     WarmupState* warmup_ = nullptr;
+
+    // Page 2 (retained connections / mode unavailable): skeleton built once in the
+    // ctor, repopulated per reload().
+    QLabel* retained_header_ = nullptr;
+    QLabel* retained_message_ = nullptr;
+    QVBoxLayout* retained_list_box_ = nullptr;
+    QPushButton* retained_setup_btn_ = nullptr;
 };
 
 } // namespace denso::ui
