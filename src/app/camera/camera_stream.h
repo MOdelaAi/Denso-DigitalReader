@@ -16,6 +16,7 @@
 #include <QObject>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <thread>
 
@@ -40,12 +41,22 @@ public:
     /// consumed by the tile. Handed to the paired CameraTile so it can decrement.
     std::shared_ptr<std::atomic<int>> frame_counter() const { return queued_; }
 
+    /// Process-lifetime count of how many CameraStream objects have EVER been
+    /// constructed. Monotonic: every constructor increments it; nothing decrements
+    /// or resets it. Slice 4 is its sole owner/definition; later slices only read
+    /// it. The mode-switch teardown seam uses it to prove no stream is built
+    /// between confirm and commit (compare at a precise lifecycle boundary — a
+    /// bare before/after pair around a whole switch would miss a build-then-destroy).
+    static uint64_t constructed_count();
+
 signals:
     void frame_ready(const QImage& frame);
     void status_changed(int status);  // CameraStream::Status as int (queued-safe)
 
 private:
     void run();  // worker-thread body
+
+    static std::atomic<uint64_t> s_constructed_;  // monotonic construction tally
 
     camera::Camera cam_;
     std::unique_ptr<FrameProcessor> processor_;

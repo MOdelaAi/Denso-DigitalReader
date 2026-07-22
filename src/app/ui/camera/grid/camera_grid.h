@@ -44,10 +44,20 @@ public:
     void release_streams();   // stop capture, keep the tiles on screen
     void start_streams();     // (re)start the existing streams
 
+    // The ONE authoritative teardown of the live pipeline, exposed as a callable
+    // pre-transaction primitive for the mode switch (spec §6.2). It delegates to
+    // clear() — the single teardown sequence — and is NOT a second copy of it. It
+    // does NOT re-query runtime() or restart anything (unlike reload()).
+    void teardown();
+
     // Test-only: the current grid generation. Every authoritative teardown
     // (clear()) advances it, so a worker callback captured before a rebuild is
     // dropped by callback_is_current(). Consumed by the Slice-8 teardown proof.
     uint64_t generation() const { return generation_; }
+
+    // Test-only: whether any live capture stream currently exists. Used by the
+    // teardown-seam proof to assert nothing streams after teardown().
+    bool has_live_streams() const { return !streams_.empty(); }
 
 protected:
     void resizeEvent(QResizeEvent* event) override;

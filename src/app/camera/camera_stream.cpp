@@ -164,10 +164,20 @@ bool open_source(const camera::Camera& cam, int& preferred, cv::VideoCapture& ca
 }
 }
 
+std::atomic<uint64_t> CameraStream::s_constructed_{0};
+
+uint64_t CameraStream::constructed_count() {
+    return s_constructed_.load(std::memory_order_relaxed);
+}
+
 CameraStream::CameraStream(camera::Camera cam,
                            std::unique_ptr<FrameProcessor> processor,
                            QObject* parent)
-    : QObject(parent), cam_(std::move(cam)), processor_(std::move(processor)) {}
+    : QObject(parent), cam_(std::move(cam)), processor_(std::move(processor)) {
+    // Monotonic process-lifetime tally (see constructed_count()). relaxed: this is
+    // an observable counter, not an ordering primitive for other state.
+    s_constructed_.fetch_add(1, std::memory_order_relaxed);
+}
 
 CameraStream::~CameraStream() { stop(); }
 

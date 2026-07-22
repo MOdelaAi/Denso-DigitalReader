@@ -100,6 +100,13 @@ void CameraGrid::clear() {
     }
 }
 
+void CameraGrid::teardown() {
+    // Delegate to the single authoritative teardown. The mode switch tears the
+    // pipeline down BEFORE the reset transaction and must not rebuild anything, so
+    // this is clear() with no reload() — one sequence, defined once (spec §6.2).
+    clear();
+}
+
 void CameraGrid::reload() {
     clear();
 

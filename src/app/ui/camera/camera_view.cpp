@@ -89,4 +89,19 @@ void CameraView::release_streams() {
     grid_->release_streams();
 }
 
+void CameraView::teardown_for_switch() {
+    // Authoritative teardown of the live pipeline (== CameraGrid::clear()), then
+    // show the neutral empty page (index 0) so no stale grid lingers during the
+    // multi-second reset transaction. NOT reload() / runtime(): nothing may restart
+    // the old-mode cameras before the switch commits (spec §6.2).
+    grid_->teardown();
+    stack_->setCurrentIndex(0);
+}
+
+int CameraView::current_page_index() const { return stack_->currentIndex(); }
+
+bool CameraView::grid_has_live_streams() const {
+    return grid_->has_live_streams();
+}
+
 } // namespace denso::ui
