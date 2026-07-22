@@ -76,6 +76,7 @@ add_executable(denso_tests
     test_callback_generation.cpp
     test_mode.cpp
     test_mode_reset.cpp
+    test_mode_confirm_text.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),
@@ -84,6 +85,7 @@ add_executable(denso_tests
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/roi_geometry.cpp  # UI geometry
     ${CMAKE_SOURCE_DIR}/src/app/cli/migrate_coordinator.cpp        # headless migrate coordinator
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/grid_layout.cpp     # grid layout algo
+    ${CMAKE_SOURCE_DIR}/src/app/ui/settings/mode_confirm_text.cpp  # pure confirm-copy builder
     ${CMAKE_SOURCE_DIR}/src/app/ui/startup_mode.cpp                # cold-start probe
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_rotation.cpp
     ${CMAKE_SOURCE_DIR}/src/app/logging/redact.cpp
@@ -111,6 +113,7 @@ catch_discover_tests(denso_tests)
 add_executable(denso_integration_tests
     integration_main.cpp
     test_mode_teardown.cpp
+    test_settings_mode.cpp
 )
 target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
 

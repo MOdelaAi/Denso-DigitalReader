@@ -92,6 +92,8 @@ add_library(denso_app OBJECT
     # settings modal
     ui/settings/settings_dialog.cpp
     ui/settings/display_confirm_dialog.cpp
+    ui/settings/mode_confirm_text.cpp    # pure copy builder (also compiled into denso_tests)
+    ui/settings/mode_confirm_dialog.cpp
     ui/settings/network_panel.cpp
     ui/settings/netcard.cpp
     # camera management — entry points

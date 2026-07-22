@@ -42,13 +42,14 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     nav_ = new QListWidget;
     nav_->setObjectName(QStringLiteral("navList"));
     nav_->setFixedWidth(160);
-    nav_->addItems({QStringLiteral("Display"), QStringLiteral("System"),
-                    QStringLiteral("Network"), QStringLiteral("Server"),
-                    QStringLiteral("About")});
+    nav_->addItems({QStringLiteral("Display"), QStringLiteral("Mode"),
+                    QStringLiteral("System"), QStringLiteral("Network"),
+                    QStringLiteral("Server"), QStringLiteral("About")});
     body->addWidget(nav_, 0);
 
     stack_ = new QStackedWidget;
     stack_->addWidget(build_display());
+    stack_->addWidget(build_mode());
     stack_->addWidget(build_system());
     stack_->addWidget(build_network());
     stack_->addWidget(build_server());
@@ -63,7 +64,9 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     connect(nav_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0) return;
         stack_->setCurrentIndex(row);
-        if (row == 2) {  // Network tab (now index 2): re-seed cards + refresh status
+        // Network tab: re-seed cards + refresh status. Match by widget identity so
+        // the new Mode page (which shifted the numeric indices) can't misfire it.
+        if (stack_->widget(row) == network_panel_) {
             network_panel_->on_shown();
         }
     });
@@ -145,6 +148,53 @@ QWidget* SettingsDialog::build_display() {
     v->addLayout(dark_row);
 
     v->addStretch(1);
+    return page;
+}
+
+QWidget* SettingsDialog::build_mode() {
+    auto* page = new QWidget;
+    auto* v = new QVBoxLayout(page);
+    v->setSpacing(12);
+    v->addWidget(common::eyebrow(QStringLiteral("TARGET MODE")));
+
+    auto* box = new QVBoxLayout;
+    box->setSpacing(6);
+    box->addWidget(common::dim_label(QStringLiteral("Operating mode")));
+    mode_select_ = new QComboBox;
+    mode_select_->setObjectName(QStringLiteral("modeSelect"));
+    mode_select_->addItem(QStringLiteral("Digital Number Reader"),
+                          static_cast<int>(mode::TargetMode::DigitReader));
+    mode_select_->addItem(QStringLiteral("Floating Ball Leveler"),
+                          static_cast<int>(mode::TargetMode::BallLeveler));
+    box->addWidget(mode_select_);
+    v->addLayout(box);
+
+    auto* note = common::dim_label(QStringLiteral(
+        "Switching resets each camera's processing setup and turns off server "
+        "reporting. Camera connections are kept. This cannot be undone."));
+    note->setWordWrap(true);
+    note->setProperty("faint", true);
+    v->addWidget(note);
+
+    switch_mode_btn_ = new QPushButton(QStringLiteral("Switch and Reset"));
+    switch_mode_btn_->setObjectName(QStringLiteral("switchAndResetButton"));
+    // Intent ONLY (spec §5/§7). Slice 7 owns preview_counts + ModeConfirmDialog +
+    // the transaction. Enabled only when the selected mode differs from current,
+    // so a click can never request a switch to the already-active mode.
+    connect(switch_mode_btn_, &QPushButton::clicked, this, [this] {
+        const mode::TargetMode sel =
+            mode::from_index(mode_select_->currentData().toInt());
+        emit switch_mode_requested(static_cast<int>(sel));
+    });
+    v->addWidget(switch_mode_btn_, 0, Qt::AlignLeft);
+
+    // A bare selector change never emits a switch — it only re-evaluates the
+    // button's enabled state.
+    connect(mode_select_, &QComboBox::currentIndexChanged, this,
+            [this](int) { sync_mode_button(); });
+
+    v->addStretch(1);
+    sync_mode_button();  // seed disabled until a different mode is selected
     return page;
 }
 
@@ -278,6 +328,23 @@ void SettingsDialog::set_theme_dark(bool dark) {
     suppress_signals_ = true;
     dark_switch_->setChecked(dark);
     suppress_signals_ = false;
+}
+
+void SettingsDialog::set_current_mode(mode::TargetMode mode) {
+    current_mode_ = mode;
+    // Seed the selector to the current mode. currentIndexChanged only re-syncs the
+    // button (no emit), and switch_mode_requested is fired solely by the button's
+    // clicked handler — so seeding never emits a switch intent.
+    const int i = mode_select_->findData(static_cast<int>(mode));
+    if (i >= 0) mode_select_->setCurrentIndex(i);
+    sync_mode_button();  // selected now equals current → button disabled
+}
+
+void SettingsDialog::sync_mode_button() {
+    if (!mode_select_ || !switch_mode_btn_) return;
+    const mode::TargetMode selected =
+        mode::from_index(mode_select_->currentData().toInt());
+    switch_mode_btn_->setEnabled(selected != current_mode_);
 }
 
 void SettingsDialog::showEvent(QShowEvent* event) {
