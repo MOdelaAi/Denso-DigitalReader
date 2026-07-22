@@ -79,29 +79,37 @@ MigrateOutcome run_migrate(const MigrateInputs& in) {
     const QString canon_dir = QFileInfo(in.models_dir).canonicalFilePath();
     if (canon_dir.isEmpty()) return fail(6, "path-escape", "models_dir does not exist: " + in.models_dir);
     const QString prefix = canon_dir.endsWith('/') ? canon_dir : canon_dir + '/';
+    //
+    // SCHEMA-AWARE ACCESSORS, not the raw fields: schema 2 nests the TensorRT
+    // artifact under runtime.tensorrt, leaving the root fields empty. Reading
+    // gen->engine directly would make the path-escape guard canonicalize the
+    // models dir itself and both hash comparisons compare against an empty
+    // string — a silent downgrade of two security checks.
+    const std::string& gen_engine  = gen->tensorrt_engine();
+    const std::string& gen_sidecar = gen->tensorrt_sidecar();
     const QString canon_engine =
-        QFileInfo(QDir(in.models_dir).filePath(QString::fromStdString(gen->engine))).canonicalFilePath();
+        QFileInfo(QDir(in.models_dir).filePath(QString::fromStdString(gen_engine))).canonicalFilePath();
     const QString canon_sidecar =
-        QFileInfo(QDir(in.models_dir).filePath(QString::fromStdString(gen->sidecar))).canonicalFilePath();
+        QFileInfo(QDir(in.models_dir).filePath(QString::fromStdString(gen_sidecar))).canonicalFilePath();
     if (canon_engine.isEmpty() || !canon_engine.startsWith(prefix))
         return fail(6, "path-escape", "engine resolves outside models_dir: " + in.new_engine);
     if (canon_sidecar.isEmpty() || !canon_sidecar.startsWith(prefix))
         return fail(6, "path-escape",
-                    "sidecar resolves outside models_dir: " + QString::fromStdString(gen->sidecar));
+                    "sidecar resolves outside models_dir: " + QString::fromStdString(gen_sidecar));
     // (6) content hashes must equal the manifest
     auto eh = denso::models::file_sha256(canon_engine);
-    if (!eh || *eh != gen->engine_sha256)
+    if (!eh || *eh != gen->tensorrt_engine_sha256())
         return fail(7, "hash-mismatch", "engine sha256 mismatch for " + in.new_engine);
     auto sh = denso::models::file_sha256(canon_sidecar);
-    if (!sh || *sh != gen->sidecar_sha256)
+    if (!sh || *sh != gen->tensorrt_sidecar_sha256())
         return fail(7, "hash-mismatch",
-                    "sidecar sha256 mismatch for " + QString::fromStdString(gen->sidecar));
+                    "sidecar sha256 mismatch for " + QString::fromStdString(gen_sidecar));
     // (7) build request + run the transaction
     denso::detection::MigrateRequest req;
     req.old_filename = in.old_engine.toStdString();
     req.new_filename = new_engine;
     req.new_name = gen->name;
-    req.new_engine_sha256 = gen->engine_sha256;
+    req.new_engine_sha256 = gen->tensorrt_engine_sha256();
     req.new_class_names = gen->class_names;
     req.explicit_remap = remap;
     for (qint64 c : in.cameras) req.camera_ids.push_back(static_cast<int64_t>(c));

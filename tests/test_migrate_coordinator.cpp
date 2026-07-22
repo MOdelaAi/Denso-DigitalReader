@@ -420,3 +420,203 @@ TEST_CASE("run_migrate reports a DB that cannot be opened", "[migrate_coord]") {
     REQUIRE(out.exit_code == 3);
     REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString() == "db-open-failed");
 }
+
+// ─── schema-2 parity (Slice 1) ───────────────────────────────────────────────
+//
+// Schema 2 nests the TensorRT artifact under runtime.tensorrt, leaving the root
+// engine/sidecar/hash fields empty. The coordinator reads them through the
+// schema-aware accessors, so a schema-2 generation must behave EXACTLY like the
+// equivalent schema-1 one: same path-escape guard, same hash comparisons, same
+// exit codes. Reading the raw fields would have silently compared against "".
+
+// The same generation as manifest_json() above, expressed at schema 2.
+static QByteArray manifest_json_v2(const std::string& esha, const std::string& ssha) {
+    const std::string prov =
+        std::string(R"("provenance":{"source_pt":"new_b.pt","source_pt_sha256":")") +
+        std::string(64, 'd') + R"(","onnx":"new_b.onnx","onnx_sha256":")" +
+        std::string(64, 'a') + R"(","onnx_opset":12,"training_ultralytics":"8.4.33",)" +
+        R"("export_ultralytics":"8.4.33","batch":1,"dynamic":false,"nms":false,)" +
+        R"("precision":"fp16","jetpack":"6.2","export_onnx_command":"e",)" +
+        R"("export_engine_command":"t"})";
+    return QByteArray::fromStdString(
+        std::string(R"({"schema":2,"generations":[{)") +
+        R"("name":"new-b","canonical_id":"new-b","family":"digit_numeric",)" +
+        R"("task":"detect","input_size":640,"class_names":["0","1"],"class_count":2,)" +
+        R"("runtime":{"tensorrt":{"engine":"new_b.engine","engine_sha256":")" + esha +
+        R"(","sidecar":"new_b.names.json","sidecar_sha256":")" + ssha +
+        R"(","class_metadata_source":"names_sidecar",)" +
+        R"("built_for":{"trt":"10.3","cuda":"12.6","sm":"87"}}},)" + prov +
+        R"(,"installed_utc":"2026-07-22T00:00:00Z","state":"installed"}]})");
+}
+
+TEST_CASE("run_migrate succeeds against a schema 2 manifest", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path());
+    QString engine_path = put(dir, "new_b.engine", "ENGINE-BYTES");
+    QString sidecar_path = put(dir, "new_b.names.json", R"(["0","1"])");
+    auto esha = models::file_sha256(engine_path); REQUIRE(esha);
+    auto ssha = models::file_sha256(sidecar_path); REQUIRE(ssha);
+    put(dir, "manifest.json", manifest_json_v2(*esha, *ssha));
+
+    QString db_path = dir.filePath("denso.db");
+    seed_db(db_path);
+
+    cli::MigrateInputs in;
+    in.models_dir = dir.path();
+    in.db_path = db_path;
+    in.old_engine = "old_a.engine";
+    in.new_engine = "new_b.engine";
+    in.cameras = {1};
+
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 0);
+    auto oj = QJsonDocument::fromJson(out.json.toUtf8()).object();
+    REQUIRE(oj["ok"].toBool() == true);
+    REQUIRE(oj["new_engine"].toString() == "new_b.engine");
+
+    auto db2 = db::Db::open(db_path); REQUIRE(db2);
+    auto cd = detection::detection_for(db2->handle(), 1);
+    REQUIRE(cd.models.size() == 1);
+    REQUIRE(cd.models[0].filename == "new_b.engine");
+}
+
+TEST_CASE("run_migrate rejects a schema 2 engine hash mismatch", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path());
+    put(dir, "new_b.engine", "ENGINE-BYTES");
+    QString sidecar_path = put(dir, "new_b.names.json", R"(["0","1"])");
+    auto ssha = models::file_sha256(sidecar_path); REQUIRE(ssha);
+    put(dir, "manifest.json", manifest_json_v2(std::string(64, 'b'), *ssha));
+
+    QString db_path = dir.filePath("denso.db");
+    seed_db(db_path);
+
+    cli::MigrateInputs in;
+    in.models_dir = dir.path();
+    in.db_path = db_path;
+    in.old_engine = "old_a.engine";
+    in.new_engine = "new_b.engine";
+    in.cameras = {1};
+
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 7);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString()
+            == "hash-mismatch");
+
+    auto db2 = db::Db::open(db_path); REQUIRE(db2);
+    auto cd = detection::detection_for(db2->handle(), 1);
+    REQUIRE(cd.models[0].filename == "old_a.engine");
+}
+
+TEST_CASE("run_migrate rejects a schema 2 sidecar-only hash mismatch",
+          "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path());
+    QString engine_path = put(dir, "new_b.engine", "ENGINE-BYTES");
+    put(dir, "new_b.names.json", R"(["0","1"])");
+    auto esha = models::file_sha256(engine_path); REQUIRE(esha);
+    put(dir, "manifest.json", manifest_json_v2(*esha, std::string(64, 'c')));
+
+    QString db_path = dir.filePath("denso.db");
+    seed_db(db_path);
+
+    cli::MigrateInputs in;
+    in.models_dir = dir.path();
+    in.db_path = db_path;
+    in.old_engine = "old_a.engine";
+    in.new_engine = "new_b.engine";
+    in.cameras = {1};
+
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 7);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString()
+            == "hash-mismatch");
+}
+
+TEST_CASE("run_migrate reports a missing schema 2 engine file", "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path());
+    QString engine_path = put(dir, "new_b.engine", "ENGINE-BYTES");
+    QString sidecar_path = put(dir, "new_b.names.json", R"(["0","1"])");
+    auto esha = models::file_sha256(engine_path); REQUIRE(esha);
+    auto ssha = models::file_sha256(sidecar_path); REQUIRE(ssha);
+    put(dir, "manifest.json", manifest_json_v2(*esha, *ssha));
+    REQUIRE(QFile::remove(engine_path));   // delete AFTER hashing
+
+    QString db_path = dir.filePath("denso.db");
+    seed_db(db_path);
+
+    cli::MigrateInputs in;
+    in.models_dir = dir.path();
+    in.db_path = db_path;
+    in.old_engine = "old_a.engine";
+    in.new_engine = "new_b.engine";
+    in.cameras = {1};
+
+    // A missing engine cannot canonicalize, so it trips the path-escape guard —
+    // exactly as it does at schema 1.
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 6);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString()
+            == "path-escape");
+
+    auto db2 = db::Db::open(db_path); REQUIRE(db2);
+    auto cd = detection::detection_for(db2->handle(), 1);
+    REQUIRE(cd.models[0].filename == "old_a.engine");
+}
+
+TEST_CASE("run_migrate rejects an absent generation in a schema 2 manifest",
+          "[migrate_coord]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path());
+    QString engine_path = put(dir, "new_b.engine", "ENGINE-BYTES");
+    QString sidecar_path = put(dir, "new_b.names.json", R"(["0","1"])");
+    auto esha = models::file_sha256(engine_path); REQUIRE(esha);
+    auto ssha = models::file_sha256(sidecar_path); REQUIRE(ssha);
+    put(dir, "manifest.json", manifest_json_v2(*esha, *ssha));
+
+    QString db_path = dir.filePath("denso.db");
+    seed_db(db_path);
+
+    cli::MigrateInputs in;
+    in.models_dir = dir.path();
+    in.db_path = db_path;
+    in.old_engine = "old_a.engine";
+    in.new_engine = "not_in_manifest.engine";
+    in.cameras = {1};
+
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 5);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString()
+            == "no-such-generation");
+}
+
+TEST_CASE("run_migrate never resolves a schema 2 generation by its onnx filename",
+          "[migrate_coord]") {
+    // find_by_engine matches runtime.tensorrt.engine ONLY. Asking for the ONNX
+    // name must be "no such generation", never a silent match that would then go
+    // on to hash the wrong artifact.
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    QDir dir(tmp.path());
+    QString engine_path = put(dir, "new_b.engine", "ENGINE-BYTES");
+    QString sidecar_path = put(dir, "new_b.names.json", R"(["0","1"])");
+    put(dir, "new_b.onnx", "ONNX-BYTES");
+    auto esha = models::file_sha256(engine_path); REQUIRE(esha);
+    auto ssha = models::file_sha256(sidecar_path); REQUIRE(ssha);
+    put(dir, "manifest.json", manifest_json_v2(*esha, *ssha));
+
+    QString db_path = dir.filePath("denso.db");
+    seed_db(db_path);
+
+    cli::MigrateInputs in;
+    in.models_dir = dir.path();
+    in.db_path = db_path;
+    in.old_engine = "old_a.engine";
+    in.new_engine = "new_b.onnx";
+    in.cameras = {1};
+
+    auto out = cli::run_migrate(in);
+    REQUIRE(out.exit_code == 5);
+    REQUIRE(QJsonDocument::fromJson(out.json.toUtf8()).object()["code"].toString()
+            == "no-such-generation");
+}

@@ -137,7 +137,18 @@ IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& model
             v.status = Readiness::Blocked;
             return v;
         }
-        for (const auto& g : pr.manifest->generations) manifested.insert(g.engine);
+        // BOOKKEEPING, NOT AUTHORIZATION. The manifested set is the union of every
+        // runtime artifact filename DECLARED across both backend blocks, for every
+        // generation — irrespective of the committed mode and irrespective of the
+        // backend this build actually runs. A file is "manifested" because it is
+        // described, not because it is usable here.
+        //
+        // Reading the raw g.engine would have been silently wrong once schema 2
+        // nested the filenames: the root field is empty there, so an appliance's
+        // own correctly-declared engine would report EnginesUnmanifested and
+        // degrade a box that is in fact healthy.
+        for (const auto& g : pr.manifest->generations)
+            for (const auto& f : g.declared_runtime_files()) manifested.insert(f);
     }
 
     // ── Degraded: engines on disk that the manifest does not describe ────────

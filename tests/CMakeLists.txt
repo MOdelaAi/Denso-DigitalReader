@@ -65,6 +65,7 @@ add_executable(denso_tests
     test_cli_args.cpp
     test_hashing.cpp
     test_manifest.cpp
+    test_model_identity.cpp
     test_class_map.cpp
     test_migrate.cpp
     test_migrate_coordinator.cpp
