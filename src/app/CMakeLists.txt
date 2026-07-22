@@ -60,11 +60,18 @@ target_include_directories(denso_camera PUBLIC
 target_link_libraries(denso_camera PUBLIC
     denso_core denso_detection Qt6::Core Qt6::Gui ${OpenCV_LIBS})
 
-add_executable(denso WIN32
-    main.cpp
+# ── denso_app: EVERY denso-executable source EXCEPT main.cpp and resources.qrc,
+#    compiled once into an OBJECT library so both the shipped `denso` executable
+#    and the `denso_integration_tests` target (defined in tests/, after Catch2 is
+#    fetched) link the SAME objects. An OBJECT library — NOT STATIC — because
+#    object libraries link ALL their objects into every consumer, so no moc or
+#    static-initialiser object can be silently culled by static-archive extraction
+#    (the STATIC-lib hazard). resources.qrc stays DIRECTLY on `denso` so :/icon.png
+#    and the theme resources auto-register into the shipped exe; all POST_BUILD
+#    steps (ORT DLL / model / GPU-EP copy) also stay on `denso`.
+add_library(denso_app OBJECT
     cli/run_headless.cpp
     cli/migrate_coordinator.cpp
-    resources.qrc
     # logging (bounded rotating file sink + redaction)
     logging/log_rotation.cpp
     logging/log_sink.cpp
@@ -119,17 +126,27 @@ add_executable(denso WIN32
     ui/camera/dialog/camera_devices.cpp
     ui/camera/dialog/ip_scan.cpp
 )
-target_include_directories(denso PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(denso PRIVATE denso_core denso_detection denso_brazing denso_camera Qt6::Widgets Qt6::Multimedia Qt6::Network)
-target_include_directories(denso PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(denso PRIVATE ${OpenCV_LIBS})
-target_compile_definitions(denso PRIVATE APP_VERSION="0.1.0")
+# PUBLIC so every consumer (denso, denso_integration_tests) inherits the include
+# roots, link graph, and APP_VERSION identically to the old `denso` target.
+target_include_directories(denso_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(denso_app PUBLIC denso_core denso_detection denso_brazing denso_camera Qt6::Widgets Qt6::Multimedia Qt6::Network ${OpenCV_LIBS})
+target_compile_definitions(denso_app PUBLIC APP_VERSION="0.1.0")
+
+# The shipped executable: only the entry point + resources live here; everything
+# else comes from the denso_app OBJECT library above.
+add_executable(denso WIN32
+    main.cpp
+    resources.qrc
+)
+target_link_libraries(denso PRIVATE denso_app)
 
 # ── Inference backend, platform-split (see top-level CMakeLists.txt) ──────────
+# The backend sources compile into denso_app (so denso_integration_tests links
+# them too); the runtime-DLL / model POST_BUILD staging stays on the `denso` exe.
 if(WIN32)
     # Windows: ONNX Runtime engine + its runtime DLLs beside the exe.
-    target_sources(denso PRIVATE detection/ort_engine.cpp)
-    target_link_libraries(denso PRIVATE onnxruntime)
+    target_sources(denso_app PRIVATE detection/ort_engine.cpp)
+    target_link_libraries(denso_app PUBLIC onnxruntime)
 
     # ORT runtime DLLs + the models must sit beside the exe (Windows DLL search +
     # the app scans models/ relative to the executable dir at startup via
@@ -166,8 +183,10 @@ if(WIN32)
 else()
     # Linux/Jetson: native TensorRT. Engines are PREBUILT on-device with trtexec
     # and placed in <exe-dir>/models by the operator (not copied at build time).
-    target_sources(denso PRIVATE
+    # The engine source compiles into denso_app; the TRT link + include propagate
+    # PUBLICly so both denso and denso_integration_tests inherit them.
+    target_sources(denso_app PRIVATE
         detection/trt_engine.cpp)
-    target_link_libraries(denso PRIVATE ${TRT_NVINFER} CUDA::cudart)
-    target_include_directories(denso PRIVATE ${TRT_INCLUDE_DIR})
+    target_link_libraries(denso_app PUBLIC ${TRT_NVINFER} CUDA::cudart)
+    target_include_directories(denso_app PUBLIC ${TRT_INCLUDE_DIR})
 endif()

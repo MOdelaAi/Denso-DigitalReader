@@ -99,6 +99,51 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 catch_discover_tests(denso_tests)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# denso_integration_tests — Qt-Widgets / offscreen lifecycle tests over the REAL
+# app objects (CameraView / CameraGrid / CameraStream). Declared HERE, after
+# FetchContent_MakeAvailable(Catch2) above, because Catch2::Catch2 only exists in
+# this directory. It links the denso_app OBJECT library (the same objects the
+# shipped `denso` exe links), so it pulls the inference backend — but every seeded
+# camera is model-less, so no engine is ever loaded. Kept SEPARATE from denso_tests
+# so that suite stays fast and backend-free.
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(denso_integration_tests
+    integration_main.cpp
+)
+target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
+
+if(WIN32)
+    # The import lib means the test exe needs the ORT runtime DLLs at load time
+    # (denso_app PUBLIC-links onnxruntime). Copy them beside the test exe — but NOT
+    # models/: these tests are model-less, so nothing scans or loads an engine.
+    # These POST_BUILD copies are registered BEFORE catch_discover_tests below so
+    # they run first: catch_discover_tests launches the exe at build time to
+    # enumerate cases, and it cannot load without onnxruntime.dll present.
+    add_custom_command(TARGET denso_integration_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${ORT_DIR}/lib/onnxruntime.dll
+            ${ORT_DIR}/lib/onnxruntime_providers_shared.dll
+            ${ORT_DIR}/lib/onnxruntime_providers_cuda.dll
+            ${ORT_DIR}/lib/onnxruntime_providers_tensorrt.dll
+            $<TARGET_FILE_DIR:denso_integration_tests>
+        VERBATIM)
+
+    # The CUDA execution-provider runtime DLLs the ORT providers dlopen at load,
+    # provisioned into third_party/gpu_ep/ (git-ignored). Mirror the `denso` exe so
+    # the test binary can also load onnxruntime_providers_cuda.dll if present.
+    file(GLOB GPU_EP_DLLS "${CMAKE_SOURCE_DIR}/third_party/gpu_ep/*.dll")
+    if(GPU_EP_DLLS)
+        add_custom_command(TARGET denso_integration_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${GPU_EP_DLLS}
+                $<TARGET_FILE_DIR:denso_integration_tests>
+            VERBATIM)
+    endif()
+endif()
+
+catch_discover_tests(denso_integration_tests)
+
 # The packaging policy harness (pure POSIX sh, no deps) behind the SAME gate as
 # the C++ tests. It was 339 lines that only ran when someone remembered to — and
 # it covers the decisions that run as ROOT on the appliance (apt-plan guard, GDM
