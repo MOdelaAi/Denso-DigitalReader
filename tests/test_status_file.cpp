@@ -71,3 +71,26 @@ TEST_CASE("status.json: a failed write leaves a prior good file intact",
     REQUIRE(QJsonDocument::fromJson(f.readAll()).object()["status"].toString()
             == "blocked");
 }
+
+TEST_CASE("status.json emits mode fields when provided", "[status_file]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    const QString p = QDir(tmp.path()).filePath("st_mode.json");
+    health::IntegrityVerdict v;  // Ready
+    REQUIRE(health::write_status_file(p, v, {}, {}, {},
+            QStringLiteral("ball_leveler"), true));
+    QFile f(p); REQUIRE(f.open(QIODevice::ReadOnly));
+    const auto o = QJsonDocument::fromJson(f.readAll()).object();
+    CHECK(o.value("mode").toString() == QStringLiteral("ball_leveler"));
+    CHECK(o.value("mode_setup_required").toBool() == true);
+}
+
+TEST_CASE("status.json omits mode fields when not provided", "[status_file]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    const QString p = QDir(tmp.path()).filePath("st_nomode.json");
+    health::IntegrityVerdict v;
+    REQUIRE(health::write_status_file(p, v, {}, {}, {}));  // 5-arg
+    QFile f(p); REQUIRE(f.open(QIODevice::ReadOnly));
+    const auto o = QJsonDocument::fromJson(f.readAll()).object();
+    CHECK_FALSE(o.contains("mode"));
+    CHECK_FALSE(o.contains("mode_setup_required"));
+}

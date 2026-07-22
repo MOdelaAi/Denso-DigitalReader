@@ -12,6 +12,7 @@
 #include "brazing/zone_reporter.h"
 #include "detection/engine_registry.h"
 #include "health/status_file.h"
+#include "mode/config.h"
 #include "paths/paths.h"
 #include "ui/common/async_runner.h"  // post_to_gui
 #include "ui/warmup_state.h"
@@ -335,10 +336,15 @@ void CameraGrid::refresh_status_file() {
     if (!health_) return;
     // Reuse the boot verdict (per-zone issues do not change at runtime); only the
     // runtime camera causes move. held/inhibited zone lists are not surfaced yet
-    // (no producer this slice), so they stay empty.
+    // (no producer this slice), so they stay empty. The DB is open here, so the
+    // real mode + setup-required flag ride along (nullopt-omitted on query fail,
+    // always true for ball_leveler).
+    const auto m = denso::mode::load(db_);
     health::write_status_file(
-        QDir(denso::paths::data_dir()).filePath(QStringLiteral("status.json")),
-        verdict_, health_->all(), {}, {});
+        denso::paths::status_file(),
+        verdict_, health_->all(), {}, {},
+        QString::fromLatin1(denso::mode::to_string(m)),
+        denso::mode::mode_setup_required(db_, m));
 }
 
 void CameraGrid::release_streams() {

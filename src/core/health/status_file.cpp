@@ -24,9 +24,16 @@ bool write_status_file(const QString& path,
                        const health::IntegrityVerdict& verdict,
                        const std::map<int64_t, uint32_t>& camera_causes,
                        const std::set<int>& held_zones,
-                       const std::set<int>& inhibited_zones) {
+                       const std::set<int>& inhibited_zones,
+                       const std::optional<QString>& mode,
+                       std::optional<bool> mode_setup_required) {
     QJsonObject root;
     root["status"] = status_text(verdict.status);
+
+    // Optional mode fields — emitted ONLY when the caller could determine them
+    // (spec §9); omitted, never guessed, when the DB could not be read.
+    if (mode) root["mode"] = *mode;
+    if (mode_setup_required) root["mode_setup_required"] = *mode_setup_required;
 
     QJsonArray blockers;
     for (const auto& b : verdict.blockers) {

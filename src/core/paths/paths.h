@@ -21,6 +21,7 @@ namespace denso::paths {
 QString data_dir();
 
 QString db_file();               ///< <data>/denso.db
+QString status_file();           ///< <data>/status.json (machine-readable health)
 QString log_file();              ///< <data>/denso.log (rotated siblings: .1 … .4)
 QString models_dir();            ///< <data>/models
 QString trt_cache_dir();         ///< <data>/models/trt_cache

@@ -194,8 +194,7 @@ int main(int argc, char** argv) {
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
 
     const QString db_path = denso::paths::db_file();
-    const QString status_path =
-        QDir(denso::paths::data_dir()).filePath(QStringLiteral("status.json"));
+    const QString status_path = denso::paths::status_file();
 
     // DB-stage readiness preflight, BEFORE the read-write open below would create
     // or migrate the file: a database written by a NEWER build (SchemaNewer) or

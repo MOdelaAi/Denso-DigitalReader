@@ -4,6 +4,7 @@
 #include "detection/engine_registry.h"
 #include "health/integrity.h"
 #include "health/status_file.h"
+#include "mode/config.h"
 #include "paths/paths.h"
 #include "ui/mainwindow.h"
 #include "ui/startup_mode.h"
@@ -131,9 +132,15 @@ int launch(QApplication& app, QSqlDatabase db,
     // already handled in main.cpp before the DB was opened.
     const auto verdict = denso::health::evaluate_integrity(db, denso::paths::models_dir());
     if (verdict.status == denso::health::Readiness::Blocked) {
-        const QString status_path =
-            QDir(denso::paths::data_dir()).filePath(QStringLiteral("status.json"));
-        denso::health::write_status_file(status_path, verdict, {}, {}, {});
+        // The DB is already open + migrated here (main.cpp cleared the DB-stage
+        // preflight), so the real mode is determinable — emit it alongside the
+        // real Blocked verdict. mode_setup_required is nullopt-omitted if the
+        // camera query fails, always true for ball_leveler.
+        const auto m = denso::mode::load(db);
+        denso::health::write_status_file(
+            denso::paths::status_file(), verdict, {}, {}, {},
+            QString::fromLatin1(denso::mode::to_string(m)),
+            denso::mode::mode_setup_required(db, m));
         for (const auto& b : verdict.blockers) {
             qCritical().noquote() << "[startup] BLOCKED:"
                                   << denso::health::reason_code(b.kind) << "—" << b.detail;

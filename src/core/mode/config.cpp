@@ -37,4 +37,17 @@ bool save(const QSqlDatabase& db, TargetMode m) {
     return q.exec();
 }
 
+std::optional<bool> mode_setup_required(const QSqlDatabase& db, TargetMode mode) {
+    if (mode == TargetMode::BallLeveler) {
+        return true;  // §2.1: permanently true this release (no Leveler setup ships)
+    }
+    // digit_reader: independent of `active`; a query failure is UNDETERMINABLE and
+    // must never be guessed as a boolean (the caller omits the field instead).
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral("SELECT 1 FROM camera WHERE setup_complete = 1 LIMIT 1"))) {
+        return std::nullopt;
+    }
+    return !q.next();  // true = none completed (setup required); false = ≥1 completed
+}
+
 } // namespace denso::mode

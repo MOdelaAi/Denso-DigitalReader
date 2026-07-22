@@ -4,10 +4,13 @@
 #include "mode/config.h"
 #include "settings/repo.h"
 #include "settings/settings.h"
+#include "camera/repo.h"
+#include "camera/camera.h"
 #include "db/db.h"
 
 #include <QSqlQuery>
 
+#include <optional>
 #include <string>
 
 using denso::mode::TargetMode;
@@ -73,4 +76,38 @@ TEST_CASE("persisting a mode adds no schema migration — user_version stays v13
     REQUIRE(denso::mode::save(db->handle(), TargetMode::BallLeveler));
     // The mode key rides the existing settings table; no DDL runs on save.
     CHECK(denso::db::read_user_version(db->handle()) == 13);
+}
+
+TEST_CASE("digit_reader mode_setup_required is true with zero completed cameras", "[mode]") {
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db); REQUIRE(denso::db::run_migrations(db->handle()));
+    CHECK(denso::mode::mode_setup_required(db->handle(), TargetMode::DigitReader)
+          == std::optional<bool>(true));
+}
+
+TEST_CASE("digit_reader mode_setup_required is false when a completed but inactive camera exists", "[mode]") {
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db); REQUIRE(denso::db::run_migrations(db->handle()));
+    denso::camera::Camera c; c.name = "cam"; c.camera_type = "usb"; c.index = 0u;
+    c.active = false; c.setup_complete = true;          // configured, disabled
+    REQUIRE(denso::camera::insert(db->handle(), c));
+    CHECK(denso::mode::mode_setup_required(db->handle(), TargetMode::DigitReader)
+          == std::optional<bool>(false));               // NOT runtime()-based
+}
+
+TEST_CASE("ball_leveler mode_setup_required is ALWAYS true, even with a completed camera", "[mode]") {
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db); REQUIRE(denso::db::run_migrations(db->handle()));
+    denso::camera::Camera c; c.name = "cam"; c.camera_type = "usb"; c.index = 0u;
+    c.active = true; c.setup_complete = true;            // a completed camera exists
+    REQUIRE(denso::camera::insert(db->handle(), c));
+    CHECK(denso::mode::mode_setup_required(db->handle(), TargetMode::BallLeveler)
+          == std::optional<bool>(true));                // spec §2.1 — permanent
+}
+
+TEST_CASE("digit_reader mode_setup_required is nullopt when the query cannot run", "[mode]") {
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db); REQUIRE(denso::db::run_migrations(db->handle()));
+    QSqlQuery(db->handle()).exec(QStringLiteral("DROP TABLE camera"));  // force a query failure
+    CHECK_FALSE(denso::mode::mode_setup_required(db->handle(), TargetMode::DigitReader).has_value());
 }

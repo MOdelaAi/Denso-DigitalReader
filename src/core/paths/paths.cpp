@@ -27,6 +27,7 @@ QString data_dir() {
 // separator from every path EXCEPT a filesystem root, so "/" + "/denso.db" would
 // yield "//denso.db" (and "C:/" → "C://denso.db").
 QString db_file()              { return QDir(data_dir()).filePath(QStringLiteral("denso.db")); }
+QString status_file()          { return QDir(data_dir()).filePath(QStringLiteral("status.json")); }
 QString log_file()             { return QDir(data_dir()).filePath(QStringLiteral("denso.log")); }
 QString models_dir()           { return QDir(data_dir()).filePath(QStringLiteral("models")); }
 QString trt_cache_dir()        { return QDir(models_dir()).filePath(QStringLiteral("trt_cache")); }

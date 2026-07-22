@@ -3,6 +3,7 @@
 #include "paths/paths.h"
 
 #include <QCoreApplication>
+#include <QDir>
 
 namespace {
 
@@ -82,4 +83,11 @@ TEST_CASE("every derived path hangs off data_dir", "[paths]") {
     REQUIRE(trt_cache_dir()         == QStringLiteral("/opt/denso/data/models/trt_cache"));
     REQUIRE(lock_file()             == QStringLiteral("/opt/denso/data/denso.lock"));
     REQUIRE(legacy_settings_json()  == QStringLiteral("/opt/denso/data/settings.json"));
+    REQUIRE(status_file()           == QStringLiteral("/opt/denso/data/status.json"));
+}
+
+TEST_CASE("status_file lives in the data dir", "[paths]") {
+    CHECK(denso::paths::status_file().endsWith(QStringLiteral("status.json")));
+    CHECK(denso::paths::status_file() ==
+          QDir(denso::paths::data_dir()).filePath(QStringLiteral("status.json")));
 }
