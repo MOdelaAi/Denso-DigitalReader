@@ -261,7 +261,22 @@ strictly — with schema-1 behaviour untouched.
 - An unrecognised key under `runtime` → rejected (no silent third backend).
 - `runtime.tensorrt.engine`/`sidecar` stem mismatch → rejected (the schema-1 rule
   applied inside the block).
-- Any `*_sha256` not 64 lowercase hex → rejected.
+- **Hash-field validation is two different rules — do not conflate them
+  (spec §3.5):**
+  - **Runtime artifact hashes** — `runtime.onnxruntime.model_sha256`,
+    `runtime.tensorrt.engine_sha256`, `runtime.tensorrt.sidecar_sha256` (and the
+    schema-1 root `engine_sha256` / `sidecar_sha256`) — must be **exactly 64
+    lowercase hexadecimal characters**; anything else → rejected. These are the
+    runtime authorization inputs: they are what `resolve_model_metadata`
+    compares `models::file_sha256` against, so a malformed one must never reach
+    a comparison.
+  - **Provenance record fields** — `provenance.source_pt_sha256`,
+    `provenance.onnx_sha256` — are required to be **non-empty** in Revision 3,
+    per spec §3.5, and are **not** subject to the 64-lowercase-hex rule. They
+    are descriptive provenance for humans and for the packaging approval flow;
+    they are **not runtime authorization inputs** and are never compared against
+    a file at boot. Assert the non-empty rule for them, and do **not** add a
+    hex-format assertion the spec does not require.
 - `built_for` present at the **generation root** of a schema-2 entry → rejected
   (spec §3.5 — a root copy would resurrect cross-platform rejection).
 - Missing `built_for.trt` / `.cuda` / `.sm` inside the TensorRT block → rejected.
@@ -337,8 +352,27 @@ An output of `[1,N,6]` means an end-to-end export slipped through — **stop**.
 **Commit boundary:** one commit — `tools: pinned ONNX exporter for the float
 models`. The `.onnx` files are **not** committed (git-ignored).
 
-**Rollback/failure — R2:** if 8.4.21 cannot be installed or cannot load
-`float-big.pt`, **STOP and report**. Do not silently fall back to 8.4.33.
+**Rollback/failure — R2 (approved controlled deviation, spec §8.3 / §18 / R2):**
+8.4.21 is attempted **first**. If it cannot be installed against an available
+torch, cannot load `float-big.pt`, or cannot export it, **Ultralytics 8.4.33 is
+an approved controlled deviation** — not a stop, and not a silent substitution.
+All of the following are mandatory conditions of using it:
+
+- the 8.4.21 failure is **captured verbatim** into the provenance record;
+- the source checkpoint is **not modified** in any way;
+- `training_ultralytics: "8.4.21"` and `export_ultralytics: "8.4.33"` are
+  recorded as **separate fields**, together with the captured failure and the
+  reason the fallback was required — the manifest never collapses them;
+- **every ONNX assertion in this slice still passes** — shape, dtype, class
+  order, class count, and the `args` metadata;
+- the resulting engine must later **deserialize and complete a real inference
+  natively on `.15`** (Slice 10) before it is approved.
+
+The deviation must be **explicit and recorded**; an undocumented or unrecorded
+version switch is still forbidden. **Retraining is not triggered by an exporter
+version difference alone** and is outside this scope — it becomes a question
+only if one of the assertions above fails, or if `.15` validation shows a
+correctness or compatibility failure.
 
 **Unchanged:** every production source file, the CMake graph, the app.
 
