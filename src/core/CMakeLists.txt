@@ -36,6 +36,8 @@ add_library(denso_core STATIC
     mode/reset.cpp
     models/hashing.cpp
     models/manifest.cpp
+    models/compatibility.cpp
+    models/model_identity.cpp
     models/class_map.cpp
     health/integrity.cpp
     health/status_file.cpp

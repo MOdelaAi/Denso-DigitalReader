@@ -7,7 +7,16 @@
 // must not grow one by accident.
 #include <catch2/catch_test_macros.hpp>
 
+#include "detection/detection.h"
+#include "models/compatibility.h"
+#include "models/hashing.h"
 #include "models/manifest.h"
+#include "models/model_identity.h"
+
+#include <QByteArray>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 
 #include <string>
 
@@ -697,4 +706,307 @@ TEST_CASE("schema 1 still rejects a bad state when every digest is valid",
     const auto err = validate_manifest(*r.manifest);
     REQUIRE(err.has_value());
     REQUIRE(err->find("state") != std::string::npos);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Slice 6 — resolve_model_metadata + ManifestView backend resolution.
+//
+// These cases test BOTH backends independent of the build host by constructing
+// ManifestView instances with an explicit Backend. Artifacts are written to a
+// temporary directory with MEASURED hashes; no real model file is touched.
+// ═════════════════════════════════════════════════════════════════════════════
+
+using denso::detection::DetectionModel;
+using denso::models::active_backend;
+using denso::models::Backend;
+using denso::models::BuiltFor;
+using denso::models::Manifest;
+using denso::models::ManifestView;
+using denso::models::model_compatibility;
+using denso::models::ModelGeneration;
+using denso::models::ModelMetadata;
+using denso::models::OnnxRuntimeArtifact;
+using denso::models::PlatformInfo;
+using denso::models::resolve_model_metadata;
+using denso::models::TensorRtArtifact;
+using denso::models::Verdict;
+using denso::mode::TargetMode;
+
+namespace {
+
+const PlatformInfo kJetson{"10.3", "12.6", "87"};
+
+// Write bytes to <dir>/<name>; return the file's MEASURED sha256.
+std::string put(const QString& dir, const std::string& name, const std::string& body) {
+    QFile f(QDir(dir).filePath(QString::fromStdString(name)));
+    REQUIRE(f.open(QIODevice::WriteOnly));
+    const QByteArray bytes = QByteArray::fromStdString(body);
+    REQUIRE(f.write(bytes) == bytes.size());
+    f.close();
+    auto h = denso::models::file_sha256(f.fileName());
+    REQUIRE(h.has_value());
+    return *h;
+}
+
+struct GenSpec {
+    std::string canonical_id = "digitv3";
+    std::string family       = "digit_numeric";
+    std::vector<std::string> class_names = {"0", "1"};
+    bool with_ort = true;
+    bool with_trt = true;
+    std::string onnx    = "digitv3.onnx";
+    std::string engine  = "digitv3.engine";
+    std::string sidecar = "digitv3.names.json";
+    BuiltFor built_for{"10.3", "12.6", "87"};
+};
+
+// A DECLARED (schema-2) generation whose artifacts are written into `dir` with
+// matching hashes, so provenance passes until a test deliberately corrupts it.
+ModelGeneration make_gen(const QString& dir, const GenSpec& s) {
+    ModelGeneration g;
+    g.declared      = true;
+    g.name          = s.canonical_id;
+    g.canonical_id  = s.canonical_id;
+    g.family        = s.family;
+    g.task          = "detect";
+    g.input_size    = 640;
+    g.class_names   = s.class_names;
+    g.class_count   = static_cast<int>(s.class_names.size());
+    g.installed_utc = "2026-07-22T00:00:00Z";
+    g.state         = "installed";
+    if (s.with_ort) {
+        OnnxRuntimeArtifact o;
+        o.model                 = s.onnx;
+        o.model_sha256          = put(dir, s.onnx, "onnx:" + s.canonical_id);
+        o.class_metadata_source = denso::models::kSourceOnnxMetadataNames;
+        g.runtime.onnxruntime   = o;
+    }
+    if (s.with_trt) {
+        TensorRtArtifact t;
+        t.engine                = s.engine;
+        t.engine_sha256         = put(dir, s.engine, "engine:" + s.canonical_id);
+        t.sidecar               = s.sidecar;
+        t.sidecar_sha256        = put(dir, s.sidecar, "sidecar:" + s.canonical_id);
+        t.class_metadata_source = denso::models::kSourceNamesSidecar;
+        t.built_for             = s.built_for;
+        g.runtime.tensorrt      = t;
+    }
+    return g;
+}
+
+Manifest one(const ModelGeneration& g) {
+    Manifest m;
+    m.schema = 2;
+    m.generations.push_back(g);
+    return m;
+}
+
+DetectionModel row(const std::string& filename,
+                   const std::vector<std::string>& class_names = {"0", "1"}) {
+    DetectionModel r;
+    r.filename    = filename;
+    r.class_names = class_names;
+    return r;
+}
+
+}  // namespace
+
+// ─── 1-3. TensorRT resolves the engine, hashes engine + sidecar, checks built_for
+
+TEST_CASE("tensorrt resolves the engine artifact and corroborates provenance",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    ManifestView view(one(make_gen(tmp.path(), {})), tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("digitv3.engine"), kJetson);
+    REQUIRE(md.declared);
+    REQUIRE(md.canonical_id == "digitv3");
+    REQUIRE(md.family == "digit_numeric");
+    REQUIRE(md.filename == "digitv3.engine");
+    REQUIRE(md.artifact_matches);
+    REQUIRE(md.provenance_ok);
+}
+
+TEST_CASE("tensorrt fails provenance when the engine hash does not match",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    auto g = make_gen(tmp.path(), {});
+    g.runtime.tensorrt->engine_sha256 = std::string(64, '0');  // no longer matches disk
+    ManifestView view(one(g), tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("digitv3.engine"), kJetson);
+    REQUIRE(md.declared);          // a bad hash does NOT make it undeclared
+    REQUIRE(md.artifact_matches);  // and does NOT touch class corroboration
+    REQUIRE_FALSE(md.provenance_ok);
+}
+
+TEST_CASE("tensorrt fails provenance when the sidecar hash does not match",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    auto g = make_gen(tmp.path(), {});
+    g.runtime.tensorrt->sidecar_sha256 = std::string(64, '0');
+    ManifestView view(one(g), tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("digitv3.engine"), kJetson);
+    REQUIRE_FALSE(md.provenance_ok);
+}
+
+// ─── 4. TensorRT wrong built_for → provenance false (declared/artifact intact) ─
+
+TEST_CASE("tensorrt with a wrong built_for fails provenance only", "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    ManifestView view(one(make_gen(tmp.path(), {})), tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("digitv3.engine"),
+                                     PlatformInfo{"9.9", "12.6", "87"});
+    REQUIRE(md.declared);
+    REQUIRE(md.artifact_matches);
+    REQUIRE_FALSE(md.provenance_ok);
+    REQUIRE(model_compatibility(TargetMode::DigitReader, md).verdict ==
+            Verdict::RejectedProvenance);
+}
+
+// ─── 5-8. ONNX Runtime hashes only the ONNX and never reads built_for ─────────
+
+TEST_CASE("onnxruntime resolves the onnx artifact and hashes only the onnx",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    // Deliberately WRONG built_for in the manifest: ORT must never read it.
+    GenSpec s; s.built_for = BuiltFor{"WRONG", "WRONG", "WRONG"};
+    ManifestView view(one(make_gen(tmp.path(), s)), tmp.path(), Backend::OnnxRuntime);
+    auto md = resolve_model_metadata(view, row("digitv3.onnx"), PlatformInfo{});
+    REQUIRE(md.declared);
+    REQUIRE(md.filename == "digitv3.onnx");
+    REQUIRE(md.artifact_matches);
+    REQUIRE(md.provenance_ok);  // onnx hash matches; built_for is irrelevant here
+}
+
+TEST_CASE("a wrong tensorrt built_for cannot reject an onnx deployment",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    GenSpec s; s.built_for = BuiltFor{"WRONG", "WRONG", "WRONG"};
+    ManifestView view(one(make_gen(tmp.path(), s)), tmp.path(), Backend::OnnxRuntime);
+    auto md = resolve_model_metadata(view, row("digitv3.onnx"), PlatformInfo{});
+    REQUIRE(model_compatibility(TargetMode::DigitReader, md).allowed());
+}
+
+// ─── 9-10. A block for the OTHER backend does not make the model available ────
+
+TEST_CASE("an onnx-only generation is declared on ORT but undeclared on TRT",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    GenSpec s; s.with_trt = false;
+    Manifest m = one(make_gen(tmp.path(), s));
+
+    ManifestView ort(m, tmp.path(), Backend::OnnxRuntime);
+    REQUIRE(resolve_model_metadata(ort, row("digitv3.onnx"), PlatformInfo{}).declared);
+
+    ManifestView trt(m, tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(trt, row("digitv3.engine"), kJetson);
+    REQUIRE_FALSE(md.declared);
+    REQUIRE(model_compatibility(TargetMode::DigitReader, md).reason_code == "model_undeclared");
+}
+
+TEST_CASE("a tensorrt-only generation is declared on TRT but undeclared on ORT",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    GenSpec s; s.with_ort = false;
+    Manifest m = one(make_gen(tmp.path(), s));
+
+    ManifestView trt(m, tmp.path(), Backend::TensorRt);
+    REQUIRE(resolve_model_metadata(trt, row("digitv3.engine"), kJetson).declared);
+
+    ManifestView ort(m, tmp.path(), Backend::OnnxRuntime);
+    REQUIRE_FALSE(resolve_model_metadata(ort, row("digitv3.onnx"), PlatformInfo{}).declared);
+}
+
+// ─── 11. the same canonical id resolves on both backends ──────────────────────
+
+TEST_CASE("the same canonical id resolves on both backends", "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    Manifest m = one(make_gen(tmp.path(), {}));
+    ManifestView ort(m, tmp.path(), Backend::OnnxRuntime);
+    ManifestView trt(m, tmp.path(), Backend::TensorRt);
+    auto a = resolve_model_metadata(ort, row("digitv3.onnx"), PlatformInfo{});
+    auto b = resolve_model_metadata(trt, row("digitv3.engine"), kJetson);
+    REQUIRE(a.canonical_id == "digitv3");
+    REQUIRE(b.canonical_id == "digitv3");
+    REQUIRE(a.filename == "digitv3.onnx");   // backend-appropriate artifact
+    REQUIRE(b.filename == "digitv3.engine");
+}
+
+// ─── 12. no matching generation → undeclared ──────────────────────────────────
+
+TEST_CASE("a filename with no matching generation resolves undeclared",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    ManifestView view(one(make_gen(tmp.path(), {})), tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("nonexistent.engine"), kJetson);
+    REQUIRE_FALSE(md.declared);
+    REQUIRE_FALSE(md.artifact_matches);
+    REQUIRE_FALSE(md.provenance_ok);
+}
+
+// ─── 13-14. class order / count mismatch → artifact mismatch (not undeclared) ─
+
+TEST_CASE("a reordered class list fails artifact corroboration only",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    ManifestView view(one(make_gen(tmp.path(), {})), tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("digitv3.engine", {"1", "0"}), kJetson);
+    REQUIRE(md.declared);
+    REQUIRE(md.provenance_ok);
+    REQUIRE_FALSE(md.artifact_matches);
+    REQUIRE(model_compatibility(TargetMode::DigitReader, md).reason_code ==
+            "model_classes_mismatch");
+}
+
+TEST_CASE("a class-count mismatch fails artifact corroboration only",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    ManifestView view(one(make_gen(tmp.path(), {})), tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("digitv3.engine", {"0"}), kJetson);
+    REQUIRE(md.declared);
+    REQUIRE_FALSE(md.artifact_matches);
+}
+
+TEST_CASE("a renamed class (same count and order length) fails corroboration only",
+          "[model_identity]") {
+    // Exercises the resolver's own ordered-equality: one label differs, count and
+    // position are unchanged. This is distinct from the reordered and wrong-count
+    // cases and kills a mutation that compared only counts/sizes.
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    ManifestView view(one(make_gen(tmp.path(), {})), tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("digitv3.engine", {"0", "X"}), kJetson);
+    REQUIRE(md.declared);
+    REQUIRE(md.provenance_ok);
+    REQUIRE_FALSE(md.artifact_matches);
+    REQUIRE(model_compatibility(TargetMode::DigitReader, md).reason_code ==
+            "model_classes_mismatch");
+}
+
+// ─── 15. a runtime hash mismatch is provenance, not identity ──────────────────
+// (covered by "tensorrt fails provenance when the engine hash does not match")
+
+// ─── 16. a schema-1 generation is never a declared identity ───────────────────
+
+TEST_CASE("a schema-1 generation resolves undeclared even if its engine matches",
+          "[model_identity]") {
+    QTemporaryDir tmp; REQUIRE(tmp.isValid());
+    ModelGeneration g1;             // declared == false (schema 1)
+    g1.name = "digit-v3.1";
+    g1.engine = "digitv3.engine";   // matches the query filename at the ROOT
+    g1.sidecar = "digitv3.names.json";
+    g1.class_names = {"0", "1"};
+    Manifest m; m.schema = 1; m.generations.push_back(g1);
+    ManifestView view(m, tmp.path(), Backend::TensorRt);
+    auto md = resolve_model_metadata(view, row("digitv3.engine"), kJetson);
+    REQUIRE_FALSE(md.declared);
+    REQUIRE(model_compatibility(TargetMode::DigitReader, md).reason_code == "model_undeclared");
+}
+
+// ─── the active backend is the one #ifdef split, and is fixed ─────────────────
+
+TEST_CASE("active_backend matches the build platform", "[model_identity]") {
+#ifdef _WIN32
+    REQUIRE(active_backend() == Backend::OnnxRuntime);
+#else
+    REQUIRE(active_backend() == Backend::TensorRt);
+#endif
 }
