@@ -14,7 +14,8 @@ Depends: @SHLIBS_DEPENDS@,
          gstreamer1.0-libav,
          nvidia-l4t-gstreamer,
          network-manager,
-         procps
+         procps,
+         python3
 Description: Denso Digital Reader
  Reads 4-digit 7-segment displays from live cameras and reports each ROI's
  value to a backend. Qt Widgets GUI with per-camera TensorRT detection.

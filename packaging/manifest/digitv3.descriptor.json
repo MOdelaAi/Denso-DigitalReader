@@ -1,0 +1,50 @@
+{
+  "name": "digitv3",
+  "canonical_id": "digitv3",
+  "family": "digit_numeric",
+  "task": "detect",
+  "input_size": 640,
+  "state": "installed",
+  "installed_utc": "2026-07-23T00:00:00Z",
+  "tensorrt": {
+    "expected_engine_sha256": "5247c3f3a70ce1b09b8807b7ed4bb27f7badd972b8628f355baac3ec434cf45a",
+    "expected_sidecar_sha256": "47538d1023947674faffb92a905429bc9deaa0890f0549d4c1bed1d1a33f9026",
+    "built_for": {
+      "trt": "10.3",
+      "cuda": "12.6",
+      "sm": "87"
+    }
+  },
+  "provenance": {
+    "source_pt": "digitv3.pt",
+    "source_pt_sha256": "a1917b1c1320e62d00ae7e3c6d1ffc80b17c4e0e7a81ed94286635e6cbc4944c",
+    "onnx": "digitv3.onnx",
+    "onnx_sha256": "59f59662f07dbc8a33f1986f9dfc378c877b7858127fc37c7cfd4122236c97f4",
+    "onnx_opset": 12,
+    "training_ultralytics": "8.4.33",
+    "export_ultralytics": "8.4.33",
+    "batch": 1,
+    "dynamic": false,
+    "nms": false,
+    "precision": "fp16",
+    "jetpack": "inferred_from_l4t_r36.5.0",
+    "export_onnx_command": "best_model.export(format=\"onnx\", imgsz=640, simplify=True, opset=13)",
+    "export_engine_command": "trtexec --onnx=digitv3.onnx --saveEngine=digitv3.engine --fp16"
+  },
+  "provenance_evidence": {
+    "source_pt": "models/digitv3.pt in the repository working tree (git-ignored build artifact)",
+    "source_pt_sha256": "measured from models/digitv3.pt (== torch checkpoint sha256)",
+    "onnx": "models/digitv3.onnx, the file named by the approved trtexec recipe in packaging/models.approved",
+    "onnx_sha256": "measured from models/digitv3.onnx",
+    "onnx_opset": "measured from the ONNX: opset_import default-domain version = 12 AND metadata args opset = 12; the export command requested opset=13, Ultralytics settled on 12",
+    "training_ultralytics": "digitv3.pt checkpoint `version` key = 8.4.33",
+    "export_ultralytics": "digitv3.onnx metadata `version` = 8.4.33",
+    "batch": "digitv3.onnx metadata batch = 1 and args batch = 1",
+    "dynamic": "digitv3.onnx metadata args dynamic = False",
+    "nms": "digitv3.onnx metadata args nms = False",
+    "precision": "the approved trtexec recipe in packaging/models.approved uses --fp16",
+    "jetpack": "INFERENCE, labelled as such: the nvidia-jetpack meta-package is NOT installed on 192.168.1.15; L4T R36.5.0 was measured on the device (Slice 3) and is the supported baseline in AGENTS.md/build_package.sh. No directly measured JetPack package version exists for this engine.",
+    "export_onnx_command": "train_model/train.py line 86 (the training repository beside this one), the recorded digitv3 export call",
+    "export_engine_command": "verbatim from the digitv3 line of packaging/models.approved"
+  }
+}

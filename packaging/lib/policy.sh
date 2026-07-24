@@ -145,6 +145,227 @@ install_pair() (
     return 0
 )
 
+# --- manifests_equivalent <a.json> <b.json> ----------------------------------
+# Canonical, SEMANTIC equivalence of two model manifests — NOT a byte compare.
+# A reformatted-but-equivalent manifest (whitespace, key order) is "equivalent";
+# any real content difference, malformed JSON, a duplicate key, or a non-finite
+# number is NOT — and the caller (seed-manifest) then refuses rather than
+# overwrites. This is the one place the "already current vs conflict" decision is
+# made, so it must be strict where Python's own `==` is loose:
+#   * duplicate object keys are REJECTED (the default parser would silently keep
+#     the last, so a tampered manifest with a duplicated engine hash could read
+#     as equivalent);
+#   * NaN / Infinity are REJECTED (Qt's parser rejects them too, so accepting one
+#     here would call a file "current" that the app treats as ManifestCorrupt);
+#   * types are compared IDENTICALLY — Python treats True == 1 and 1 == 1.0, but
+#     the manifest schema does not, so a bool where an int belongs must differ.
+# No compatibility policy or mode data is consulted — this is pure structure.
+#   exit 0 = canonically equivalent
+#   exit 1 = both parse but differ
+#   exit 2 = either side is unreadable / malformed / not a strict manifest value
+manifests_equivalent() (
+    a="${1-}"; b="${2-}"
+    python3 - "$a" "$b" <<'PY'
+import json, sys
+
+def no_dupes(pairs):
+    seen = {}
+    for k, v in pairs:
+        if k in seen:
+            raise ValueError("duplicate key: %r" % k)
+        seen[k] = v
+    return seen
+
+def load(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        # parse_constant fires on NaN/Infinity/-Infinity; object_pairs_hook
+        # rejects duplicate keys. Either raises -> unreadable -> refuse.
+        return json.load(fh, object_pairs_hook=no_dupes,
+                         parse_constant=lambda c: (_ for _ in ()).throw(
+                             ValueError("non-finite number: %s" % c)))
+
+def eq(x, y):
+    # Type identity first: bool is a subclass of int, and 1 == 1.0, so a plain
+    # `==` would conflate values the schema keeps distinct.
+    if type(x) is not type(y):
+        return False
+    if isinstance(x, dict):
+        if x.keys() != y.keys():
+            return False
+        return all(eq(x[k], y[k]) for k in x)
+    if isinstance(x, list):
+        return len(x) == len(y) and all(eq(i, j) for i, j in zip(x, y))
+    return x == y
+
+try:
+    a = load(sys.argv[1]); b = load(sys.argv[2])
+except Exception as exc:
+    sys.stderr.write("manifests_equivalent: unreadable/malformed: %s\n" % exc)
+    sys.exit(2)
+sys.exit(0 if eq(a, b) else 1)
+PY
+)
+
+# --- manifest_matches_models_dir <manifest.json> <models-dir> ----------------
+# Prove a manifest declares EXACTLY the TensorRT engine/sidecar pairs present in
+# a models directory, with hashes that agree — the set-consistency check
+# seed-manifest runs before it will seed anything. A manifest that describes a
+# different, extra or missing engine, or a stale hash, must never be installed as
+# the appliance's identity authority.
+#   exit 0 = every declared TRT engine matches an on-disk engine+sidecar by
+#            filename AND sha256, and every on-disk *.engine is declared
+#   exit 1 = a mismatch, a missing/extra engine, or a sidecar hash disagreement
+#   exit 2 = the manifest is unreadable / malformed
+manifest_matches_models_dir() (
+    manifest="${1-}"; dir="${2-}"
+    python3 - "$manifest" "$dir" <<'PY'
+import hashlib, json, os, sys
+
+def no_dupes(pairs):
+    seen = {}
+    for k, v in pairs:
+        if k in seen:
+            raise ValueError("duplicate key: %r" % k)
+        seen[k] = v
+    return seen
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+manifest, models_dir = sys.argv[1], sys.argv[2]
+try:
+    with open(manifest, "r", encoding="utf-8") as fh:
+        m = json.load(fh, object_pairs_hook=no_dupes)
+    gens = m["generations"]
+    assert isinstance(gens, list)
+except Exception as exc:
+    sys.stderr.write("manifest unreadable: %s\n" % exc)
+    sys.exit(2)
+
+declared = {}   # engine filename -> (engine_sha, sidecar filename, sidecar_sha)
+for g in gens:
+    trt = (g.get("runtime") or {}).get("tensorrt")
+    if not trt:
+        continue
+    declared[trt["engine"]] = (trt["engine_sha256"], trt["sidecar"],
+                               trt["sidecar_sha256"])
+
+on_disk = sorted(f for f in os.listdir(models_dir) if f.endswith(".engine"))
+if set(on_disk) != set(declared):
+    sys.stderr.write("engine set mismatch: on-disk=%s declared=%s\n"
+                     % (on_disk, sorted(declared)))
+    sys.exit(1)
+
+for eng, (eng_sha, side, side_sha) in declared.items():
+    epath = os.path.join(models_dir, eng)
+    spath = os.path.join(models_dir, side)
+    if not os.path.isfile(epath) or not os.path.isfile(spath):
+        sys.stderr.write("missing on-disk artifact for %s\n" % eng)
+        sys.exit(1)
+    if sha256(epath) != eng_sha or sha256(spath) != side_sha:
+        sys.stderr.write("hash mismatch for %s\n" % eng)
+        sys.exit(1)
+sys.exit(0)
+PY
+)
+
+# --- install_manifest_atomic <src-manifest> <dst-manifest> -------------------
+# MECHANICS (not a decision): publish a manifest into a data directory without a
+# race and without ever clobbering a different existing file. The caller has
+# already decided the destination should be absent; this closes the window
+# between that decision and the write:
+#   * a UNIQUE temporary (mktemp) beside the destination, never a fixed hidden
+#     name two concurrent runs would share;
+#   * mode pinned 0644 (never umask-inherited via cp);
+#   * flush to disk, then publish with `ln` — an ATOMIC create-if-absent, so a
+#     destination that appeared after the caller's check is NOT overwritten;
+#   * the temporary is always removed, so no stray *.tmp survives.
+# Run this AS THE TARGET USER (the caller wraps it in runuser) so the data-dir
+# write is never transiently root-owned.
+#   exit 0 = published (destination created from src)
+#   exit 4 = destination already exists (a concurrent run won the race, or the
+#            caller's absence check was stale) — the caller must re-compare
+#   exit 1 = a real failure; nothing was published
+install_manifest_atomic() (
+    src="${1-}"; dst="${2-}"
+    [ -f "$src" ] || return 1
+    dstdir="$(dirname "$dst")"
+    [ -d "$dstdir" ] || return 1
+    tmp="$(mktemp "$dstdir/.manifest.json.XXXXXX")" || return 1
+    # From here on, always clean up the temp.
+    if ! cp "$src" "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! chmod 0644 "$tmp"; then rm -f "$tmp"; return 1; fi
+    sync || { rm -f "$tmp"; return 1; }
+    # `ln` is create-if-absent and atomic: it fails if $dst exists. Distinguish
+    # "it already existed" (race, exit 4) from a genuine error by re-testing.
+    if ln "$tmp" "$dst" 2>/dev/null; then
+        rm -f "$tmp"; sync; return 0
+    fi
+    rm -f "$tmp"
+    [ -e "$dst" ] && return 4
+    return 1
+)
+
+# --- seed_manifest_decide <pkg-manifest> <pkg-models> <data-models> <data-manifest>
+# The READ-ONLY seed-manifest decision, factored out of denso-setup so
+# tests/packaging/run.sh can drive every branch with fixtures (denso-setup itself
+# needs root and /opt/denso). Changes NOTHING; only reads. Echoes a decision
+# token and returns 0 for an actionable state, non-zero for a refusal:
+#   seed                       (exit 0) — target absent, everything consistent: write it
+#   current                    (exit 0) — target present and canonically equivalent: no-op
+#   no-packaged-manifest       (exit 1) — no template installed
+#   packaged-manifest-mismatch (exit 1) — template does not describe the packaged models
+#   data-artifact-absent:<s>   (exit 1) — a packaged engine is missing from the data dir
+#   data-artifact-differs:<s>  (exit 1) — a data-dir pair differs from the packaged/approved one
+#   data-artifact-orphan:<s>   (exit 1) — a data-dir engine the manifest would not describe
+#   packaged-pair-broken:<s>   (exit 1) — a packaged engine has no sidecar
+#   target-symlink             (exit 1) — the data-dir manifest is a symlink
+#   target-not-regular         (exit 1) — present but not a regular file
+#   target-differs             (exit 1) — present and canonically different: never overwrite
+#   target-unreadable          (exit 1) — present but malformed: never overwrite
+seed_manifest_decide() (
+    pkg_manifest="${1-}"; pkg_models="${2-}"; data_models="${3-}"; data_manifest="${4-}"
+    [ -f "$pkg_manifest" ] || { echo "no-packaged-manifest"; return 1; }
+    manifest_matches_models_dir "$pkg_manifest" "$pkg_models" >/dev/null 2>&1 \
+        || { echo "packaged-manifest-mismatch"; return 1; }
+
+    # Every packaged pair must be byte-identical in the data dir (the operator's
+    # own engine must not get a manifest that declares the packaged one).
+    for eng in "$pkg_models"/*.engine; do
+        [ -e "$eng" ] || continue
+        stem="$(basename "$eng" .engine)"; side="$pkg_models/$stem.names.json"
+        [ -f "$side" ] || { echo "packaged-pair-broken:$stem"; return 1; }
+        case "$(seed_decision_pair "$eng" "$side" "$data_models/$stem.engine" "$data_models/$stem.names.json")" in
+            same)    : ;;
+            seed)    echo "data-artifact-absent:$stem"; return 1 ;;
+            differs) echo "data-artifact-differs:$stem"; return 1 ;;
+            *)       echo "data-artifact-differs:$stem"; return 1 ;;
+        esac
+    done
+    # ...and no data-dir engine may be one the packaged manifest does not describe.
+    for eng in "$data_models"/*.engine; do
+        [ -e "$eng" ] || continue
+        stem="$(basename "$eng" .engine)"
+        [ -f "$pkg_models/$stem.engine" ] || { echo "data-artifact-orphan:$stem"; return 1; }
+    done
+
+    if [ -L "$data_manifest" ]; then echo "target-symlink"; return 1; fi
+    if [ -e "$data_manifest" ]; then
+        [ -f "$data_manifest" ] || { echo "target-not-regular"; return 1; }
+        manifests_equivalent "$pkg_manifest" "$data_manifest" >/dev/null 2>&1; mrc=$?
+        case "$mrc" in
+            0) echo "current"; return 0 ;;
+            1) echo "target-differs"; return 1 ;;
+            *) echo "target-unreadable"; return 1 ;;
+        esac
+    fi
+    echo "seed"; return 0
+)
+
 # --- gdm_set_autologin <conf> <user> ----------------------------------------
 # Edits ONLY the [daemon] section's two keys. Never templates the file: GDM's
 # config carries admin settings we must not touch. Idempotent — dpkg may

@@ -8,6 +8,7 @@
 #
 #   sudo denso-setup preflight <path-to.deb>
 #   sudo denso-setup configure --user <u> [--autostart] [--enable-autologin]
+#   sudo denso-setup seed-manifest
 #   sudo denso-setup verify
 #   sudo denso-setup unconfigure
 #   sudo denso-setup replace-model <stem>
@@ -19,6 +20,9 @@ DENSO=/opt/denso/bin/denso
 DATA=/opt/denso/data
 STATE=/opt/denso/install-state
 PKG_MODELS=/opt/denso/models
+PKG_MANIFEST=/opt/denso/lib/manifest.json      # packaged schema-2 template
+DATA_MODELS=/opt/denso/data/models
+DATA_MANIFEST=/opt/denso/data/models/manifest.json  # where the app reads it
 GDM_CONF=/etc/gdm3/custom.conf
 AUTOSTART_NAME=com.denso.DigitalReader.desktop
 
@@ -168,6 +172,98 @@ cmd_configure() {
     echo "denso-setup: configured. Run 'sudo denso-setup verify' next."
 }
 
+# seed-manifest — place the packaged schema-2 manifest.json into the data dir so
+# the appliance's existing digitv3 artifacts become DECLARED. Explicit and
+# operator-invoked ONLY: never called by postinst/configure/verify or any
+# maintainer script (shipping enforcement code onto a box with no manifest would
+# inhibit every camera — the manifest must be seeded deliberately, on its own).
+#
+# It ONLY touches manifest.json. It does not run configure, change ownership,
+# autostart, autologin or the recorded user, and never replaces an engine or
+# sidecar. It reads no credential and emits none.
+#
+# Contract (spec 8.8):
+#   no manifest, data-dir pairs match the approved packaged pair -> seed, exit 0
+#   manifest present, canonically equivalent                     -> no-op, exit 0
+#   manifest present, differs / unreadable                       -> refuse, non-0
+#   data-dir pairs differ from the packaged/approved pair        -> refuse, non-0
+#   run twice                                                    -> second is a no-op
+cmd_seed_manifest() {
+    need_root
+    user="$(cat "$STATE/user" 2>/dev/null || echo "")"
+    [ -n "$user" ] || die "not configured yet — run 'sudo denso-setup configure --user <u>' first"
+    id "$user" >/dev/null 2>&1 || die "recorded user '$user' no longer exists"
+
+    # The whole read-only decision (packaged-manifest consistency, data-dir pair
+    # agreement, orphan/symlink/differing-target refusals) is one testable
+    # function; act on its verdict here.
+    set +e
+    decision="$(seed_manifest_decide "$PKG_MANIFEST" "$PKG_MODELS" "$DATA_MODELS" "$DATA_MANIFEST")"
+    set -e
+    _seed_manifest_act "$decision" "$user"
+}
+
+# Turn a seed_manifest_decide token into an action + operator-facing message.
+# Separated so the race-retry path can reuse the exact same mapping.
+_seed_manifest_act() {
+    decision="$1"; user="$2"
+    case "$decision" in
+        current) echo "denso-setup: manifest already current — no change"; return 0 ;;
+        seed) : ;;   # fall through to the atomic write
+        no-packaged-manifest)       die "no packaged manifest at $PKG_MANIFEST — reinstall the package" ;;
+        packaged-manifest-mismatch) die "the packaged manifest does not match the packaged models in $PKG_MODELS — refusing (reinstall the package)" ;;
+        data-artifact-absent:*)     die "${decision#*:} is packaged but absent from $DATA_MODELS — run 'sudo denso-setup configure --user $user' first" ;;
+        data-artifact-differs:*)    die "${decision#*:} in $DATA_MODELS differs from the packaged/approved pair — refusing to seed a manifest that would misdescribe it (adopt it with 'sudo denso-setup replace-model ${decision#*:}' if intended)" ;;
+        data-artifact-orphan:*)     die "$DATA_MODELS/${decision#*:}.engine is not a packaged model — refusing (the packaged manifest would not describe it)" ;;
+        packaged-pair-broken:*)     die "packaged engine ${decision#*:}.engine has no sidecar — reinstall the package" ;;
+        target-symlink)             die "$DATA_MANIFEST is a symlink — refusing to write through it" ;;
+        target-not-regular)         die "$DATA_MANIFEST exists but is not a regular file — refusing" ;;
+        target-differs)             die "$DATA_MANIFEST differs from the packaged manifest — refusing to overwrite. Remove or correct it, then re-run." ;;
+        target-unreadable)          die "$DATA_MANIFEST is unreadable or malformed — refusing to overwrite. Remove or correct it, then re-run." ;;
+        *)                          die "unexpected seed decision '$decision'" ;;
+    esac
+
+    # Absent -> seed atomically, AS THE TARGET USER (data-dir writes never run as
+    # root). The decision above ran as root for a good error message; here we
+    # REVALIDATE immediately before the link, inside the same target-user shell,
+    # so the check and the publish are separated only by a ~1.7 KB copy — the
+    # window in which a concurrent artifact change could make the template stale
+    # is microseconds. It cannot be closed entirely without a lock shared by
+    # `configure`/`replace-model`; that residual is the SAME accepted trust
+    # boundary the model-migration coordinator documents: /opt/denso/data/models is
+    # owned by the single target user (configure chowns $DATA to them) on a
+    # single-operator appliance, and every writer of it — configure, replace-model,
+    # seed-manifest — makes its data-dir writes as that one user under sudo, so a
+    # racing actor already has write access. install_manifest_atomic is itself
+    # create-if-absent, so it never overwrites or truncates.
+    set +e
+    out="$(runuser -u "$user" -- sh -c '
+        . /opt/denso/lib/policy.sh
+        dec="$(seed_manifest_decide "$1" "$2" "$3" "$4")"
+        case "$dec" in
+            seed)    install_manifest_atomic "$1" "$4"; exit $? ;;
+            current) exit 10 ;;
+            *)       printf "%s" "$dec"; exit 11 ;;
+        esac
+    ' _ "$PKG_MANIFEST" "$PKG_MODELS" "$DATA_MODELS" "$DATA_MANIFEST" 2>/dev/null)"
+    irc=$?
+    set -e
+    case "$irc" in
+        0)  echo "denso-setup: seeded manifest.json to $DATA_MANIFEST"; return 0 ;;
+        10) echo "denso-setup: manifest already current — no change"; return 0 ;;
+        11) die "model artifacts changed during seeding ($out) — nothing was seeded; re-run 'sudo denso-setup seed-manifest'" ;;
+        4)  # create-if-absent lost the race to another writer of the SAME template.
+            set +e
+            decision="$(seed_manifest_decide "$PKG_MANIFEST" "$PKG_MODELS" "$DATA_MODELS" "$DATA_MANIFEST")"
+            set -e
+            case "$decision" in
+                current) echo "denso-setup: manifest already current — no change"; return 0 ;;
+                *) die "$DATA_MANIFEST appeared during seeding and is not equivalent — refusing to overwrite" ;;
+            esac ;;
+        *)  die "failed to seed manifest.json to $DATA_MANIFEST" ;;
+    esac
+}
+
 cmd_verify() {
     # Requires root: it chowns the throwaway dirs and runs `runuser`. An earlier
     # draft documented a non-sudo invocation that could not have worked.
@@ -239,6 +335,38 @@ cmd_verify() {
                      echo "       Keep yours, or adopt the packaged one: sudo denso-setup replace-model $stem" ;;
         esac
     done
+
+    # OBSERVATION ONLY. This section creates, rewrites or adopts NOTHING, and
+    # touches nothing under models/. It reports the manifest's state; the
+    # authority on PASS/FAIL is `denso --check` below — a present-but-malformed
+    # manifest is ManifestCorrupt -> Blocked (exit 78) -> verify FAIL there, and
+    # this section must not paper over that with a false "ok". A missing or
+    # merely-different manifest leaves readiness Degraded-but-serviceable, which
+    # --check reports as a warn, not a fail. Repair is 'seed-manifest', never
+    # 'verify --repair' (which does not exist).
+    echo "== model manifest ($DATA_MANIFEST)"
+    if [ -f "$PKG_MANIFEST" ]; then
+        if [ -L "$DATA_MANIFEST" ]; then
+            echo "  WARN manifest.json is a symlink (unexpected) — 'denso --check' below decides readiness"
+        elif [ -f "$DATA_MANIFEST" ]; then
+            set +e
+            manifests_equivalent "$PKG_MANIFEST" "$DATA_MANIFEST" 2>/dev/null; mrc=$?
+            set -e
+            case "$mrc" in
+                0) echo "  ok   manifest present and matches the packaged declaration" ;;
+                1) echo "  WARN manifest present but DIFFERS from the packaged declaration (operator-modified?)."
+                   echo "       verify does not fix or overwrite it; see 'denso --check' below for readiness." ;;
+                *) echo "  WARN manifest present but unreadable/malformed."
+                   echo "       'denso --check' below is the authority on readiness (likely Blocked)." ;;
+            esac
+        elif [ -e "$DATA_MANIFEST" ]; then
+            echo "  WARN manifest.json exists but is not a regular file — 'denso --check' below decides readiness"
+        else
+            echo "  NOTE no manifest yet — run 'sudo denso-setup seed-manifest' to declare the packaged models."
+        fi
+    else
+        echo "  NOTE no packaged manifest template at $PKG_MANIFEST (older package?)"
+    fi
 
     echo "== instance (FIRST: everything below reads the live DB)"
     set +e
@@ -434,9 +562,10 @@ cmd_replace_model() {
 case "${1-}" in
     preflight)     shift; cmd_preflight "$@" ;;
     configure)     shift; cmd_configure "$@" ;;
+    seed-manifest) shift; cmd_seed_manifest "$@" ;;
     verify)        shift; cmd_verify "$@" ;;
     unconfigure)   shift; cmd_unconfigure "$@" ;;
     replace-model) shift; cmd_replace_model "$@" ;;
-    *) echo "usage: denso-setup {preflight <deb> | configure --user <u> [--autostart] [--enable-autologin] | verify | unconfigure | replace-model <stem>}" >&2
+    *) echo "usage: denso-setup {preflight <deb> | configure --user <u> [--autostart] [--enable-autologin] | seed-manifest | verify | unconfigure | replace-model <stem>}" >&2
        exit 2 ;;
 esac

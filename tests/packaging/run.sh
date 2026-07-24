@@ -528,6 +528,306 @@ for v in deb pre name out stage root tmp deb_base pre_base; do
     is "leak: $v unchanged after emit_bundle" "$got" "SENTINEL_$v"
 done
 
+# ═══════════════════════════════════════════════════════════════════════════
+# SLICE 5 — schema-2 manifest delivery, seed-manifest, non-mutating verify,
+# the Release-A "no Float artifact" guarantee, and the ordering assertion.
+#
+# tools/build_package.sh cannot run off aarch64, so — exactly like the bundle and
+# preflight above — the model/manifest PAYLOAD staging is a sourceable emitter
+# (packaging/lib/gen_payload.sh) driven here with fixtures. The seed-manifest
+# runtime decision + atomic write are sourceable policy.sh functions, so every
+# refusal branch is exercised without root or /opt/denso.
+# ═══════════════════════════════════════════════════════════════════════════
+REPO="$HERE/../.."
+# Never let a Python import drop tools/__pycache__ into the tree — build_package.sh
+# refuses a dirty tree, so a stray *.pyc would block the next release build.
+export PYTHONDONTWRITEBYTECODE=1
+. "$REPO/packaging/lib/gen_payload.sh"
+
+# Skip the whole block cleanly if python3 is unavailable (seed-manifest declares
+# python3 as a package dependency; the harness should say so, not silently pass).
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "skip - slice5: python3 not available (seed-manifest/verify require it; declared in control.in)"
+else
+
+M="$T/slice5"; mkdir -p "$M/src" "$M/desc" "$M/stage"
+# A self-contained digitv3-SHAPED fixture: fake engine/sidecar bytes + a matching
+# fixture models.approved + a fixture descriptor. The generated manifest is a real
+# schema-2 digitv3 declaration (10 classes from the sidecar), just with fixture
+# hashes — enough to prove staging, modes, SHA256SUMS, and the no-Float rule.
+printf 'FAKE-ENGINE-BYTES-for-testing-only-not-a-real-plan' > "$M/src/digitv3.engine"
+printf '["0","1","2","3","4","5","6","7","8","9"]' > "$M/src/digitv3.names.json"
+EH="$(sha256sum "$M/src/digitv3.engine" | cut -d' ' -f1)"
+SH="$(sha256sum "$M/src/digitv3.names.json" | cut -d' ' -f1)"
+printf 'digitv3 %s %s trtexec --onnx=digitv3.onnx --saveEngine=digitv3.engine --fp16\n' "$EH" "$SH" > "$M/models.approved"
+python3 - "$M/desc/digitv3.descriptor.json" "$EH" "$SH" <<'PY'
+import json, sys
+p, eh, sh = sys.argv[1:4]
+json.dump({
+    "name": "digitv3", "canonical_id": "digitv3", "family": "digit_numeric",
+    "task": "detect", "input_size": 640, "state": "installed",
+    "installed_utc": "2026-07-23T00:00:00Z",
+    "tensorrt": {"expected_engine_sha256": eh, "expected_sidecar_sha256": sh,
+                 "built_for": {"trt": "10.3", "cuda": "12.6", "sm": "87"}},
+    "provenance": {"source_pt_sha256": "0"*64, "onnx_sha256": "1"*64,
+                   "export_ultralytics": "8.4.33", "precision": "fp16",
+                   "export_engine_command": "trtexec --onnx=digitv3.onnx --saveEngine=digitv3.engine --fp16"},
+    "provenance_evidence": {"source_pt_sha256": "fixture", "onnx_sha256": "fixture",
+                            "export_ultralytics": "fixture", "precision": "fixture",
+                            "export_engine_command": "fixture"},
+}, open(p, "w"), indent=2)
+PY
+
+stage_model_payload "$M/stage" "$REPO" "$M/models.approved" "$M/desc" "-" "$M/src/digitv3.engine" >/dev/null 2>&1
+rc_is "slice5: stage_model_payload succeeds" $? 0
+OD="$M/stage/opt/denso"
+
+# (1) manifest in payload; (2) mode 0644; (3) in SHA256SUMS
+[ -f "$OD/lib/manifest.json" ] && ok "slice5: manifest.json is in the payload" || bad "slice5: manifest.json is in the payload"
+[ -f "$OD/lib/SHA256SUMS" ] && ok "slice5: SHA256SUMS is in the payload" || bad "slice5: SHA256SUMS is in the payload"
+grep -q ' lib/manifest.json$' "$OD/lib/SHA256SUMS" && ok "slice5: manifest appears in SHA256SUMS" || bad "slice5: manifest appears in SHA256SUMS"
+( cd "$OD" && sha256sum -c lib/SHA256SUMS >/dev/null 2>&1 ) && ok "slice5: SHA256SUMS -c passes over the model payload" || bad "slice5: SHA256SUMS -c passes over the model payload"
+
+# (4) manifest parses AND validates under the real (python-mirror) validator
+python3 - "$REPO" "$OD/lib/manifest.json" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/tools")
+import gen_model_manifest as g
+g.validate_manifest_object(json.load(open(sys.argv[2], encoding="utf-8")))
+PY
+rc_is "slice5: manifest parses and validates" $? 0
+
+# (5) digitv3 only; (6) no Float generation; (7) no allowed_modes
+is "slice5: manifest declares exactly one canonical_id (digitv3)" \
+   "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print(",".join(g["canonical_id"] for g in d["generations"]))' "$OD/lib/manifest.json")" "digitv3"
+grep -qi 'float' "$OD/lib/manifest.json" && bad "slice5: no Float name/generation in the manifest" || ok "slice5: no Float name/generation in the manifest"
+grep -q 'allowed_modes' "$OD/lib/manifest.json" && bad "slice5: no allowed_modes in the manifest" || ok "slice5: no allowed_modes in the manifest"
+
+# (8,9) models.approved installed at lib/, mode 0644
+[ -f "$OD/lib/models.approved" ] && ok "slice5: models.approved installed at opt/denso/lib/models.approved" || bad "slice5: models.approved installed at opt/denso/lib/models.approved"
+
+# (10) NO Float artifact anywhere in the whole payload; (11) no staging dir
+FLOATS="$(find "$M/stage" -iname 'float-*' | wc -l | tr -d ' ')"
+is "slice5: no Float artifact anywhere in the payload" "$FLOATS" "0"
+# Check directory BASENAMES (a fixture path may itself contain 'stage').
+STAGEDIRS="$(find "$OD" -type d \( -iname '*stag*' -o -iname '*float*' \) | wc -l | tr -d ' ')"
+is "slice5: no staging/float directory under opt/denso" "$STAGEDIRS" "0"
+# only lib/ and models/ subtrees exist under opt/denso in this fixture
+is "slice5: opt/denso holds only lib + models here" \
+   "$(cd "$OD" && LC_ALL=C find . -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort | sed 's|^\./||' | tr '\n' ',')" "lib,models,"
+
+# (Linux-only) exact payload modes — POSIX bits are not modelled on MSYS2.
+case "$(uname -s 2>/dev/null)" in
+    Linux)
+        is "slice5: manifest.json mode is 0644"     "$(stat -c %a "$OD/lib/manifest.json")"    "644"
+        is "slice5: models.approved mode is 0644"   "$(stat -c %a "$OD/lib/models.approved")"  "644"
+        is "slice5: SHA256SUMS mode is 0644"        "$(stat -c %a "$OD/lib/SHA256SUMS")"       "644"
+        is "slice5: staged engine mode is 0644"     "$(stat -c %a "$OD/models/digitv3.engine")" "644"
+        is "slice5: staged sidecar mode is 0644"    "$(stat -c %a "$OD/models/digitv3.names.json")" "644"
+        ;;
+    *) echo "skip - slice5: payload file modes (POSIX bits not modelled on $(uname -s 2>/dev/null || echo unknown))" ;;
+esac
+
+# Determinism: identical inputs -> byte-identical manifest + SHA256SUMS.
+mkdir -p "$M/stage2"
+stage_model_payload "$M/stage2" "$REPO" "$M/models.approved" "$M/desc" "-" "$M/src/digitv3.engine" >/dev/null 2>&1
+is "slice5: manifest is byte-reproducible" "$(sha256sum < "$OD/lib/manifest.json")" "$(sha256sum < "$M/stage2/opt/denso/lib/manifest.json")"
+is "slice5: SHA256SUMS is byte-reproducible" "$(sha256sum < "$OD/lib/SHA256SUMS")" "$(sha256sum < "$M/stage2/opt/denso/lib/SHA256SUMS")"
+
+# set-consistency: the generated manifest declares EXACTLY the staged pairs.
+manifest_matches_models_dir "$OD/lib/manifest.json" "$OD/models" >/dev/null 2>&1
+rc_is "slice5: manifest declares exactly the staged model pairs" $? 0
+
+# ── ordering assertion (spec 8.7.2): a Float approval requires the Slice-7 symbol.
+ORD="$T/ordering"; mkdir -p "$ORD/root/src/core/models" "$ORD/root/src/app/ui"
+cp "$M/models.approved" "$ORD/appr"
+# (26) a temporary Float approval with no symbol -> build fails
+printf 'float-small %s %s trtexec\n' "$EH" "$SH" >> "$ORD/appr"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: ordering assertion FAILS on a Float approval without the symbol" $? 1
+# (27) a mere COMMENT mentioning the symbol does NOT satisfy it
+printf '// loadable_model_files goes here in Slice 7\nint x(){return 0;}\n' > "$ORD/root/src/core/models/compatibility.cpp"
+printf 'void s(){/* loadable_model_files */}\n' > "$ORD/root/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: a comment mentioning loadable_model_files does NOT satisfy the assertion" $? 1
+# a bare DECLARATION also does not satisfy it
+printf 'std::vector<std::string> loadable_model_files(TargetMode m);\n' > "$ORD/root/src/core/models/compatibility.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: a bare declaration does NOT satisfy the ordering assertion" $? 1
+# a real DEFINITION + a real USE -> passes (proves it is self-releasing for Slice 7/12)
+cat > "$ORD/root/src/core/models/compatibility.cpp" <<'EOF'
+std::vector<std::string> loadable_model_files(const std::vector<DetectionModel>& m,
+                                              TargetMode mode, const ManifestView& v) {
+    return {};
+}
+EOF
+printf 'void launch(){ auto a = loadable_model_files(m,mode,v); (void)a; }\n' > "$ORD/root/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: a real definition+use satisfies the ordering assertion" $? 0
+# the USE must be a genuine call — a declaration, an uncalled dummy definition,
+# or a #if-0'd call in startup.cpp must NOT satisfy it (compatibility.cpp keeps
+# its real definition throughout).
+printf 'std::vector<std::string> loadable_model_files(TargetMode m);\n' > "$ORD/root/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: a mere declaration in startup.cpp does NOT satisfy 'use'" $? 1
+printf 'std::vector<std::string> loadable_model_files(int a){ return {}; }\n' > "$ORD/root/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: an uncalled dummy definition in startup.cpp does NOT satisfy 'use'" $? 1
+printf '#if 0\nvoid l(){ auto a=loadable_model_files(m); }\n#endif\nvoid r(){}\n' > "$ORD/root/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: a #if-0'd call in startup.cpp does NOT satisfy 'use'" $? 1
+printf 'void launch(){ auto a = loadable_model_files(m,mode,v); (void)a; }\n' > "$ORD/root/src/app/ui/startup.cpp"
+# (28) removing the Float approval -> passes regardless of the symbol
+assert_float_seeding_guarded "$M/models.approved" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: no Float approved -> ordering assertion passes" $? 0
+# and the REAL committed tree (digitv3-only approval) passes trivially
+assert_float_seeding_guarded "$REPO/packaging/models.approved" "$REPO" >/dev/null 2>&1
+rc_is "slice5: the committed digitv3-only models.approved passes the ordering assertion" $? 0
+
+# ── seed-manifest decision (every branch) + the atomic write mechanics.
+SM="$T/seedm"; mkdir -p "$SM/pkg" "$SM/data"
+printf 'ENGINEBYTES' > "$SM/pkg/digitv3.engine"; printf '["0"]' > "$SM/pkg/digitv3.names.json"
+PEH="$(sha256sum "$SM/pkg/digitv3.engine" | cut -d' ' -f1)"; PSH="$(sha256sum "$SM/pkg/digitv3.names.json" | cut -d' ' -f1)"
+python3 - "$SM/pkgmanifest.json" "$PEH" "$PSH" <<'PY'
+import json, sys
+p, e, s = sys.argv[1:4]
+json.dump({"schema": 2, "generations": [{"name": "digitv3", "canonical_id": "digitv3",
+    "runtime": {"tensorrt": {"engine": "digitv3.engine", "engine_sha256": e,
+    "sidecar": "digitv3.names.json", "sidecar_sha256": s}}}]}, open(p, "w"))
+PY
+sm_reset() { rm -rf "$SM/data"; mkdir -p "$SM/data";
+    cp "$SM/pkg/digitv3.engine" "$SM/data/digitv3.engine"; cp "$SM/pkg/digitv3.names.json" "$SM/data/digitv3.names.json"; }
+DEC() { seed_manifest_decide "$SM/pkgmanifest.json" "$SM/pkg" "$SM/data" "$SM/data/manifest.json"; }
+
+# (13) matching artifacts, no manifest -> seed
+sm_reset
+is "slice5: seed-manifest on matching artifacts with no manifest -> seed" "$(DEC)" "seed"
+# (12) fresh flow: seed the pair then seed the manifest -> all three present
+install_manifest_atomic "$SM/pkgmanifest.json" "$SM/data/manifest.json" >/dev/null 2>&1
+[ -f "$SM/data/digitv3.engine" ] && [ -f "$SM/data/digitv3.names.json" ] && [ -f "$SM/data/manifest.json" ] \
+    && ok "slice5: fresh flow yields engine + sidecar + manifest together" \
+    || bad "slice5: fresh flow yields engine + sidecar + manifest together"
+# (14) second run is a no-op: decision current, and a write would not change bytes/mtime
+MT1="$(stat -c %Y "$SM/data/manifest.json")"; H1="$(sha256sum "$SM/data/manifest.json" | cut -d' ' -f1)"
+is "slice5: second seed-manifest run decision is 'current'" "$(DEC)" "current"
+sleep 1
+install_manifest_atomic "$SM/pkgmanifest.json" "$SM/data/manifest.json" >/dev/null 2>&1; SEC_RC=$?
+rc_is "slice5: a second atomic write into an existing manifest reports 'already exists' (rc=4)" "$SEC_RC" 4
+is "slice5: second run preserves manifest bytes"  "$(sha256sum "$SM/data/manifest.json" | cut -d' ' -f1)" "$H1"
+is "slice5: second run preserves manifest mtime"  "$(stat -c %Y "$SM/data/manifest.json")" "$MT1"
+NTMP="$(find "$SM/data" -name '.manifest.json.*' | wc -l | tr -d ' ')"
+is "slice5: no stale .manifest.json.* temp remains" "$NTMP" "0"
+
+# (15) reformatted-but-equivalent existing manifest -> accepted without change
+sm_reset
+python3 - "$SM/pkgmanifest.json" "$SM/data/manifest.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); json.dump(d, open(sys.argv[2], "w"), indent=4, sort_keys=True)
+PY
+RH="$(sha256sum "$SM/data/manifest.json" | cut -d' ' -f1)"
+is "slice5: a reformatted-equivalent manifest reads as 'current'" "$(DEC)" "current"
+is "slice5: the reformatted manifest is left byte-for-byte unchanged" "$(sha256sum "$SM/data/manifest.json" | cut -d' ' -f1)" "$RH"
+
+# (16) a canonically-different manifest -> refuse, unchanged
+sm_reset
+python3 - "$SM/pkgmanifest.json" "$SM/data/manifest.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["generations"][0]["canonical_id"] = "tampered"
+json.dump(d, open(sys.argv[2], "w"))
+PY
+DH="$(sha256sum "$SM/data/manifest.json" | cut -d' ' -f1)"
+is "slice5: a differing manifest is refused" "$(DEC)" "target-differs"
+is "slice5: the differing manifest is left unchanged" "$(sha256sum "$SM/data/manifest.json" | cut -d' ' -f1)" "$DH"
+
+# (17,18) engine hash mismatch -> refuse, and NO manifest is created
+sm_reset; printf 'DIFFERENT-ENGINE' > "$SM/data/digitv3.engine"
+is "slice5: an engine hash mismatch refuses" "$(DEC)" "data-artifact-differs:digitv3"
+[ -f "$SM/data/manifest.json" ] && bad "slice5: engine mismatch creates no manifest" || ok "slice5: engine mismatch creates no manifest"
+# (19) sidecar hash mismatch -> refuse
+sm_reset; printf '["WRONG"]' > "$SM/data/digitv3.names.json"
+is "slice5: a sidecar hash mismatch refuses" "$(DEC)" "data-artifact-differs:digitv3"
+
+# a symlink target is refused (never written through). Symlink creation is not
+# available on MSYS2, so this is guarded — it runs on the Linux appliance.
+sm_reset
+if ln -s /etc/hostname "$SM/data/manifest.json" 2>/dev/null; then
+    is "slice5: a symlink manifest target is refused" "$(DEC)" "target-symlink"
+    rm -f "$SM/data/manifest.json"
+else
+    echo "skip - slice5: symlink-target refusal (symlinks unavailable on $(uname -s 2>/dev/null || echo unknown))"
+fi
+
+# (20) a failed/interrupted write leaves no truncated manifest and no stale temp
+sm_reset
+install_manifest_atomic "$SM/nonexistent-src.json" "$SM/data/manifest.json" >/dev/null 2>&1
+rc_is "slice5: atomic write with a missing source fails" $? 1
+[ -f "$SM/data/manifest.json" ] && bad "slice5: a failed write leaves no manifest" || ok "slice5: a failed write leaves no manifest"
+is "slice5: a failed write leaves no stale temp" "$(find "$SM/data" -name '.manifest.json.*' | wc -l | tr -d ' ')" "0"
+
+# (21) concurrent invocation cannot publish conflicting/truncated output: the
+# second create-if-absent must NOT clobber the first, and the winner's bytes stay.
+sm_reset
+install_manifest_atomic "$SM/pkgmanifest.json" "$SM/data/manifest.json" >/dev/null 2>&1
+W1="$(sha256sum "$SM/data/manifest.json" | cut -d' ' -f1)"
+# a "loser" with different content must not overwrite
+printf '{"schema":2,"generations":[]}' > "$SM/other.json"
+install_manifest_atomic "$SM/other.json" "$SM/data/manifest.json" >/dev/null 2>&1
+rc_is "slice5: a concurrent create-if-absent does not overwrite (rc=4)" $? 4
+is "slice5: the first writer's bytes survive a racing second write" "$(sha256sum "$SM/data/manifest.json" | cut -d' ' -f1)" "$W1"
+
+# (22) verify DISTINGUISHES missing / matching / differing (the manifests_equivalent
+#      verdicts verify branches on).
+sm_reset
+manifests_equivalent "$SM/pkgmanifest.json" "$SM/data/manifest.json" >/dev/null 2>&1
+rc_is "slice5: verify sees a MISSING manifest as absent (equiv rc=2)" $? 2
+cp "$SM/pkgmanifest.json" "$SM/data/manifest.json"
+manifests_equivalent "$SM/pkgmanifest.json" "$SM/data/manifest.json" >/dev/null 2>&1
+rc_is "slice5: verify sees a MATCHING manifest (equiv rc=0)" $? 0
+python3 - "$SM/pkgmanifest.json" "$SM/data/manifest.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["generations"][0]["canonical_id"] = "z"
+json.dump(d, open(sys.argv[2], "w"))
+PY
+manifests_equivalent "$SM/pkgmanifest.json" "$SM/data/manifest.json" >/dev/null 2>&1
+rc_is "slice5: verify sees a DIFFERING manifest (equiv rc=1)" $? 1
+
+# (23) verify changes NOTHING under models/: snapshot the subtree (hash+mtime+
+#      type+name) around the read verify performs.
+snap_models() { ( cd "$1" && LC_ALL=C find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r p; do
+        if [ -d "$p" ]; then printf 'd|%s|%s\n' "$(stat -c %Y "$p")" "$p"
+        elif [ -f "$p" ]; then printf 'f|%s|%s|%s\n' "$(stat -c %Y "$p")" "$(sha256sum "$p" | cut -d' ' -f1)" "$p"
+        else printf 'o|%s\n' "$p"; fi; done ) }
+sm_reset; cp "$SM/pkgmanifest.json" "$SM/data/manifest.json"
+BEFORE="$(snap_models "$SM/data")"
+manifests_equivalent "$SM/pkgmanifest.json" "$SM/data/manifest.json" >/dev/null 2>&1   # the verify read
+manifest_matches_models_dir "$SM/pkgmanifest.json" "$SM/data" >/dev/null 2>&1           # ...and this one
+AFTER="$(snap_models "$SM/data")"
+is "slice5: verify's manifest read changes no hash/mtime/type under models/" "$AFTER" "$BEFORE"
+
+# (24) no `verify --repair` ENTRY POINT exists. The word appears only in prose
+#      comments explaining that it does NOT exist, so strip comments first and
+#      look for any real `repair` token (an option or a dispatcher case).
+sed 's/#.*//' "$REPO/packaging/denso-setup" | grep -Eq 'repair' \
+    && bad "slice5: no verify --repair entry point exists" \
+    || ok "slice5: no verify --repair entry point exists"
+
+# (25) NO maintainer script invokes seed-manifest, and no OTHER cmd_* function in
+#      denso-setup CALLS cmd_seed_manifest. A user-facing NOTE that mentions the
+#      external 'denso-setup seed-manifest' command in help text is allowed; a
+#      call to the internal cmd_seed_manifest function is not.
+INVOKERS=0
+for f in "$REPO/packaging/debian/postinst" "$REPO/packaging/debian/prerm" "$REPO/packaging/debian/postrm"; do
+    grep -Eq 'seed[-_]manifest' "$f" && INVOKERS=$((INVOKERS+1))
+done
+for fn in cmd_configure cmd_verify cmd_preflight cmd_unconfigure cmd_replace_model; do
+    awk -v f="$fn" '$0 ~ "^"f"\\(\\)" {inb=1} inb && /^}/ {inb=0; next} inb {print}' \
+        "$REPO/packaging/denso-setup" | grep -Eq 'cmd_seed_manifest' \
+        && INVOKERS=$((INVOKERS+1))
+done
+is "slice5: no maintainer script / configure / verify invokes seed-manifest" "$INVOKERS" "0"
+
+fi  # python3 available
+
 rm -rf "$T"
 echo; echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]

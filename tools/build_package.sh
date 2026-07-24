@@ -14,6 +14,17 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # emitter so tests/packaging/run.sh can prove its shape on the dev box, which
 # can never run this script (aarch64/JetPack contract below).
 . "$HERE/packaging/lib/gen_bundle.sh"
+# And again for the model/manifest payload staging (Slice 5): stage_model_payload
+# emits the engines, the generated schema-2 manifest, models.approved and
+# SHA256SUMS with every mode pinned, so run.sh can prove the payload shape and
+# the "no Float artifact" guarantee off-Jetson.
+. "$HERE/packaging/lib/gen_payload.sh"
+
+# The reviewed Release-A digitv3 manifest identity (the hard-gate candidate). The
+# generated manifest for the single-digitv3 payload MUST hash to exactly this, so
+# an edit to packaging/manifest/digitv3.descriptor.json that changes the output
+# fails the build until the candidate is re-reviewed and this constant updated.
+RELEASE_A_DIGITV3_MANIFEST_SHA256=fb26074d8e618caaf6f8d41737631c4b378aaa9197506aaa05586fc2ee898efd
 
 MODELS=()
 ALLOW_DIRTY=0
@@ -185,11 +196,22 @@ install -m 0755 packaging/denso-setup               "$STAGE/usr/bin/denso-setup"
 install -m 0644 packaging/com.denso.DigitalReader.desktop \
                                                     "$STAGE/usr/share/applications/com.denso.DigitalReader.desktop"
 install -m 0644 assets/icon.png                     "$STAGE/usr/share/icons/hicolor/256x256/apps/denso-digitalreader.png"
-for m in "${MODELS[@]}"; do
-    stem="$(basename "$m" .engine)"
-    install -m 0644 "$m" "$STAGE/opt/denso/models/$stem.engine"
-    install -m 0644 "$(dirname "$m")/$stem.names.json" "$STAGE/opt/denso/models/$stem.names.json"
-done
+# ── model payload: engines + sidecars + the generated schema-2 manifest +
+# models.approved + SHA256SUMS, all 0644, via the sourceable emitter so its
+# shape is provable off-Jetson. The ordering assertion (no Float approved before
+# the Slice-7 warm-up allow-list exists) runs inside it, BEFORE anything stages.
+# The Release-A single-digitv3 payload is asserted byte-identical to the reviewed
+# manifest candidate; any other/larger model set skips that specific assert (the
+# descriptor's expected hashes + manifest_matches_models_dir still bind it).
+WANT_MANIFEST_SHA="-"
+if [ "${#MODELS[@]}" = "1" ] && [ "$(basename "${MODELS[0]}" .engine)" = "digitv3" ]; then
+    WANT_MANIFEST_SHA="$RELEASE_A_DIGITV3_MANIFEST_SHA256"
+fi
+echo ">> staging model payload + schema-2 manifest"
+stage_model_payload "$STAGE" "$HERE" packaging/models.approved packaging/manifest \
+    "$WANT_MANIFEST_SHA" "${MODELS[@]}" \
+    || { echo "model payload staging failed" >&2; exit 1; }
+
 for s in postinst prerm postrm; do install -m 0755 "packaging/debian/$s" "$STAGE/DEBIAN/$s"; done
 
 ARCH="$DPKG_ARCH"   # already verified == arm64 by the platform contract above
