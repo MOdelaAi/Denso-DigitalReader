@@ -133,6 +133,10 @@ add_executable(denso_integration_tests
     # --check path, so it needs denso_app. The EngineRegistry gets an injected
     # counting factory, so no ORT/TensorRT engine is ever loaded.
     test_model_mode_enforcement.cpp
+    # Slice 9 UI filtering seam: drives the REAL ModelsPage/MainWindow, so it needs
+    # denso_app. Also reads the ModelsPage source (DENSO_SOURCE_DIR, defined below)
+    # to prove the page holds no compatibility rule of its own.
+    test_models_page_filtering.cpp
 )
 target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
 # The platform-provider static test reads the two production call sites to assert

@@ -1,14 +1,16 @@
-// Slice 8 — ATTACHMENT REFUSAL ONLY.
+// Slice 8 — ATTACHMENT REFUSAL, and Slice 9 — THE SELECTABLE LIST.
 //
-// `detection::set_camera_models` is the domain chokepoint for every write that
-// binds a model to a camera (spec §7.1): the wizard, any future Leveler UI, and
-// any future CLI all pass through it. This file proves it refuses the WHOLE
-// requested set when any member is not `Allowed`, and that the refusal is a
-// rolled-back transaction — never a partial attachment.
+// Slice 8 half: `detection::set_camera_models` is the domain chokepoint for every
+// write that binds a model to a camera (spec §7.1): the wizard, any future Leveler
+// UI, and any future CLI all pass through it. It refuses the WHOLE requested set
+// when any member is not `Allowed`, and the refusal is a rolled-back transaction —
+// never a partial attachment.
 //
-// SCOPE NOTE: the file name is the one the plan dictates, but Slice 8 owns only
-// the refusal half. The Slice-9 selectable-list API (`selectable_models` /
-// `SelectableModel`) is deliberately NOT implemented or tested here.
+// Slice 9 half: `detection::selectable_models` is the ONLY list a selection UI may
+// render (spec §6.1). It is the READ counterpart of the same policy: what the
+// wizard offers and what the wizard accepts are two readings of one rule, so a
+// model can never be offered and then refused. The two halves are deliberately in
+// one file for exactly that reason.
 #include <catch2/catch_test_macros.hpp>
 
 #include "camera/camera.h"
@@ -16,6 +18,7 @@
 #include "db/db.h"
 #include "detection/detection.h"
 #include "detection/repo.h"
+#include "health/integrity.h"   // Slice-8 agreement: the list and the verdict agree
 #include "mode/mode.h"
 #include "models/hashing.h"
 #include "models/manifest.h"
@@ -29,6 +32,8 @@
 #include <QTemporaryDir>
 #include <QVariant>
 
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -429,4 +434,482 @@ TEST_CASE("set_camera_models still clears a camera's attachments",
         f.h(), f.cam, {}, TargetMode::DigitReader, *f.view, kPlatform));
     CHECK(row_count(f.h(), "camera_model") == 0);
     CHECK(row_count(f.h(), "camera_model_class") == 0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SLICE 9 — the selectable list.
+//
+// Every case below drives `detection::selectable_models`, which must be a pure
+// consumer of the central policy: it loads the catalog in id order, resolves each
+// row for the view's ACTIVE backend, asks `models::model_compatibility`, and keeps
+// only what is Allowed. It owns no rule of its own — which is why the rejection
+// cases are produced by DECLARATION (or by tampering with the artifact), never by
+// naming a file something suggestive.
+// ═════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+/// A schema-2 generation with every knob the rejection cases need. The defaults
+/// are the ALLOWED shape; each test perturbs exactly one field, so a case name
+/// describes the single thing that differs.
+struct Decl {
+    std::string stem;                       // on-disk artifact stem
+    std::string canonical_id;
+    std::string family;
+    std::string task = "detect";
+    int         input_size = 640;
+    std::vector<std::string> class_names{"0", "1", "2", "3"};
+    denso::models::BuiltFor built_for{"10.3", "12.6", "87"};
+    bool        active_backend_block = true;  // false = declare the OTHER backend
+};
+
+ModelGeneration declare_ex(const QString& dir, const Decl& d) {
+    const QByteArray body = QByteArrayLiteral("model-bytes");
+    ModelGeneration g;
+    g.declared = true;
+    g.name = d.canonical_id;
+    g.installed_utc = "2026-07-27T00:00:00Z";
+    g.state = "installed";
+    g.canonical_id = d.canonical_id;
+    g.family = d.family;
+    g.task = d.task;
+    g.input_size = d.input_size;
+    g.class_count = static_cast<int>(d.class_names.size());
+    g.class_names = d.class_names;
+
+    // Build the block for the ACTIVE backend, unless the case is specifically
+    // about a generation that declares only the OTHER one (spec 3.2.1 rule 5).
+    const bool want_ort =
+#ifdef _WIN32
+        d.active_backend_block;
+#else
+        !d.active_backend_block;
+#endif
+    if (want_ort) {
+        denso::models::OnnxRuntimeArtifact ort;
+        ort.model = d.stem + ".onnx";
+        ort.model_sha256 = write_and_hash(dir, ort.model, body);
+        ort.class_metadata_source = denso::models::kSourceOnnxMetadataNames;
+        g.runtime.onnxruntime = ort;
+    } else {
+        denso::models::TensorRtArtifact trt;
+        trt.engine = d.stem + ".engine";
+        trt.engine_sha256 = write_and_hash(dir, trt.engine, body);
+        trt.sidecar = d.stem + ".names.json";
+        QByteArray sidecar = "[";
+        for (size_t i = 0; i < d.class_names.size(); ++i)
+            sidecar += (i ? ",\"" : "\"") +
+                       QByteArray::fromStdString(d.class_names[i]) + "\"";
+        sidecar += "]";
+        trt.sidecar_sha256 = write_and_hash(dir, trt.sidecar, sidecar);
+        trt.class_metadata_source = denso::models::kSourceNamesSidecar;
+        trt.built_for = d.built_for;
+        g.runtime.tensorrt = trt;
+    }
+    return g;
+}
+
+/// Overwrite an artifact after its hash was recorded — a provenance fault made
+/// physically, not by editing a manifest field.
+void tamper(const QString& dir, const std::string& stem) {
+    QFile f(QDir(dir).filePath(QString::fromStdString(stem + kExt)));
+    REQUIRE(f.open(QIODevice::WriteOnly));
+    REQUIRE(f.write("tampered-bytes-of-a-different-length") > 0);
+    f.close();
+}
+
+/// The canonical ids the list returned, in the order it returned them.
+std::vector<std::string> ids_of(
+    const std::vector<denso::detection::SelectableModel>& v) {
+    std::vector<std::string> out;
+    for (const auto& s : v) out.push_back(s.metadata.canonical_id);
+    return out;
+}
+
+/// The catalog filenames the list returned, in order.
+std::vector<std::string> files_of(
+    const std::vector<denso::detection::SelectableModel>& v) {
+    std::vector<std::string> out;
+    for (const auto& s : v) out.push_back(s.row.filename);
+    return out;
+}
+
+std::vector<std::string> classes_for_stem(const std::string& stem) {
+    if (stem == "digitv3") return {"0", "1", "2", "3"};
+    if (stem == "float-small") return {"Small"};
+    return {"Big"};
+}
+
+/// A fully-provisioned appliance: all three real models declared, valid and
+/// provenance-clean, catalogued in the given order (insertion order IS catalog-id
+/// order, which is the property the list must preserve).
+struct ThreeModels {
+    QTemporaryDir tmp;
+    std::optional<denso::db::Db> db;
+    std::optional<ManifestView> view;
+    std::map<std::string, int64_t> id;
+
+    explicit ThreeModels(const std::vector<std::string>& catalog_order = {
+                             "digitv3", "float-small", "float-big"}) {
+        REQUIRE(tmp.isValid());
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(
+            declare_ex(tmp.path(), {"digitv3", "digitv3", "digit_numeric"}));
+        m.generations.push_back(declare_ex(
+            tmp.path(),
+            {"float-small", "float-small", "float_ball", "detect", 640, {"Small"}}));
+        m.generations.push_back(declare_ex(
+            tmp.path(),
+            {"float-big", "float-big", "float_ball", "detect", 640, {"Big"}}));
+        view.emplace(std::move(m), tmp.path());
+
+        db = denso::db::Db::open_in_memory();
+        REQUIRE(db.has_value());
+        REQUIRE(denso::db::run_migrations(db->handle()));
+
+        for (const std::string& stem : catalog_order) {
+            const auto r = denso::detection::upsert_model(
+                db->handle(), catalog_row(stem, classes_for_stem(stem)));
+            REQUIRE(r.has_value());
+            id[stem] = *r;
+        }
+    }
+    QSqlDatabase h() const { return db->handle(); }
+};
+
+/// A one-model appliance built from an explicit manifest, for the rejection cases.
+struct OneModel {
+    QTemporaryDir tmp;
+    std::optional<denso::db::Db> db;
+
+    OneModel() { REQUIRE(tmp.isValid()); }
+
+    void seed(const std::vector<std::string>& catalog_classes,
+              const std::string& stem = "digitv3") {
+        db = denso::db::Db::open_in_memory();
+        REQUIRE(db.has_value());
+        REQUIRE(denso::db::run_migrations(db->handle()));
+        REQUIRE(denso::detection::upsert_model(db->handle(),
+                                               catalog_row(stem, catalog_classes)));
+    }
+    QSqlDatabase h() const { return db->handle(); }
+
+    std::vector<std::string> ids_in(const ManifestView& view, TargetMode mode) const {
+        return ids_of(denso::detection::selectable_models(h(), mode, view, kPlatform));
+    }
+};
+
+}  // namespace
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE headline behaviour: one catalog, two modes, two disjoint lists.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("selectable_models returns only digitv3 in digit_reader",
+          "[selectable_models]") {
+    ThreeModels f;
+    const auto got = denso::detection::selectable_models(
+        f.h(), TargetMode::DigitReader, *f.view, kPlatform);
+
+    CHECK(ids_of(got) == std::vector<std::string>{"digitv3"});
+    CHECK(files_of(got) == std::vector<std::string>{std::string("digitv3") + kExt});
+    // The row AND its resolved metadata come back together (spec 6.1).
+    REQUIRE(got.size() == 1);
+    CHECK(got[0].row.id == f.id["digitv3"]);
+    CHECK(got[0].metadata.family == "digit_numeric");
+    CHECK(got[0].metadata.declared);
+    CHECK(got[0].metadata.artifact_matches);
+    CHECK(got[0].metadata.provenance_ok);
+}
+
+TEST_CASE("selectable_models returns only the Float models in ball_leveler",
+          "[selectable_models]") {
+    ThreeModels f;
+    const auto got = denso::detection::selectable_models(
+        f.h(), TargetMode::BallLeveler, *f.view, kPlatform);
+
+    CHECK(ids_of(got) == std::vector<std::string>{"float-small", "float-big"});
+    // digitv3 must never leak into the Leveler list.
+    for (const auto& s : got) CHECK(s.metadata.canonical_id != "digitv3");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ORDERING is catalog id — not alphabetical, not manifest order. The catalog is
+// seeded BACKWARDS here so the two orders disagree: an implementation that sorted
+// by name, or walked the manifest, would return float-small first.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("selectable_models preserves catalog-id order, not name order",
+          "[selectable_models]") {
+    ThreeModels f({"digitv3", "float-big", "float-small"});
+    REQUIRE(f.id["float-big"] < f.id["float-small"]);
+
+    const auto got = denso::detection::selectable_models(
+        f.h(), TargetMode::BallLeveler, *f.view, kPlatform);
+    CHECK(ids_of(got) == std::vector<std::string>{"float-big", "float-small"});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FAIL-CLOSED. Every rejection cause keeps the model out of BOTH lists. Each
+// section perturbs exactly ONE thing away from the allowed shape.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("selectable_models excludes every rejected model", "[selectable_models]") {
+    SECTION("undeclared — the catalog row has no manifest entry at all") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;                       // valid, declares nothing
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2", "3"});
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+        CHECK(f.ids_in(view, TargetMode::BallLeveler).empty());
+    }
+
+    SECTION("unknown canonical id — declared, but not in the compiled registry") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(
+            declare_ex(f.tmp.path(), {"rogue", "rogue-v9", "digit_numeric"}));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2", "3"}, "rogue");
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+        CHECK(f.ids_in(view, TargetMode::BallLeveler).empty());
+    }
+
+    SECTION("family mismatch — declared family is not the registry's for that id") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(
+            declare_ex(f.tmp.path(), {"digitv3", "digitv3", "float_ball"}));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2", "3"});
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+        CHECK(f.ids_in(view, TargetMode::BallLeveler).empty());
+    }
+
+    SECTION("wrong task") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(declare_ex(
+            f.tmp.path(), {"digitv3", "digitv3", "digit_numeric", "segment"}));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2", "3"});
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+    }
+
+    SECTION("unsupported input size") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(declare_ex(
+            f.tmp.path(), {"digitv3", "digitv3", "digit_numeric", "detect", 320}));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2", "3"});
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+    }
+
+    SECTION("renamed class — the artifact disagrees with the declaration") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(
+            declare_ex(f.tmp.path(), {"digitv3", "digitv3", "digit_numeric"}));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "X", "2", "3"});       // declaration says class 1 is "1"
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+    }
+
+    SECTION("reordered classes — same names, wrong order") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(
+            declare_ex(f.tmp.path(), {"digitv3", "digitv3", "digit_numeric"}));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"1", "0", "2", "3"});       // class ids are POSITIONAL
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+    }
+
+    SECTION("class-count mismatch") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(
+            declare_ex(f.tmp.path(), {"digitv3", "digitv3", "digit_numeric"}));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2"});
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+    }
+
+    SECTION("provenance failure — the artifact no longer hashes to its declaration") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        m.generations.push_back(
+            declare_ex(f.tmp.path(), {"digitv3", "digitv3", "digit_numeric"}));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2", "3"});
+        tamper(f.tmp.path(), "digitv3");
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+    }
+
+    SECTION("no block for the ACTIVE backend (spec 3.2.1 rule 5)") {
+        OneModel f;
+        Manifest m;
+        m.schema = 2;
+        Decl d{"digitv3", "digitv3", "digit_numeric"};
+        d.active_backend_block = false;     // declares the OTHER backend only
+        m.generations.push_back(declare_ex(f.tmp.path(), d));
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2", "3"});
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+    }
+
+    SECTION("schema-1 identity is not a declaration") {
+        OneModel f;
+        Manifest m;
+        m.schema = 1;
+        ModelGeneration g;                  // root fields only; declared == false
+        g.name = "digitv3";
+        g.engine = std::string("digitv3") + kExt;
+        g.class_names = {"0", "1", "2", "3"};
+        m.generations.push_back(g);
+        const ManifestView view(std::move(m), f.tmp.path());
+        f.seed({"0", "1", "2", "3"});
+        CHECK(f.ids_in(view, TargetMode::DigitReader).empty());
+        CHECK(f.ids_in(view, TargetMode::BallLeveler).empty());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// An ABSENT manifest yields an EMPTY list — never a fallback to the raw catalog.
+// That is the state of a box before `denso-setup seed-manifest` has run, and
+// listing the catalog there would offer models the appliance refuses to load.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("an absent manifest makes every model unselectable", "[selectable_models]") {
+    ThreeModels f;                                    // catalog full, artifacts on disk
+    const ManifestView empty(Manifest{}, f.tmp.path());  // schema 0, no generations
+
+    CHECK(denso::detection::selectable_models(f.h(), TargetMode::DigitReader, empty,
+                                              kPlatform)
+              .empty());
+    CHECK(denso::detection::selectable_models(f.h(), TargetMode::BallLeveler, empty,
+                                              kPlatform)
+              .empty());
+    // The catalog itself is NOT empty — proving this is a filter, not an empty DB.
+    CHECK(denso::detection::list_models(f.h()).size() == 3);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A failed platform probe (Slice 7 fails closed to an EMPTY PlatformInfo) must
+// not authorize anything on the TensorRT backend. Under ONNX Runtime built_for is
+// deliberately never read, so the list is unaffected there — assert the ACTUAL
+// backend's contract rather than a platform-independent fiction.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("an empty measured platform cannot widen the list", "[selectable_models]") {
+    ThreeModels f;
+    const PlatformInfo none{};
+    const auto got = denso::detection::selectable_models(
+        f.h(), TargetMode::DigitReader, *f.view, none);
+#ifdef _WIN32
+    CHECK(ids_of(got) == std::vector<std::string>{"digitv3"});  // ORT ignores built_for
+#else
+    CHECK(got.empty());   // TensorRT: nothing corroborates, nothing selectable
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SLICE-9 / SLICE-8 AGREEMENT. A model that becomes rejected must vanish from the
+// list AND keep its camera inhibited. The dangerous outcome is the model quietly
+// leaving the list while the camera looks healthy — a camera that has silently
+// stopped reading.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("a newly-rejected attached model leaves the list but keeps its camera inhibited",
+          "[selectable_models][model_enforcement]") {
+    ThreeModels f;
+    const int64_t cam = seed_camera(f.h(), "Line 1");
+
+    // Attach digitv3 through the REAL write path while it is still allowed.
+    CameraModel att;
+    att.camera_id = cam;
+    att.model_id = f.id["digitv3"];
+    att.classes = {ModelClassSelection{0, 0.5f}};
+    REQUIRE(denso::detection::set_camera_models(f.h(), cam, {att},
+                                                TargetMode::DigitReader, *f.view,
+                                                kPlatform));
+    REQUIRE(ids_of(denso::detection::selectable_models(f.h(), TargetMode::DigitReader,
+                                                       *f.view, kPlatform)) ==
+            std::vector<std::string>{"digitv3"});
+
+    // The artifact is replaced on disk — the declaration no longer describes what
+    // is there. NOTHING about the database changed.
+    tamper(f.tmp.path(), "digitv3");
+
+    // (a) It disappears from the selectable list.
+    CHECK(denso::detection::selectable_models(f.h(), TargetMode::DigitReader, *f.view,
+                                              kPlatform)
+              .empty());
+
+    // (b) Slice 8 still reports the camera, with the REAL reason — the camera does
+    //     NOT become healthy just because the model left the list.
+    const auto verdict = denso::health::evaluate_integrity(
+        f.h(), f.tmp.path(), TargetMode::DigitReader, *f.view, kPlatform);
+    bool found = false;
+    for (const auto& i : verdict.issues) {
+        if (i.kind == denso::health::ZoneIssue::Kind::ModelCompatibilityRejected &&
+            i.camera_id == cam) {
+            found = true;
+            CHECK(i.policy_reason == QStringLiteral("model_provenance_failed"));
+        }
+    }
+    CHECK(found);
+    CHECK(verdict.status == denso::health::Readiness::Degraded);
+    CHECK(denso::health::exit_code_for(verdict.status) == 10);
+
+    // (c) The runtime resolution keeps the camera inhibited as a whole.
+    const auto det = denso::detection::detection_for(f.h(), cam, TargetMode::DigitReader,
+                                                     *f.view, kPlatform);
+    CHECK(det.compatibility_rejected);
+    CHECK(det.models.empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reading the list must not WRITE anything — opening the Models step is a
+// read-only act, and it happens on every visit to the wizard.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("selectable_models mutates no row", "[selectable_models]") {
+    ThreeModels f;
+    const int64_t cam = seed_camera(f.h(), "Line 1");
+    CameraModel att;
+    att.camera_id = cam;
+    att.model_id = f.id["digitv3"];
+    att.classes = {ModelClassSelection{0, 0.5f}, ModelClassSelection{1, 0.4f}};
+    REQUIRE(denso::detection::set_camera_models(f.h(), cam, {att},
+                                                TargetMode::DigitReader, *f.view,
+                                                kPlatform));
+
+    const int models_before = row_count(f.h(), "model");
+    const int cm_before = row_count(f.h(), "camera_model");
+    const int cc_before = row_count(f.h(), "camera_model_class");
+
+    for (int i = 0; i < 3; ++i) {
+        (void)denso::detection::selectable_models(f.h(), TargetMode::DigitReader,
+                                                  *f.view, kPlatform);
+        (void)denso::detection::selectable_models(f.h(), TargetMode::BallLeveler,
+                                                  *f.view, kPlatform);
+    }
+
+    CHECK(row_count(f.h(), "model") == models_before);
+    CHECK(row_count(f.h(), "camera_model") == cm_before);
+    CHECK(row_count(f.h(), "camera_model_class") == cc_before);
+    // The existing attachment is untouched, classes included.
+    const auto det = denso::detection::detection_for(f.h(), cam, TargetMode::DigitReader,
+                                                     *f.view, kPlatform);
+    REQUIRE(det.models.size() == 1);
+    CHECK(det.models.at(0).classes.size() == 2);
+    // Schema is still v13 — this slice adds no migration.
+    const auto ver = denso::db::read_user_version(f.h());
+    REQUIRE(ver.has_value());
+    CHECK(*ver == 13);
 }

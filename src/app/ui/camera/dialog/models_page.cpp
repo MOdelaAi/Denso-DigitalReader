@@ -80,8 +80,17 @@ ModelsPage::ModelsPage(QWidget* parent) : QWidget(parent) {
 
 ModelsPage::~ModelsPage() = default;
 
-void ModelsPage::load_for(int64_t camera_id) {
-    catalog_ = denso::detection::list_models(db_);
+void ModelsPage::load_for(int64_t camera_id, denso::mode::TargetMode mode,
+                          const denso::models::ManifestView& view,
+                          const denso::models::PlatformInfo& platform) {
+    // THE seam (spec 6.1): the offered set is the central policy's answer for the
+    // committed mode. This page applies no rule of its own — it renders the rows
+    // it is handed. A model the policy rejects never reaches a checkbox, so it can
+    // be neither displayed nor returned by selections().
+    offered_.clear();
+    for (auto& s : denso::detection::selectable_models(db_, mode, view, platform)) {
+        offered_.push_back(std::move(s.row));
+    }
     const auto attached = denso::detection::models_for(db_, camera_id);
 
     // Seed remembered selections from the DB (name → {selected, conf}), first
@@ -92,7 +101,7 @@ void ModelsPage::load_for(int64_t camera_id) {
     if (search_) search_->clear();  // reset the class filter for the new camera
     for (const auto& cm : attached) {
         const denso::detection::DetectionModel* dm = nullptr;
-        for (const auto& m : catalog_) {
+        for (const auto& m : offered_) {
             if (m.id == cm.model_id) {
                 dm = &m;
                 break;
@@ -118,8 +127,11 @@ void ModelsPage::load_for(int64_t camera_id) {
         delete it;
     }
     model_checks_.clear();
-    for (const auto& m : catalog_) {
+    for (const auto& m : offered_) {
         auto* cb = new QCheckBox(QString::fromStdString(m.name));
+        // Distinguishes the ensemble checkboxes from the class-row ones for
+        // findChildren-based inspection, exactly as the top-bar buttons do.
+        cb->setObjectName(QStringLiteral("modelCheck"));
         const bool is_attached =
             std::any_of(attached.begin(), attached.end(),
                         [&](const denso::detection::CameraModel& a) {
@@ -157,7 +169,7 @@ void ModelsPage::rebuild_class_list() {
 
     // Union of the checked models' class names (std::set → unique + sorted).
     std::set<QString> names;
-    for (const auto& m : catalog_) {
+    for (const auto& m : offered_) {
         if (checked.find(m.id) == checked.end()) continue;
         for (const auto& n : m.class_names) {
             names.insert(QString::fromStdString(n));
@@ -217,7 +229,7 @@ std::vector<denso::detection::CameraModel> ModelsPage::selections(
     for (const ModelCheck& mc : model_checks_) {
         if (!mc.on->isChecked()) continue;
         const denso::detection::DetectionModel* dm = nullptr;
-        for (const auto& m : catalog_) {
+        for (const auto& m : offered_) {
             if (m.id == mc.model_id) {
                 dm = &m;
                 break;

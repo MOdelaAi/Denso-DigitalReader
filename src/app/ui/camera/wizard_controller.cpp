@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -218,7 +219,18 @@ void CameraWizardController::configure_back() {
 }
 
 void CameraWizardController::enter_models() {
-    pages_.models->load_for(editing_id_.value_or(0));
+    // The COMMITTED mode from the database — never the settings page's mode combo,
+    // which holds a *proposed* destination until the operator confirms the
+    // destructive switch. Reading that would make models appear or vanish from
+    // this dialog because someone opened an unrelated drop-down (spec §6.3).
+    //
+    // Same three authorization inputs the save path uses below, resolved through
+    // the same shared loader and provider — so what the page OFFERS and what
+    // set_camera_models ACCEPTS are two readings of one rule, and a model can never
+    // be offered here and then refused on Finish.
+    pages_.models->load_for(editing_id_.value_or(0), denso::mode::load(db_),
+                            denso::models::load_manifest_view(denso::paths::models_dir()),
+                            denso::platform::measured_platform_info());
     show_page_(3);
 }
 
@@ -226,6 +238,62 @@ bool CameraWizardController::save_models_only() {
     if (!editing_id_.has_value()) {
         return true;
     }
+
+    // ── Hidden-attachment guard ──────────────────────────────────────────────
+    // A model this camera is ATTACHED to but that the policy no longer allows is
+    // ABSENT from the Models page (spec §6.2 — absent, not greyed, not annotated),
+    // so selections() cannot carry it and this save would DETACH it. That is the
+    // one outcome this whole design exists to prevent: the camera would stop being
+    // a diagnosable, inhibited ModelCompatibilityRejected and become an
+    // apparently-healthy camera with no model that silently reads nothing.
+    //
+    // It cannot simply be preserved either — set_camera_models refuses any set
+    // containing a rejected model (spec §7.1), and rightly so. So the operator is
+    // told exactly what will be removed and decides. Recomputed here from the same
+    // three inputs the page was given, rather than trusting page state.
+    const denso::mode::TargetMode mode = denso::mode::load(db_);
+    const denso::models::ManifestView view =
+        denso::models::load_manifest_view(denso::paths::models_dir());
+    const denso::models::PlatformInfo platform =
+        denso::platform::measured_platform_info();
+
+    std::set<int64_t> offered;
+    for (const auto& s : denso::detection::selectable_models(db_, mode, view, platform)) {
+        offered.insert(s.row.id);
+    }
+    std::map<int64_t, std::string> catalog_names;
+    for (const auto& m : denso::detection::list_models(db_)) {
+        catalog_names[m.id] = denso::models::diagnostic_filename(m.filename);
+    }
+    QStringList hidden;
+    for (const auto& cm : denso::detection::models_for(db_, *editing_id_)) {
+        if (offered.count(cm.model_id) == 0) {
+            const auto it = catalog_names.find(cm.model_id);
+            hidden << QStringLiteral("%1 (catalog #%2)")
+                          .arg(it == catalog_names.end()
+                                   ? QStringLiteral("<unknown>")
+                                   : QString::fromStdString(it->second))
+                          .arg(cm.model_id);
+        }
+    }
+    if (!hidden.isEmpty()) {
+        const auto answer = QMessageBox::question(
+            pages_.models, QStringLiteral("Remove incompatible model?"),
+            QStringLiteral(
+                "This camera is attached to %1 that the current operating mode "
+                "does not allow, so it is not shown above:\n\n  %2\n\nSaving now "
+                "REMOVES that attachment. The camera will then have no detection "
+                "model and will report nothing — it will no longer be flagged as "
+                "incompatible, because nothing will be attached.\n\nRemove it?")
+                .arg(hidden.size() == 1 ? QStringLiteral("a model")
+                                        : QStringLiteral("models"),
+                     hidden.join(QStringLiteral("\n  "))),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            return false;   // stay on the Models step; nothing written
+        }
+    }
+
     // Honour the transactional write result: if it failed, the camera is NOT
     // configured, so surface the error and stay on the Models page rather
     // than silently reporting success and advancing (operator would believe

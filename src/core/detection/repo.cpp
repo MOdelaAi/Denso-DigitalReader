@@ -45,6 +45,28 @@ std::vector<DetectionModel> list_models(const QSqlDatabase& db) {
     return out;
 }
 
+std::vector<SelectableModel> selectable_models(
+    const QSqlDatabase& db, denso::mode::TargetMode mode,
+    const denso::models::ManifestView& view,
+    const denso::models::PlatformInfo& platform) {
+    std::vector<SelectableModel> out;
+    // list_models is already ORDER BY id, and this only ever DROPS entries, so
+    // catalog-id order is preserved by construction — no second sort, and nothing
+    // that could reorder the survivors.
+    for (DetectionModel& row : list_models(db)) {
+        // Resolve for the view's ACTIVE backend, then ask the ONE policy. Identity
+        // comes from the declaration; nothing here inspects the filename, the
+        // display name or the class names to decide availability.
+        denso::models::ModelMetadata md =
+            denso::models::resolve_model_metadata(view, row, platform);
+        if (!denso::models::model_compatibility(mode, md).allowed()) {
+            continue;
+        }
+        out.push_back(SelectableModel{std::move(row), std::move(md)});
+    }
+    return out;
+}
+
 std::optional<std::vector<std::string>>
 try_attached_model_filenames(const QSqlDatabase& db, denso::mode::TargetMode mode,
                              const denso::models::ManifestView& view,

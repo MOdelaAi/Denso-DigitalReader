@@ -23,7 +23,50 @@ namespace denso::detection {
 std::optional<int64_t> upsert_model(const QSqlDatabase& db, const DetectionModel& m);
 
 /// Every catalog model, ordered by id.
+///
+/// This is the UNFILTERED catalog. No selection UI may render it — a model being
+/// present on the appliance says nothing about whether it may be used here. Use
+/// `selectable_models` for anything an operator chooses from.
 std::vector<DetectionModel> list_models(const QSqlDatabase& db);
+
+/// A catalog row and its resolved identity, kept as ONE value. Deliberately not a
+/// vector of rows plus a parallel metadata lookup: two containers indexed in step
+/// is a bug waiting for the first filter or sort, and every consumer needs both
+/// halves together (spec §6.1).
+struct SelectableModel {
+    DetectionModel               row;
+    denso::models::ModelMetadata metadata;
+};
+
+/// The catalog reduced to the models the central policy ALLOWS in `mode`, each
+/// paired with its resolved metadata. THE only list a selection UI may render
+/// (spec §6.1) — and the read counterpart of `set_camera_models`, so the wizard
+/// can never offer a model that the write path would then refuse.
+///
+/// Each row is resolved through `models::resolve_model_metadata` for the VIEW'S
+/// ACTIVE BACKEND and judged by `models::model_compatibility`. This function holds
+/// NO rule of its own: it does not look at filenames, display names, class names,
+/// or a mode-specific WHERE clause. The family→mode matrix lives only in
+/// src/core/models/compatibility.cpp, and this is one of its callers.
+///
+/// Ordering is CATALOG ID — the same order `list_models` returns, with the
+/// rejected entries removed. Fail-closed: an absent, schema-1, invalid or
+/// otherwise unusable manifest declares nothing, so every model resolves
+/// undeclared and the list comes back EMPTY. It never falls back to the raw
+/// catalog — offering a model the appliance will refuse to load is the exact
+/// failure this seam exists to prevent.
+///
+/// `mode`, `view` and `platform` have NO default: a forgotten call site must fail
+/// to compile, never silently authorize. `platform` is the caller-supplied
+/// measured platform (read only on the TensorRt backend), required because
+/// resolve_model_metadata takes it and ManifestView deliberately does not carry it
+/// (spec §3.2.1 rule 4).
+///
+/// READ-ONLY: opening a selection page must not mutate the database.
+std::vector<SelectableModel> selectable_models(
+    const QSqlDatabase& db, denso::mode::TargetMode mode,
+    const denso::models::ManifestView& view,
+    const denso::models::PlatformInfo& platform);
 
 /// Every distinct model filename attached to any camera that the compatibility
 /// policy ALLOWS in `mode` — the engines the app must be able to load at
