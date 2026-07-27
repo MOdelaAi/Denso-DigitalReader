@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <set>
 #include <optional>
 
 using denso::mode::TargetMode;
@@ -130,7 +131,8 @@ struct Harness {
         REQUIRE(denso::db::run_migrations(db->handle()));
         engines = std::make_shared<EngineRegistry>(
             denso::paths::models_dir().toStdString(),
-            denso::paths::trt_cache_dir().toStdString());
+            denso::paths::trt_cache_dir().toStdString(),
+            std::set<std::string>{});  // model-less: empty allow-list, nothing loads
         warmup = std::make_unique<WarmupState>(engines);  // model-less path ignores it
     }
     QSqlDatabase handle() { return db->handle(); }

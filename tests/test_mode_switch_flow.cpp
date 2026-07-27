@@ -56,6 +56,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <optional>
 #include <vector>
 
@@ -145,7 +146,8 @@ struct Harness {
         state = std::make_shared<denso::settings::Settings>();
         engines = std::make_shared<EngineRegistry>(
             denso::paths::models_dir().toStdString(),
-            denso::paths::trt_cache_dir().toStdString());
+            denso::paths::trt_cache_dir().toStdString(),
+            std::set<std::string>{});  // model-less: empty allow-list
         warmup = std::make_unique<WarmupState>(engines);  // model-less path ignores it
     }
 

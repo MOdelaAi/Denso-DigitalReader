@@ -6,9 +6,16 @@
 #include "detection/repo.h"
 #include "health/integrity.h"
 #include "instance/single_instance.h"
+#include "models/compatibility.h"
+#include "models/manifest.h"
+#include "models/model_identity.h"
+#include "mode/config.h"
+#include "mode/mode.h"
 #include "paths/paths.h"
+#include "platform/platform_info.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QString>
 #include <QStringList>
@@ -122,7 +129,33 @@ std::optional<std::vector<std::string>> configured_models() {
         std::fprintf(stderr, "check: cannot read database: %s\n", qPrintable(db_path));
         return std::nullopt;
     }
-    auto models = denso::detection::try_attached_model_filenames(db->handle());
+
+    // Mode-filtered required set (spec §7.0), mirroring boot: a rejected attachment
+    // must NOT make --check fail loud. Same central policy, same active-backend
+    // ManifestView, same platform constant as startup.cpp. The manifest is absent
+    // or valid here (a corrupt one is caught by the readiness verdict in run_check);
+    // absent → empty view → fail-closed. This does NOT change the 0/10/78 readiness
+    // verdict below, which still evaluates unmodified integrity (Slice 8 owns that).
+    const denso::mode::TargetMode mode = denso::mode::load(db->handle());
+    denso::models::Manifest manifest;
+    const QString manifest_path =
+        QDir(denso::paths::models_dir()).filePath(QStringLiteral("manifest.json"));
+    if (QFileInfo::exists(manifest_path)) {
+        QFile mf(manifest_path);
+        if (mf.open(QIODevice::ReadOnly)) {
+            auto pr = denso::models::parse_manifest(mf.readAll().toStdString());
+            if (pr.manifest) manifest = std::move(*pr.manifest);
+        }
+    }
+    const denso::models::ManifestView view(std::move(manifest),
+                                           denso::paths::models_dir());
+    // Same shared provider as startup.cpp — one probe/normalization implementation.
+    // A probe failure fails closed (empty PlatformInfo → no engine corroborates),
+    // never a substituted constant.
+    const denso::models::PlatformInfo platform = denso::platform::measured_platform_info();
+
+    auto models = denso::detection::try_attached_model_filenames(db->handle(), mode,
+                                                                 view, platform);
     if (!models) {
         std::fprintf(stderr, "check: database is unreadable (bad schema?): %s\n",
                      qPrintable(db_path));

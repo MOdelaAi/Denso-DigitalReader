@@ -46,22 +46,42 @@ std::vector<DetectionModel> list_models(const QSqlDatabase& db) {
 }
 
 std::optional<std::vector<std::string>>
-try_attached_model_filenames(const QSqlDatabase& db) {
+try_attached_model_filenames(const QSqlDatabase& db, denso::mode::TargetMode mode,
+                             const denso::models::ManifestView& view,
+                             const denso::models::PlatformInfo& platform) {
+    // Select the full row needed to resolve identity — the filename joins the
+    // manifest generation, the class_names corroborate it. filename is UNIQUE in
+    // `model`, so DISTINCT m.filename,m.class_names dedupes exactly as before.
     std::vector<std::string> out;
     QSqlQuery q(db);
     if (!q.exec(QStringLiteral(
-            "SELECT DISTINCT m.filename FROM camera_model cm "
+            "SELECT DISTINCT m.filename, m.class_names FROM camera_model cm "
             "JOIN model m ON m.id = cm.model_id ORDER BY m.filename"))) {
         return std::nullopt;
     }
     while (q.next()) {
-        out.push_back(q.value(0).toString().toStdString());
+        DetectionModel row;
+        row.filename = q.value(0).toString().toStdString();
+        row.class_names = parse_class_names(q.value(1).toString().toStdString());
+        // Resolve for the active backend and keep ONLY what the policy allows.
+        // A rejected attachment is dropped here so it never reaches the warm-up
+        // required set (spec §7.0). The returned name is the active-backend
+        // filename from the resolved metadata.
+        const denso::models::ModelMetadata md =
+            denso::models::resolve_model_metadata(view, row, platform);
+        if (denso::models::model_compatibility(mode, md).allowed()) {
+            out.push_back(md.filename);
+        }
     }
     return out;
 }
 
-std::vector<std::string> attached_model_filenames(const QSqlDatabase& db) {
-    return try_attached_model_filenames(db).value_or(std::vector<std::string>{});
+std::vector<std::string> attached_model_filenames(
+    const QSqlDatabase& db, denso::mode::TargetMode mode,
+    const denso::models::ManifestView& view,
+    const denso::models::PlatformInfo& platform) {
+    return try_attached_model_filenames(db, mode, view, platform)
+        .value_or(std::vector<std::string>{});
 }
 
 static std::vector<ModelClassSelection> classes_for(const QSqlDatabase& db,

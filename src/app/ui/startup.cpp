@@ -4,8 +4,13 @@
 #include "detection/engine_registry.h"
 #include "health/integrity.h"
 #include "health/status_file.h"
+#include "models/compatibility.h"
+#include "models/manifest.h"
+#include "models/model_identity.h"
 #include "mode/config.h"
+#include "mode/mode.h"
 #include "paths/paths.h"
+#include "platform/platform_info.h"
 #include "ui/mainwindow.h"
 #include "ui/startup_mode.h"
 #include "ui/startup_screen.h"
@@ -15,9 +20,12 @@
 #include <QApplication>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QThread>
 
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -150,11 +158,56 @@ int launch(QApplication& app, QSqlDatabase db,
 
     const std::string models_dir = denso::paths::models_dir().toStdString();
     const std::string cache_dir = denso::paths::trt_cache_dir().toStdString();
-    // The models configured cameras actually need — warm_up fails loud if any is
-    // missing, instead of silently demoting the camera to no-detection.
-    std::vector<std::string> required = detection::attached_model_filenames(db);
-    auto engines = std::make_shared<EngineRegistry>(models_dir, cache_dir,
-                                                    std::move(required));
+
+    // ── Release-B warm-up firewall (spec §7.0) ───────────────────────────────
+    // Build the compatibility allow-list and the mode-filtered fail-loud required
+    // set from the ONE central policy. A rejected model — wrong mode, undeclared,
+    // metadata/provenance fault — is excluded from BOTH, so it is never scanned,
+    // never get()-ed, never deserialized, and can never abort startup.
+    const denso::mode::TargetMode mode = denso::mode::load(db);
+
+    // The production manifest view, bound to the active backend (the one #ifdef
+    // split, inside ManifestView). A corrupt manifest already returned EX_CONFIG
+    // in the Blocked gate above, so here the manifest is absent or valid. Absent →
+    // an empty manifest → every model resolves undeclared → the allow-list is
+    // empty (fail-closed): without a seeded manifest nothing loads, by design.
+    denso::models::Manifest manifest;  // schema 0, no generations
+    const QString manifest_path =
+        QDir(denso::paths::models_dir()).filePath(QStringLiteral("manifest.json"));
+    if (QFileInfo::exists(manifest_path)) {
+        QFile mf(manifest_path);
+        if (mf.open(QIODevice::ReadOnly)) {
+            auto pr = denso::models::parse_manifest(mf.readAll().toStdString());
+            if (pr.manifest) manifest = std::move(*pr.manifest);
+        }
+    }
+    const denso::models::ManifestView view(std::move(manifest),
+                                           denso::paths::models_dir());
+
+    // Measured platform for the TensorRT built_for corroboration — read ONLY on
+    // the TensorRt backend, ignored under ONNX Runtime (spec §3.2.1). Obtained from
+    // the ONE shared provider (probing + normalization defined once, used by
+    // run_headless.cpp too). A probe failure FAILS CLOSED: an empty PlatformInfo
+    // corroborates no built_for, so no engine enters the allow-list and nothing
+    // warms — never a substituted constant.
+    const denso::models::PlatformInfo platform = denso::platform::measured_platform_info();
+
+    // Resolve every catalogued model for the active backend, then reduce to the
+    // filenames the policy allows in the committed mode — the ONLY set warm-up
+    // may load.
+    std::vector<denso::models::ModelMetadata> metadata;
+    for (const auto& row : detection::list_models(db))
+        metadata.push_back(denso::models::resolve_model_metadata(view, row, platform));
+    std::set<std::string> allow_list =
+        denso::models::loadable_model_files(mode, metadata);
+
+    // The models configured cameras actually need — MODE-FILTERED, so a rejected
+    // attachment is never in the fail-loud set (spec §7.0). warm_up fails loud
+    // only for an ALLOWED model that is missing or invalid.
+    std::vector<std::string> required =
+        detection::attached_model_filenames(db, mode, view, platform);
+    auto engines = std::make_shared<EngineRegistry>(
+        models_dir, cache_dir, std::move(allow_list), std::move(required));
 
     // Splash only when there's a minutes-long build to wait on (cold); otherwise
     // the fast UI-first load.

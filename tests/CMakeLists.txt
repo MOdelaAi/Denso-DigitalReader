@@ -119,8 +119,19 @@ add_executable(denso_integration_tests
     test_camera_view_states.cpp
     test_brazing_discard.cpp
     test_mode_switch_flow.cpp
+    # Slice 7 warm-up firewall: constructs EngineRegistry (backend-coupled), so it
+    # belongs here with the app objects, not in the backend-free denso_tests. The
+    # injected counting stub means no real engine is loaded.
+    test_warmup_allowlist.cpp
+    # Slice 7 platform provider: app-layer TU (denso_app). Pure normalization +
+    # injected probe seam — no GPU/device touched.
+    test_platform_provider.cpp
 )
 target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
+# The platform-provider static test reads the two production call sites to assert
+# no hard-coded platform constant remains and both use the shared provider.
+target_compile_definitions(denso_integration_tests PRIVATE
+    DENSO_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 if(WIN32)
     # The import lib means the test exe needs the ORT runtime DLLs at load time

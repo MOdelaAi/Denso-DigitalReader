@@ -85,6 +85,9 @@ add_library(denso_app OBJECT
     ui/warmup_state.cpp
     ui/startup_mode.cpp
     ui/startup.cpp
+    # platform-information provider: shared normalization + the production seam
+    # (the per-platform probe is added in the backend split at the bottom).
+    platform/platform_info.cpp
     # common dialog primitives (leaf — used by every dialog)
     ui/common/form_widgets.cpp
     ui/common/dialog_chrome.cpp
@@ -148,6 +151,9 @@ target_link_libraries(denso PRIVATE denso_app)
 if(WIN32)
     # Windows: ONNX Runtime engine + its runtime DLLs beside the exe.
     target_sources(denso_app PRIVATE detection/ort_engine.cpp)
+    # Platform probe: Windows has no qualified device to measure (ORT ignores
+    # PlatformInfo) — reports nullopt. No CUDA/TensorRT headers touched here.
+    target_sources(denso_app PRIVATE platform/platform_probe_ort.cpp)
     target_link_libraries(denso_app PUBLIC onnxruntime)
 
     # ORT runtime DLLs + the models must sit beside the exe (Windows DLL search +
@@ -188,7 +194,11 @@ else()
     # The engine source compiles into denso_app; the TRT link + include propagate
     # PUBLICly so both denso and denso_integration_tests inherit them.
     target_sources(denso_app PRIVATE
-        detection/trt_engine.cpp)
+        detection/trt_engine.cpp
+        # Platform probe: measures the running TensorRT lib version + the CUDA
+        # Runtime API (device props). The only place outside trt_engine.cpp that
+        # touches TensorRT/CUDA headers — links the same TRT + cudart below.
+        platform/platform_probe_trt.cpp)
     target_link_libraries(denso_app PUBLIC ${TRT_NVINFER} CUDA::cudart)
     target_include_directories(denso_app PUBLIC ${TRT_INCLUDE_DIR})
 endif()

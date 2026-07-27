@@ -1,10 +1,29 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "db/db.h"
+#include "models/compatibility.h"     // TargetMode-aware policy types
+#include "models/manifest.h"
+#include "models/model_identity.h"    // ManifestView, PlatformInfo
+#include "mode/mode.h"
 
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QString>
+
+namespace {
+// An empty manifest view bound to a throwaway dir. With no declared generation,
+// every model resolves undeclared → the policy rejects it (fail-closed). Enough
+// for the callers below, which assert either "no rows" or "undeclared → excluded"
+// and so never reach a hash comparison. The active-backend production ctor is
+// used, mirroring startup.cpp.
+denso::models::ManifestView empty_view() {
+    return denso::models::ManifestView(denso::models::Manifest{},
+                                       QStringLiteral("."));
+}
+// Plain const (NOT constexpr): PlatformInfo holds std::strings and constexpr
+// std::string needs GCC 12+, but the Jetson gate builds with gcc11.
+const denso::models::PlatformInfo kNoPlatform{};
+} // namespace
 
 using denso::db::Db;
 using denso::db::run_migrations;
@@ -157,14 +176,18 @@ TEST_CASE("detection_for is empty for a camera with no models") {
     REQUIRE(detection_for(d.handle(), cam).models.empty());
 }
 
-TEST_CASE("attached_model_filenames returns distinct filenames across cameras") {
+TEST_CASE("attached_model_filenames is empty when no manifest declares the model") {
     using denso::detection::attached_model_filenames;
+    using denso::mode::TargetMode;
     auto d = mem();
+    const auto view = empty_view();
 
     // No attachments → empty (the "no detection configured" case).
-    REQUIRE(attached_model_filenames(d.handle()).empty());
+    REQUIRE(attached_model_filenames(d.handle(), TargetMode::DigitReader, view,
+                                     kNoPlatform)
+                .empty());
 
-    const int64_t model = seed_model(d.handle());  // denso.onnx
+    const int64_t model = seed_model(d.handle());  // denso.onnx — UNDECLARED
     const int64_t cam1 = seed_camera(d.handle());
     const int64_t cam2 = seed_camera(d.handle());
     CameraModel a; a.camera_id = cam1; a.model_id = model;
@@ -172,28 +195,40 @@ TEST_CASE("attached_model_filenames returns distinct filenames across cameras") 
     REQUIRE(set_camera_models(d.handle(), cam1, {a}));
     REQUIRE(set_camera_models(d.handle(), cam2, {b}));
 
-    const auto files = attached_model_filenames(d.handle());
-    REQUIRE(files.size() == 1);  // distinct: one filename, not two rows
-    REQUIRE(files[0] == "denso.onnx");
+    // Fail-closed: an undeclared attachment is excluded from the required set in
+    // BOTH modes (no manifest → resolve_model_metadata reports it undeclared →
+    // model_undeclared). The rich allowed/wrong-mode/dedup cases live in
+    // tests/test_warmup_allowlist.cpp with a real declared manifest.
+    REQUIRE(attached_model_filenames(d.handle(), TargetMode::DigitReader, view,
+                                     kNoPlatform)
+                .empty());
+    REQUIRE(attached_model_filenames(d.handle(), TargetMode::BallLeveler, view,
+                                     kNoPlatform)
+                .empty());
 }
 
 TEST_CASE("try_attached_model_filenames distinguishes empty from unreadable",
           "[detection][repo]") {
+    using denso::mode::TargetMode;
     auto db = denso::db::Db::open_in_memory();
     REQUIRE(db.has_value());
+    const auto view = empty_view();
 
     SECTION("valid schema with no attachments yields an empty vector, not nullopt") {
         REQUIRE(denso::db::run_migrations(db->handle()));
-        const auto got = denso::detection::try_attached_model_filenames(db->handle());
+        const auto got = denso::detection::try_attached_model_filenames(
+            db->handle(), TargetMode::DigitReader, view, kNoPlatform);
         REQUIRE(got.has_value());
         REQUIRE(got->empty());
     }
 
     SECTION("a missing schema yields nullopt, NOT an empty vector") {
-        // No migrations: camera_model/model do not exist, so the query fails.
-        // The old attached_model_filenames() returns {} here, which would let a
-        // corrupt database pass --check as if it were a fresh install.
-        REQUIRE_FALSE(
-            denso::detection::try_attached_model_filenames(db->handle()).has_value());
+        // No migrations: camera_model/model do not exist, so the query fails
+        // BEFORE any resolution runs. The old attached_model_filenames() returned
+        // {} here, which would let a corrupt database pass --check as a fresh
+        // install. Non-throwing contract preserved: nullopt, never an exception.
+        REQUIRE_FALSE(denso::detection::try_attached_model_filenames(
+                          db->handle(), TargetMode::DigitReader, view, kNoPlatform)
+                          .has_value());
     }
 }

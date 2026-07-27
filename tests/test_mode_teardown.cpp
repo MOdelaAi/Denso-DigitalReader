@@ -28,6 +28,7 @@
 #include <QByteArray>
 #include <QTemporaryDir>
 #include <memory>
+#include <set>
 
 using denso::ui::CameraGrid;
 using denso::ui::CameraStream;
@@ -97,7 +98,8 @@ TEST_CASE("teardown_for_switch stops the grid, shows the neutral page, and build
     // required-set registry is constructed but never queried (no models attached).
     auto engines = std::make_shared<EngineRegistry>(
         denso::paths::models_dir().toStdString(),
-        denso::paths::trt_cache_dir().toStdString());
+        denso::paths::trt_cache_dir().toStdString(),
+        std::set<std::string>{});  // model-less: empty allow-list
     auto warmup = std::make_unique<WarmupState>(engines);  // not started; model-less path ignores it
     CameraView view(db->handle(), engines, warmup.get());
 
@@ -162,7 +164,8 @@ TEST_CASE("every authoritative teardown advances the grid generation",
 
     auto engines = std::make_shared<EngineRegistry>(
         denso::paths::models_dir().toStdString(),
-        denso::paths::trt_cache_dir().toStdString());
+        denso::paths::trt_cache_dir().toStdString(),
+        std::set<std::string>{});  // model-less: empty allow-list
     auto warmup = std::make_unique<WarmupState>(engines);
     CameraGrid grid(db->handle(), engines, warmup.get());
 

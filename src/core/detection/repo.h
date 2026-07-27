@@ -5,6 +5,8 @@
 #pragma once
 
 #include "detection/detection.h"
+#include "models/model_identity.h"   // ManifestView, PlatformInfo, resolve_model_metadata
+#include "mode/mode.h"               // TargetMode
 
 #include <QSqlDatabase>
 
@@ -23,17 +25,35 @@ std::optional<int64_t> upsert_model(const QSqlDatabase& db, const DetectionModel
 /// Every catalog model, ordered by id.
 std::vector<DetectionModel> list_models(const QSqlDatabase& db);
 
-/// Every distinct model filename attached to any camera — the engines the app
-/// must be able to load at warm-up. Used to fail loud when a configured model
-/// is missing (rather than silently demoting the camera to no-detection).
-std::vector<std::string> attached_model_filenames(const QSqlDatabase& db);
+/// Every distinct model filename attached to any camera that the compatibility
+/// policy ALLOWS in `mode` — the engines the app must be able to load at
+/// warm-up. Each attached catalog model is resolved through
+/// `models::resolve_model_metadata` (for the view's active backend) and reduced
+/// by the central `models::model_compatibility`: a rejected attachment
+/// (undeclared, unknown id, family/metadata mismatch, provenance fault, or wrong
+/// mode) is EXCLUDED, so it can never enter the fail-loud required set nor abort
+/// startup (spec §7.0). Allowed models keep their existing fail-loud behaviour.
+/// The returned filename is the active-backend artifact from the resolved
+/// metadata. `mode` and `view` have NO default — a forgotten call site must fail
+/// to compile, never silently authorize. `platform` is the caller-supplied
+/// measured platform (read only on the TensorRt backend), required because
+/// resolve_model_metadata takes it and ManifestView deliberately does not carry
+/// it (spec §3.2.1 rule 4).
+std::vector<std::string> attached_model_filenames(
+    const QSqlDatabase& db, denso::mode::TargetMode mode,
+    const denso::models::ManifestView& view,
+    const denso::models::PlatformInfo& platform);
 
 /// Like attached_model_filenames, but distinguishes "no attachments" (an empty
 /// vector) from "the query failed" (nullopt) — attached_model_filenames returns
 /// {} for both, which would let a corrupt database look like a fresh install to
-/// a validation gate. Prefer this wherever the difference matters.
+/// a validation gate. Prefer this wherever the difference matters. Non-throwing:
+/// resolution is pure + I/O-via-optional, so a fault surfaces as nullopt/exclusion,
+/// never an exception.
 std::optional<std::vector<std::string>>
-try_attached_model_filenames(const QSqlDatabase& db);
+try_attached_model_filenames(const QSqlDatabase& db, denso::mode::TargetMode mode,
+                             const denso::models::ManifestView& view,
+                             const denso::models::PlatformInfo& platform);
 
 // ─── per-camera attachments ──────────────────────────────────────────────────
 

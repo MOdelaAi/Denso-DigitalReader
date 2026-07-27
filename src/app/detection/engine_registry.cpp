@@ -15,17 +15,51 @@
 #include <string>
 
 namespace denso::ui {
+namespace {
+
+// The production factory: build the platform's backend engine and keep it ONLY
+// if it loaded (ok()). A failed load returns nullptr, which get() surfaces as
+// "did not load" — the exact contract the registry had before the factory seam.
+std::unique_ptr<InferenceEngine> default_factory(const std::string& path,
+                                                 const std::string& cache_dir) {
+    auto e = std::make_unique<BackendEngine>(path, cache_dir);
+    if (e && e->ok()) return e;  // implicit upcast unique_ptr<BackendEngine> -> base
+    return nullptr;
+}
+
+}  // namespace
+
+EngineRegistry::EngineRegistry(std::string models_dir, std::string cache_dir,
+                               std::set<std::string> allow_list,
+                               std::vector<std::string> required,
+                               EngineFactory factory)
+    : models_dir_(std::move(models_dir)),
+      cache_dir_(std::move(cache_dir)),
+      allow_list_(std::move(allow_list)),
+      required_(std::move(required)),
+      factory_(factory ? std::move(factory) : EngineFactory(&default_factory)) {}
 
 InferenceEngine* EngineRegistry::get(const std::string& filename) {
+    // Firewall. A request for a filename the compatibility policy did not allow is
+    // a PROGRAMMING error: warm_up() skips such files and every runtime caller
+    // resolves through the same policy, so reaching here with a rejected filename
+    // means a caller bypassed the allow-list. Fail loud rather than silently
+    // deserialize a rejected (e.g. wrong-mode) plan. Checked before the lock — the
+    // allow-list is immutable after construction. Survivable at the call site:
+    // start_one() already wraps get() in a try/catch (camera_grid.cpp).
+    if (allow_list_.find(filename) == allow_list_.end()) {
+        throw std::logic_error(
+            "EngineRegistry::get() called for a model outside the compatibility "
+            "allow-list: " + filename);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = engines_.find(filename);
     if (it == engines_.end()) {
-        auto eng = std::make_unique<BackendEngine>(models_dir_ + "/" + filename,
-                                                   cache_dir_);
-        it = engines_.emplace(filename, std::move(eng)).first;
+        it = engines_.emplace(filename,
+                              factory_(models_dir_ + "/" + filename, cache_dir_))
+                 .first;
     }
-    BackendEngine* e = it->second.get();
-    return (e && e->ok()) ? e : nullptr;
+    return it->second.get();  // nullptr if the factory reported a failed load
 }
 
 void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model,
@@ -62,6 +96,17 @@ void EngineRegistry::warm_up(std::function<void(const std::string&)> on_model,
         }
         const std::string filename = entry.path().filename().string();
         const QString name = QString::fromStdString(filename);
+        // Firewall: skip every file the compatibility policy did not allow. A
+        // rejected model is never handed to get(), so no incompatible plan is
+        // deserialized and no rejected engine runs a warm-up inference — including
+        // an idle wrong-mode artifact merely present on disk. One redaction-safe
+        // informational line per skipped file (a filename is not a credential).
+        if (allow_list_.find(filename) == allow_list_.end()) {
+            qInfo().noquote() << "[warmup] skipping" << name
+                              << "(not permitted by the compatibility policy in the "
+                                 "current mode)";
+            continue;
+        }
         if (on_model) {
             on_model(filename);
         }
