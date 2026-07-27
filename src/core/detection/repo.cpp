@@ -123,13 +123,99 @@ std::vector<CameraModel> models_for(const QSqlDatabase& db, int64_t camera_id) {
     return out;
 }
 
+namespace {
+
+/// Result of a catalog lookup. The three states must stay distinct:
+///   Ok        — the row was read.
+///   NoRow     — the catalog genuinely has no such model. That is a REFUSAL
+///               reason: an attachment naming a model that does not exist can
+///               never be resolved, so it can never be Allowed.
+///   QueryFailed — the DATABASE is broken. That is NOT a compatibility verdict,
+///               and must never be reported as one: telling an operator their
+///               model is "undeclared" when the real fault is a corrupt schema
+///               sends them to inspect a manifest that was never the problem.
+enum class RowLookup { Ok, NoRow, QueryFailed };
+
+RowLookup model_row(const QSqlDatabase& db, int64_t model_id, DetectionModel& out) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT id, name, filename, class_names FROM model WHERE id = ?"));
+    q.addBindValue(static_cast<qlonglong>(model_id));
+    if (!q.exec()) {
+        return RowLookup::QueryFailed;
+    }
+    if (!q.next()) {
+        return RowLookup::NoRow;
+    }
+    out.id = q.value(0).toLongLong();
+    out.name = q.value(1).toString().toStdString();
+    out.filename = q.value(2).toString().toStdString();
+    out.class_names = parse_class_names(q.value(3).toString().toStdString());
+    return RowLookup::Ok;
+}
+
+/// The canonical id for a diagnostic, or the explicit "<undeclared>" sentinel.
+/// Identity is NEVER inferred from a filename, so an undeclared model genuinely
+/// has no canonical id to report and must say so rather than borrowing its stem.
+std::string diag_canonical_id(const denso::models::ModelMetadata& md) {
+    return md.canonical_id.empty() ? std::string("<undeclared>") : md.canonical_id;
+}
+
+}  // namespace
+
 bool set_camera_models(const QSqlDatabase& db, int64_t camera_id,
-                       const std::vector<CameraModel>& models) {
+                       const std::vector<CameraModel>& models,
+                       denso::mode::TargetMode mode,
+                       const denso::models::ManifestView& view,
+                       const denso::models::PlatformInfo& platform,
+                       AttachRefusal* refusal) {
     QSqlDatabase conn(db);
     if (!conn.transaction()) {
         return false;
     }
     const auto rollback = [&conn] { conn.rollback(); return false; };
+
+    // ── Compatibility gate (spec §7.1) ───────────────────────────────────────
+    // Runs INSIDE the transaction but BEFORE any mutation, so a refusal rolls the
+    // whole thing back having changed nothing — not even the delete of the
+    // previous set. The whole requested set is judged first: a mixed
+    // allowed/rejected request must store NOTHING, so the loop cannot begin
+    // writing the allowed members and discover the rejected one later.
+    //
+    // An empty `models` (detach everything) has nothing to judge and is allowed in
+    // every mode — the operator must always be able to clear an attachment.
+    for (const CameraModel& cm : models) {
+        DetectionModel row;
+        const RowLookup lookup = model_row(db, cm.model_id, row);
+        if (lookup == RowLookup::QueryFailed) {
+            // A broken database, not a rejected model. Roll back and fail plainly,
+            // leaving `refusal` UNTOUCHED so the caller reports a write failure
+            // rather than inventing a compatibility reason for it.
+            return rollback();
+        }
+        const denso::models::ModelMetadata md =
+            lookup == RowLookup::Ok
+                ? denso::models::resolve_model_metadata(view, row, platform)
+                : denso::models::ModelMetadata{};  // no catalog row → undeclared
+        const auto verdict = denso::models::model_compatibility(mode, md);
+        if (!verdict.allowed()) {
+            if (refusal) {
+                refusal->camera_id = camera_id;
+                refusal->model_id = cm.model_id;
+                refusal->canonical_id = diag_canonical_id(md);
+                // The catalog filename when the row exists, reduced to its
+                // basename: this string is shown to an operator and logged, and
+                // the column is writable by hand, so it must not be able to carry
+                // a credential-bearing URL (spec §12).
+                refusal->filename =
+                    lookup == RowLookup::Ok
+                        ? denso::models::diagnostic_filename(row.filename)
+                        : std::string();
+                refusal->policy_reason = verdict.reason_code;
+            }
+            return rollback();
+        }
+    }
 
     // Delete children first (class rows for this camera's attachments), then
     // the attachments themselves.
@@ -174,7 +260,10 @@ bool set_camera_models(const QSqlDatabase& db, int64_t camera_id,
     return conn.commit() || rollback();
 }
 
-CameraDetection detection_for(const QSqlDatabase& db, int64_t camera_id) {
+CameraDetection detection_for(const QSqlDatabase& db, int64_t camera_id,
+                              denso::mode::TargetMode mode,
+                              const denso::models::ManifestView& view,
+                              const denso::models::PlatformInfo& platform) {
     CameraDetection out;
     out.camera_id = camera_id;
     QSqlQuery q(db);
@@ -192,6 +281,26 @@ CameraDetection detection_for(const QSqlDatabase& db, int64_t camera_id) {
         rm.filename = q.value(1).toString().toStdString();
         rm.class_names = parse_class_names(q.value(2).toString().toStdString());
         rm.classes = classes_for(db, cmid);
+
+        // Runtime enforcement (spec §7.2). The row may have been written by hand
+        // or restored from a backup, so the write-path gate above cannot be
+        // assumed to have run: judge EVERY attachment here, at read time.
+        DetectionModel row;
+        row.filename = rm.filename;
+        row.class_names = rm.class_names;
+        const denso::models::ModelMetadata md =
+            denso::models::resolve_model_metadata(view, row, platform);
+        const auto verdict = denso::models::model_compatibility(mode, md);
+        if (!verdict.allowed()) {
+            // Inhibit the camera AS A WHOLE. Returning the allowed subset would
+            // silently change what this camera reports; returning it empty WITHOUT
+            // the flag would let the caller demote it to orientation-only, which
+            // looks like a working camera that has quietly stopped reading.
+            out.models.clear();
+            out.compatibility_rejected = true;
+            out.policy_reason = verdict.reason_code;
+            return out;
+        }
         out.models.push_back(std::move(rm));
     }
     return out;

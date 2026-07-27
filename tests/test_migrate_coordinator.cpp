@@ -18,6 +18,46 @@ static QString put(const QDir& dir, const QString& name, const QByteArray& bytes
     QFile f(dir.filePath(name)); REQUIRE(f.open(QIODevice::WriteOnly));
     f.write(bytes); f.close(); return dir.filePath(name);
 }
+// These cases are about the MIGRATE COORDINATOR (path guards, hashing, the
+// transaction), not the compatibility policy. Their fixture engines deliberately
+// have no real identity, so routing the fixture through set_camera_models /
+// detection_for would put a policy verdict between the test and the coordinator
+// logic it exists to check. The attachment is therefore written and read DIRECTLY.
+static void attach_directly(const QSqlDatabase& db, int64_t cam, int64_t model_id,
+                            const std::vector<detection::ModelClassSelection>& cls) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO camera_model (camera_id, model_id) VALUES (?, ?)"));
+    q.addBindValue(static_cast<qlonglong>(cam));
+    q.addBindValue(static_cast<qlonglong>(model_id));
+    REQUIRE(q.exec());
+    const qlonglong cmid = q.lastInsertId().toLongLong();
+    for (const auto& s : cls) {
+        QSqlQuery c(db);
+        c.prepare(QStringLiteral(
+            "INSERT INTO camera_model_class (camera_model_id, class_id, conf) "
+            "VALUES (?, ?, ?)"));
+        c.addBindValue(cmid);
+        c.addBindValue(s.class_id);
+        c.addBindValue(static_cast<double>(s.conf));
+        REQUIRE(c.exec());
+    }
+}
+
+/// The engine filenames a camera is attached to, in attachment order — the raw
+/// join detection_for used to expose before it began enforcing the policy.
+static std::vector<std::string> attached_files(const QSqlDatabase& db, int64_t cam) {
+    std::vector<std::string> out;
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT m.filename FROM camera_model cm JOIN model m ON m.id = cm.model_id "
+        "WHERE cm.camera_id = ? ORDER BY cm.id"));
+    q.addBindValue(static_cast<qlonglong>(cam));
+    REQUIRE(q.exec());
+    while (q.next()) out.push_back(q.value(0).toString().toStdString());
+    return out;
+}
+
 // Seed a temp DB file with camera 1 attached to old_a.engine; returns nothing (file persists).
 static void seed_db(const QString& db_path) {
     auto db = db::Db::open(db_path); REQUIRE(db);
@@ -28,8 +68,7 @@ static void seed_db(const QString& db_path) {
                    "VALUES(1,'C1','usb',640,480,15,0,0,0,1,1)"));
     detection::DetectionModel om{0,"old","old_a.engine",{"0","1"}};
     auto oid = detection::upsert_model(db->handle(), om); REQUIRE(oid);
-    detection::CameraModel cm; cm.camera_id=1; cm.model_id=*oid; cm.classes={{0,0.5f},{1,0.5f}};
-    REQUIRE(detection::set_camera_models(db->handle(), 1, {cm}));
+    attach_directly(db->handle(), 1, *oid, {{0,0.5f},{1,0.5f}});
     // db (and its connection) drops at scope end, before the coordinator reopens the file.
 }
 // Build a valid manifest.json string for new_b.engine/new_b.names.json with the given hashes.
@@ -73,9 +112,7 @@ TEST_CASE("run_migrate succeeds end-to-end and swaps the camera's model", "[migr
     REQUIRE(oj["affected_cameras"].toArray().at(0).toInt() == 1);
 
     auto db2 = db::Db::open(db_path); REQUIRE(db2);
-    auto cd = detection::detection_for(db2->handle(), 1);
-    REQUIRE(cd.models.size() == 1);
-    REQUIRE(cd.models[0].filename == "new_b.engine");
+    REQUIRE(attached_files(db2->handle(), 1) == std::vector<std::string>{"new_b.engine"});
 }
 
 TEST_CASE("run_migrate rejects a hash mismatch and leaves the DB unchanged", "[migrate_coord]") {
@@ -101,9 +138,7 @@ TEST_CASE("run_migrate rejects a hash mismatch and leaves the DB unchanged", "[m
     REQUIRE(doc.object()["code"].toString() == "hash-mismatch");
 
     auto db2 = db::Db::open(db_path); REQUIRE(db2);
-    auto cd = detection::detection_for(db2->handle(), 1);
-    REQUIRE(cd.models.size() == 1);
-    REQUIRE(cd.models[0].filename == "old_a.engine");
+    REQUIRE(attached_files(db2->handle(), 1) == std::vector<std::string>{"old_a.engine"});
 }
 
 TEST_CASE("run_migrate fails when the engine file is missing and leaves the DB unchanged", "[migrate_coord]") {
@@ -133,9 +168,7 @@ TEST_CASE("run_migrate fails when the engine file is missing and leaves the DB u
     REQUIRE(doc.object()["code"].toString() == "path-escape");
 
     auto db2 = db::Db::open(db_path); REQUIRE(db2);
-    auto cd = detection::detection_for(db2->handle(), 1);
-    REQUIRE(cd.models.size() == 1);
-    REQUIRE(cd.models[0].filename == "old_a.engine");
+    REQUIRE(attached_files(db2->handle(), 1) == std::vector<std::string>{"old_a.engine"});
 }
 
 TEST_CASE("run_migrate rejects a malformed manifest", "[migrate_coord]") {
@@ -319,9 +352,7 @@ TEST_CASE("run_migrate refuses an unattached camera and leaves the DB unchanged"
     REQUIRE(q.exec("SELECT COUNT(*) FROM model_migration_receipt"));
     REQUIRE(q.next());
     REQUIRE(q.value(0).toInt() == 0);
-    auto cd = detection::detection_for(db2->handle(), 1);
-    REQUIRE(cd.models.size() == 1);
-    REQUIRE(cd.models[0].filename == "old_a.engine");
+    REQUIRE(attached_files(db2->handle(), 1) == std::vector<std::string>{"old_a.engine"});
 }
 
 // Small fixture shared by the class-map tests: a valid models_dir (engine+sidecar
@@ -475,9 +506,7 @@ TEST_CASE("run_migrate succeeds against a schema 2 manifest", "[migrate_coord]")
     REQUIRE(oj["new_engine"].toString() == "new_b.engine");
 
     auto db2 = db::Db::open(db_path); REQUIRE(db2);
-    auto cd = detection::detection_for(db2->handle(), 1);
-    REQUIRE(cd.models.size() == 1);
-    REQUIRE(cd.models[0].filename == "new_b.engine");
+    REQUIRE(attached_files(db2->handle(), 1) == std::vector<std::string>{"new_b.engine"});
 }
 
 TEST_CASE("run_migrate rejects a schema 2 engine hash mismatch", "[migrate_coord]") {
@@ -504,8 +533,7 @@ TEST_CASE("run_migrate rejects a schema 2 engine hash mismatch", "[migrate_coord
             == "hash-mismatch");
 
     auto db2 = db::Db::open(db_path); REQUIRE(db2);
-    auto cd = detection::detection_for(db2->handle(), 1);
-    REQUIRE(cd.models[0].filename == "old_a.engine");
+    REQUIRE(attached_files(db2->handle(), 1) == std::vector<std::string>{"old_a.engine"});
 }
 
 TEST_CASE("run_migrate rejects a schema 2 sidecar-only hash mismatch",
@@ -561,8 +589,7 @@ TEST_CASE("run_migrate reports a missing schema 2 engine file", "[migrate_coord]
             == "path-escape");
 
     auto db2 = db::Db::open(db_path); REQUIRE(db2);
-    auto cd = detection::detection_for(db2->handle(), 1);
-    REQUIRE(cd.models[0].filename == "old_a.engine");
+    REQUIRE(attached_files(db2->handle(), 1) == std::vector<std::string>{"old_a.engine"});
 }
 
 TEST_CASE("run_migrate rejects an absent generation in a schema 2 manifest",

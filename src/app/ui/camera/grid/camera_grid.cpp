@@ -13,7 +13,9 @@
 #include "detection/engine_registry.h"
 #include "health/status_file.h"
 #include "mode/config.h"
+#include "models/model_identity.h"   // load_manifest_view
 #include "paths/paths.h"
+#include "platform/platform_info.h"  // measured_platform_info
 #include "ui/common/async_runner.h"  // post_to_gui
 #include "ui/warmup_state.h"
 
@@ -114,13 +116,26 @@ void CameraGrid::publish_idle_status() {
     // real blockers/issues. Recompute it, then write with EMPTY runtime causes/zones
     // (nothing streams) and the committed mode + setup-required flag. For
     // ball_leveler mode_setup_required is permanently true (spec §2.1).
-    verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir());
+    refresh_compatibility_inputs();
+    verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir(), mode_,
+                                          *view_, platform_);
     const auto m = denso::mode::load(db_);
     health::write_status_file(
         denso::paths::status_file(),
         verdict_, {}, {}, {},
         QString::fromLatin1(denso::mode::to_string(m)),
         denso::mode::mode_setup_required(db_, m));
+}
+
+void CameraGrid::refresh_compatibility_inputs() {
+    // The COMMITTED mode from the database — never a settings-page selector value,
+    // which may hold an unconfirmed choice the operator has not applied.
+    mode_ = denso::mode::load(db_);
+    // The production manifest view (active backend bound inside ManifestView) and
+    // the ONE shared measured-platform provider — the same seams boot and --check
+    // use, so all three agree about what is declared and what device this is.
+    view_.emplace(denso::models::load_manifest_view(denso::paths::models_dir()));
+    platform_ = denso::platform::measured_platform_info();
 }
 
 void CameraGrid::reload() {
@@ -141,8 +156,12 @@ void CameraGrid::reload() {
     }
 
     // Boot readiness verdict, computed once per reload: drives the per-camera
-    // ModelUnavailable cause below and status.json. Read-only (spec §2).
-    verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir());
+    // ModelUnavailable cause below and status.json. Read-only (spec §2). Judged
+    // against the committed mode + production manifest view + measured platform,
+    // resolved once here for the whole generation.
+    refresh_compatibility_inputs();
+    verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir(), mode_,
+                                          *view_, platform_);
 
     // Per-camera inhibit owner (GUI thread, no mutex). Any cause transition gates
     // the reporter, repaints the camera's tile, and rewrites status.json. Created
@@ -199,17 +218,32 @@ void CameraGrid::reload() {
         health_->set_cause(cam.id, health::ZoneCause::AreasNeedReview,
                            cam.areas_need_review);
         for (const auto& iss : verdict_.issues) {
-            if (iss.kind == health::ZoneIssue::Kind::EngineMissing &&
-                iss.camera_id == cam.id) {
+            if (iss.camera_id != cam.id) continue;
+            // NO new ZoneCause bit (spec §7.3): a model the policy rejected and a
+            // model missing from disk are the SAME thing to this camera — it has
+            // no usable model. The cause bitmask is a file format, so the
+            // semantically correct existing bit is reused and the distinct
+            // diagnosis survives in the issue's reason code + detail.
+            if (iss.kind == health::ZoneIssue::Kind::EngineMissing ||
+                iss.kind == health::ZoneIssue::Kind::ModelCompatibilityRejected) {
                 health_->set_cause(cam.id, health::ZoneCause::ModelUnavailable, true);
             }
         }
 
-        const detection::CameraDetection det = detection::detection_for(db_, cam.id);
-        if (det.models.empty() || warmup_ == nullptr) {
-            // No detection (or no warm-up coordinator): start immediately, exactly
-            // as before. start_one handles the orientation/detection selection.
-            start_one(cam, tile);
+        const detection::CameraDetection det =
+            detection::detection_for(db_, cam.id, mode_, *view_, platform_);
+        // No detection (or no warm-up coordinator): go straight to start_one,
+        // exactly as before — it handles the orientation/detection selection.
+        //
+        // A compatibility-rejected camera resolves to an EMPTY model set too, so it
+        // takes this same branch and start_one refuses it there — ONE refusal
+        // point, not two. `compatibility_rejected` is named explicitly so the
+        // intent survives, and so a future change that let the flag arrive with a
+        // non-empty set could not silently fall through. What it must never do is
+        // reach the warm-up gate below: there is nothing to wait for, and enrolling
+        // it in pending_ would park the tile on "Preparing model…" forever.
+        if (det.compatibility_rejected || det.models.empty() || warmup_ == nullptr) {
+            start_one(cam, tile, det);
             continue;
         }
         // Which of this camera's models are not yet warm?
@@ -220,10 +254,10 @@ void CameraGrid::reload() {
             }
         }
         if (waiting.empty()) {
-            start_one(cam, tile);  // all models already warm → cache-hit get()
+            start_one(cam, tile, det);  // all models already warm → cache-hit get()
         } else {
             tile->set_preparing(true);
-            pending_cams_[cam.id] = PendingCam{cam, tile};
+            pending_cams_[cam.id] = PendingCam{cam, tile, det};
             pending_.add(cam.id, std::move(waiting));
         }
     }
@@ -239,7 +273,8 @@ void CameraGrid::reload() {
     // warm), so there is no batch start here.
 }
 
-void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
+void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile,
+                           const detection::CameraDetection& det) {
     // ROI quarantine: after a view-significant source/geometry edit the camera's
     // areas may no longer align with the frame, so they are excluded from ROI
     // filtering and zone reporting is PAUSED until the operator re-verifies them
@@ -253,7 +288,26 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile) {
         qWarning().noquote() << "[camera] camera" << cam.id
                              << "— areas need review; zone reporting paused";
     }
-    const detection::CameraDetection det = detection::detection_for(db_, cam.id);
+    // ── Camera-scoped compatibility inhibition (spec §7.2) ───────────────────
+    // At least one ATTACHED model is rejected by the central policy, so this
+    // camera is inhibited AS A WHOLE — before any pipeline exists. Deliberately
+    // NOT demoted to an OrientationProcessor: a demotion would look like a working
+    // camera that has quietly stopped reading, which is the failure this design
+    // exists to prevent. No DetectionProcessor is constructed and engines_->get()
+    // is never called, so an incompatible plan is never deserialized and the
+    // fail-loud TrtEngine ctor is never the thing that discovers the problem.
+    // The ModelUnavailable cause was already installed in reload(), so the tile
+    // shows the inhibit banner and the reporter has evicted this camera's zones.
+    if (det.compatibility_rejected) {
+        qCritical().noquote()
+            << "[camera] camera" << cam.id
+            << "— attached model rejected by the compatibility policy ("
+            << QString::fromStdString(det.policy_reason)
+            << "); camera inhibited, not started";
+        tile->set_preparing(false);
+        tile->set_status(static_cast<int>(CameraStream::Status::Offline));
+        return;
+    }
 
     std::unique_ptr<FrameProcessor> proc;
     if (det.models.empty()) {
@@ -337,7 +391,7 @@ void CameraGrid::on_model_ready(const QString& filename) {
     for (int64_t id : ids) {
         auto it = pending_cams_.find(id);
         if (it == pending_cams_.end()) continue;
-        start_one(it->second.cam, it->second.tile);
+        start_one(it->second.cam, it->second.tile, it->second.det);
         pending_cams_.erase(it);
     }
 }
@@ -348,7 +402,7 @@ void CameraGrid::on_warmup_finished() {
     for (int64_t id : pending_.drain()) {
         auto it = pending_cams_.find(id);
         if (it == pending_cams_.end()) continue;
-        start_one(it->second.cam, it->second.tile);
+        start_one(it->second.cam, it->second.tile, it->second.det);
         pending_cams_.erase(it);
     }
 }

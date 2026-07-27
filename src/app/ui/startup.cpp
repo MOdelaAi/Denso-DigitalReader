@@ -138,7 +138,24 @@ int launch(QApplication& app, QSqlDatabase db,
     // it rewrites status.json with the live causes once the grid is up. The
     // DB-stage blockers (schema newer / unopenable / migration failed) were
     // already handled in main.cpp before the DB was opened.
-    const auto verdict = denso::health::evaluate_integrity(db, denso::paths::models_dir());
+    //
+    // The verdict now consults the central compatibility policy, so it needs the
+    // COMMITTED mode, the production manifest view and the measured platform —
+    // resolved here, once, and reused for the warm-up firewall below so boot can
+    // never judge an attachment by one manifest and warm by another.
+    const denso::mode::TargetMode mode = denso::mode::load(db);
+    const denso::models::ManifestView view =
+        denso::models::load_manifest_view(denso::paths::models_dir());
+    // Measured platform for the TensorRT built_for corroboration — read ONLY on
+    // the TensorRt backend, ignored under ONNX Runtime (spec §3.2.1). The ONE
+    // shared provider (probing + normalization defined once, used by
+    // run_headless.cpp and CameraGrid too). A probe failure FAILS CLOSED: an empty
+    // PlatformInfo corroborates no built_for, so nothing is authorized — never a
+    // substituted constant.
+    const denso::models::PlatformInfo platform = denso::platform::measured_platform_info();
+
+    const auto verdict = denso::health::evaluate_integrity(
+        db, denso::paths::models_dir(), mode, view, platform);
     if (verdict.status == denso::health::Readiness::Blocked) {
         // The DB is already open + migrated here (main.cpp cleared the DB-stage
         // preflight), so the real mode is determinable — emit it alongside the
@@ -164,33 +181,11 @@ int launch(QApplication& app, QSqlDatabase db,
     // set from the ONE central policy. A rejected model — wrong mode, undeclared,
     // metadata/provenance fault — is excluded from BOTH, so it is never scanned,
     // never get()-ed, never deserialized, and can never abort startup.
-    const denso::mode::TargetMode mode = denso::mode::load(db);
-
-    // The production manifest view, bound to the active backend (the one #ifdef
-    // split, inside ManifestView). A corrupt manifest already returned EX_CONFIG
-    // in the Blocked gate above, so here the manifest is absent or valid. Absent →
-    // an empty manifest → every model resolves undeclared → the allow-list is
-    // empty (fail-closed): without a seeded manifest nothing loads, by design.
-    denso::models::Manifest manifest;  // schema 0, no generations
-    const QString manifest_path =
-        QDir(denso::paths::models_dir()).filePath(QStringLiteral("manifest.json"));
-    if (QFileInfo::exists(manifest_path)) {
-        QFile mf(manifest_path);
-        if (mf.open(QIODevice::ReadOnly)) {
-            auto pr = denso::models::parse_manifest(mf.readAll().toStdString());
-            if (pr.manifest) manifest = std::move(*pr.manifest);
-        }
-    }
-    const denso::models::ManifestView view(std::move(manifest),
-                                           denso::paths::models_dir());
-
-    // Measured platform for the TensorRT built_for corroboration — read ONLY on
-    // the TensorRt backend, ignored under ONNX Runtime (spec §3.2.1). Obtained from
-    // the ONE shared provider (probing + normalization defined once, used by
-    // run_headless.cpp too). A probe failure FAILS CLOSED: an empty PlatformInfo
-    // corroborates no built_for, so no engine enters the allow-list and nothing
-    // warms — never a substituted constant.
-    const denso::models::PlatformInfo platform = denso::platform::measured_platform_info();
+    //
+    // `mode`, `view` and `platform` were resolved ONCE above, for the readiness
+    // verdict, and are reused verbatim here: the set of models the appliance may
+    // LOAD and the set it reports as REJECTED are then two readings of the same
+    // facts, and cannot drift apart.
 
     // Resolve every catalogued model for the active backend, then reduce to the
     // filenames the policy allows in the committed mode — the ONLY set warm-up

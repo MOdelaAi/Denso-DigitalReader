@@ -3,6 +3,9 @@
 #include "models/hashing.h"
 
 #include <QDir>
+#include <QFile>
+
+#include <algorithm>
 
 namespace denso::models {
 namespace {
@@ -80,6 +83,53 @@ ModelMetadata resolve_model_metadata(const ManifestView& view,
 
     md.provenance_ok = provenance_ok(view, *gen, platform);
     return md;
+}
+
+std::string diagnostic_filename(const std::string& raw) {
+    // Step 1: last path segment only. Both separators are handled — the column is
+    // written on two platforms and a hand-edited row may contain either.
+    const size_t cut = raw.find_last_of("/\\");
+    const std::string tail = (cut == std::string::npos) ? raw : raw.substr(cut + 1);
+    if (tail.empty()) return std::string("<invalid>");
+
+    // Step 2: an ALLOW-LIST over what survives, and fail closed if anything else
+    // is present. Dropping the leading path is NOT sufficient on its own:
+    // "m.engine?token=SECRET" keeps its query string, and a slashless
+    // "user:password@host" is not reduced at all. Both would still carry a secret
+    // into status.json.
+    //
+    // The set is [A-Za-z0-9._-]. This is STRICTER than the manifest's own filename
+    // rule — `is_basename` rejects empty strings, separators and "..", and would
+    // happily pass ':' '@' '?' '=' — so a legal-but-exotic declared name such as
+    // `model+v1.engine` also reduces to "<invalid>". That is the intended trade
+    // (see the header): callers pair this with the catalog row id, so an
+    // unprintable name is still identifiable, and every artifact this product
+    // ships is inside the set because canonical_id is an is_safe_token.
+    //
+    // An allow-list is used rather than stripping the offending characters,
+    // because partial sanitisation is what produces bypasses: anything that is not
+    // provably a plain filename is reported as "<invalid>" and nothing else.
+    const bool safe = std::all_of(tail.begin(), tail.end(), [](unsigned char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    });
+    return safe ? tail : std::string("<invalid>");
+}
+
+ManifestView load_manifest_view(const QString& models_dir) {
+    Manifest manifest;  // schema 0, no generations — the fail-closed default
+    const QString path =
+        QDir(models_dir).filePath(QStringLiteral("manifest.json"));
+    QFile f(path);
+    if (f.exists() && f.open(QIODevice::ReadOnly)) {
+        auto pr = parse_manifest(f.readAll().toStdString());
+        // A parse failure keeps the EMPTY manifest, never a partial one: half a
+        // declaration must not authorize half a model. The corrupt file is
+        // reported separately, as a global blocker, by evaluate_integrity.
+        if (pr.manifest) manifest = std::move(*pr.manifest);
+    }
+    // The two-arg production ctor binds the ACTIVE backend — the one #ifdef split.
+    return ManifestView(std::move(manifest), models_dir);
 }
 
 }  // namespace denso::models

@@ -102,4 +102,52 @@ ModelMetadata resolve_model_metadata(const ManifestView& view,
                                      const denso::detection::DetectionModel& row,
                                      const PlatformInfo& platform);
 
+/// Reduce a catalog filename to something SAFE to put in a diagnostic.
+///
+/// `model.filename` is a database column. The manifest enforces `is_basename` on
+/// the filenames IT declares, but nothing constrains a row written by hand or
+/// restored from a backup — and Slice 8 exists precisely to handle that database.
+/// A row whose filename is `rtsp://user:pass@host/m.engine` would otherwise carry
+/// a credential-bearing URL straight into status.json and the operator-visible
+/// refusal (spec §12).
+///
+/// The reduction is: take the last path segment, then require it to match
+/// [A-Za-z0-9._-]. Anything else — an empty result, a surviving query string, a
+/// slashless `user:password@host` — yields "<invalid>".
+///
+/// This is NOT a second URL redactor: it neither parses nor understands URLs. It
+/// is a fail-closed ALLOW-LIST, deliberately not a strip-the-bad-characters pass,
+/// because partial sanitisation is what produces bypasses. Dropping the path alone
+/// would NOT be enough: a query string or a slashless userinfo survives it.
+///
+/// DELIBERATELY STRICTER THAN THE MANIFEST. The manifest validates runtime
+/// filenames with `is_basename` (rejects empty strings, separators, and ".."),
+/// NOT with the tighter `is_safe_token` class used for canonical ids — so a
+/// declared name like `model+v1.engine` is legal upstream and still reduces to
+/// "<invalid>" here.
+/// That trade is intentional: over-rejecting an exotic filename costs one string
+/// in a diagnostic, while under-rejecting costs a credential in a file operators
+/// paste into tickets. Callers therefore emit the catalog ROW ID alongside this
+/// value, so a model whose name cannot be shown is still precisely identifiable.
+/// Every artifact this product actually ships (`<canonical_id>.engine/.onnx`,
+/// `<canonical_id>.names.json`) is inside the allow-list, because canonical_id IS
+/// an is_safe_token.
+std::string diagnostic_filename(const std::string& raw);
+
+/// THE production ManifestView for a models directory — one definition, shared by
+/// every enforcement entry point (boot, the live grid, --check) so they can never
+/// disagree about what is declared.
+///
+/// Reads `<models_dir>/manifest.json` when it exists. Absent, unreadable OR
+/// unparseable all yield an EMPTY manifest (schema 0, no generations), which
+/// resolves every model undeclared and therefore rejected. FAIL-CLOSED by
+/// construction: this loader can only ever narrow what is authorized, never widen
+/// it, so a damaged file cannot silently grant a privilege.
+///
+/// It deliberately does NOT classify. A malformed manifest is separately reported
+/// as the ManifestCorrupt global blocker by evaluate_integrity, which keeps that
+/// (unchanged) global fault in exactly one place; this function's only job is to
+/// avoid inventing declarations.
+ManifestView load_manifest_view(const QString& models_dir);
+
 }  // namespace denso::models

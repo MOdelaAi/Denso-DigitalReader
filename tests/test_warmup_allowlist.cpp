@@ -31,7 +31,9 @@
 #include <QDir>
 #include <QFile>
 #include <QString>
+#include <QSqlQuery>
 #include <QTemporaryDir>
+#include <QVariant>
 #include <QtGlobal>
 
 #include <map>
@@ -155,6 +157,20 @@ denso::ui::EngineRegistry::EngineFactory make_factory(BuildLog& log) {
         e->log = &log;
         return e;
     };
+}
+
+// Write an attachment DIRECTLY, bypassing set_camera_models. Slice 8 made that
+// function refuse a model the policy rejects, so a REJECTED attachment can no
+// longer be seeded through it — which is exactly right: the only way such a row
+// exists in the field is a restored backup or a hand-edited database (spec §7.4),
+// and that is the state these warm-up cases must exercise.
+void attach_directly(const QSqlDatabase& db, int64_t cam, int64_t model_id) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO camera_model (camera_id, model_id) VALUES (?, ?)"));
+    q.addBindValue(static_cast<qlonglong>(cam));
+    q.addBindValue(static_cast<qlonglong>(model_id));
+    REQUIRE(q.exec());
 }
 
 int count_built(const BuildLog& log, const std::string& needle) {
@@ -294,9 +310,7 @@ TEST_CASE("rejected attachment is excluded from the required set", "[warmup]") {
     REQUIRE(cam.has_value());
 
     SECTION("only a wrong-mode attachment → empty required set, no fail-loud") {
-        denso::detection::CameraModel att;
-        att.camera_id = *cam; att.model_id = *float_id;
-        REQUIRE(denso::detection::set_camera_models(d->handle(), *cam, {att}));
+        attach_directly(d->handle(), *cam, *float_id);
 
         const auto req = denso::detection::try_attached_model_filenames(
             d->handle(), TargetMode::DigitReader, view, kPlatform);
@@ -317,9 +331,8 @@ TEST_CASE("rejected attachment is excluded from the required set", "[warmup]") {
     }
 
     SECTION("allowed digitv3 is retained; wrong-mode float-small excluded") {
-        denso::detection::CameraModel a1; a1.camera_id = *cam; a1.model_id = *digit_id;
-        denso::detection::CameraModel a2; a2.camera_id = *cam; a2.model_id = *float_id;
-        REQUIRE(denso::detection::set_camera_models(d->handle(), *cam, {a1, a2}));
+        attach_directly(d->handle(), *cam, *digit_id);
+        attach_directly(d->handle(), *cam, *float_id);
 
         const auto req = denso::detection::try_attached_model_filenames(
             d->handle(), TargetMode::DigitReader, view, kPlatform);
@@ -446,10 +459,14 @@ TEST_CASE("allow-list dedups and an empty catalog loads nothing", "[warmup]") {
         const auto cam2 = denso::camera::insert(d->handle(), c);
         REQUIRE(cam1.has_value());
         REQUIRE(cam2.has_value());
+        // digitv3 is ALLOWED here, so this one still goes through the real
+        // write path — proving the attachment API still works for a good model.
         denso::detection::CameraModel a; a.camera_id = *cam1; a.model_id = *id;
         denso::detection::CameraModel b; b.camera_id = *cam2; b.model_id = *id;
-        REQUIRE(denso::detection::set_camera_models(d->handle(), *cam1, {a}));
-        REQUIRE(denso::detection::set_camera_models(d->handle(), *cam2, {b}));
+        REQUIRE(denso::detection::set_camera_models(
+            d->handle(), *cam1, {a}, TargetMode::DigitReader, view, kPlatform));
+        REQUIRE(denso::detection::set_camera_models(
+            d->handle(), *cam2, {b}, TargetMode::DigitReader, view, kPlatform));
 
         const auto req = denso::detection::try_attached_model_filenames(
             d->handle(), TargetMode::DigitReader, view, kPlatform);

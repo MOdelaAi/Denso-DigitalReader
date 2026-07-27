@@ -137,18 +137,8 @@ std::optional<std::vector<std::string>> configured_models() {
     // absent → empty view → fail-closed. This does NOT change the 0/10/78 readiness
     // verdict below, which still evaluates unmodified integrity (Slice 8 owns that).
     const denso::mode::TargetMode mode = denso::mode::load(db->handle());
-    denso::models::Manifest manifest;
-    const QString manifest_path =
-        QDir(denso::paths::models_dir()).filePath(QStringLiteral("manifest.json"));
-    if (QFileInfo::exists(manifest_path)) {
-        QFile mf(manifest_path);
-        if (mf.open(QIODevice::ReadOnly)) {
-            auto pr = denso::models::parse_manifest(mf.readAll().toStdString());
-            if (pr.manifest) manifest = std::move(*pr.manifest);
-        }
-    }
-    const denso::models::ManifestView view(std::move(manifest),
-                                           denso::paths::models_dir());
+    const denso::models::ManifestView view =
+        denso::models::load_manifest_view(denso::paths::models_dir());
     // Same shared provider as startup.cpp — one probe/normalization implementation.
     // A probe failure fails closed (empty PlatformInfo → no engine corroborates),
     // never a substituted constant.
@@ -297,8 +287,18 @@ int run_check(const QStringList& extra_engines) {
         std::fprintf(stderr, "check: cannot open the database for the readiness verdict\n");
         return 1;
     }
-    const auto verdict =
-        denso::health::evaluate_integrity(vdb->handle(), denso::paths::models_dir());
+    // The verdict consults the central compatibility policy, so it needs the
+    // COMMITTED mode + the production manifest view + the measured platform —
+    // exactly as boot does, through the same shared loader and provider, so
+    // `--check` and the running appliance can never disagree about a camera.
+    // A directly-attached incompatible model is camera-scoped: it lands here as
+    // Degraded → exit 10, NOT as the fail-loud exit 1 above (it never enters the
+    // required set) and NOT as a Blocked 78.
+    const auto verdict = denso::health::evaluate_integrity(
+        vdb->handle(), denso::paths::models_dir(),
+        denso::mode::load(vdb->handle()),
+        denso::models::load_manifest_view(denso::paths::models_dir()),
+        denso::platform::measured_platform_info());
     for (const auto& b : verdict.blockers)
         std::fprintf(stderr, "check: BLOCKED: %s\n", qPrintable(b.detail));
     for (const auto& i : verdict.issues)

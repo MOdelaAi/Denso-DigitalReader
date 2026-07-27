@@ -20,6 +20,7 @@
 
 #include <opencv2/core.hpp>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -94,6 +95,13 @@ public:
     /// from another thread would be a data race on the std::function.
     using WorkerFailedFn = std::function<void(int64_t camera_id, bool failed)>;
 
+    /// Test-only: how many DetectionProcessors this process has EVER constructed
+    /// (monotonic, increment-only). Mirrors CameraStream::constructed_count(). It
+    /// is what lets a test prove an inhibited camera built NO detection pipeline,
+    /// rather than inferring it from an absence of side effects. No production
+    /// behaviour reads it.
+    static uint64_t constructed_count();
+
     DetectionProcessor(int degrees, double pitch, double roll,
                        std::vector<ModelRun> models,
                        std::vector<denso::camera::CameraArea> areas = {},
@@ -141,6 +149,9 @@ private:
     // (on_worker_failed_ fires once at this exact count; cleared on recovery).
     static constexpr int kInferFailInhibitAfter = 10;
     int infer_fail_streak_ = 0;
+
+    // Process-lifetime construction tally behind constructed_count().
+    static std::atomic<uint64_t> s_constructed_;
 
     std::thread worker_;  // started last in the ctor
 };

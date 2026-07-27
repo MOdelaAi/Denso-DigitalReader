@@ -29,6 +29,9 @@ add_executable(denso_tests
     test_camera_repo.cpp
     test_source_change.cpp
     test_detection_repo.cpp
+    # Slice 8 attachment refusal (set_camera_models). Pure denso_core — the
+    # Slice-9 selectable-list API is deliberately NOT part of this slice.
+    test_selectable_models.cpp
     test_reading_repo.cpp
     test_brazing_config.cpp
     test_area_points.cpp
@@ -126,6 +129,10 @@ add_executable(denso_integration_tests
     # Slice 7 platform provider: app-layer TU (denso_app). Pure normalization +
     # injected probe seam — no GPU/device touched.
     test_platform_provider.cpp
+    # Slice 8 camera-scoped enforcement: drives the REAL CameraGrid and the real
+    # --check path, so it needs denso_app. The EngineRegistry gets an injected
+    # counting factory, so no ORT/TensorRT engine is ever loaded.
+    test_model_mode_enforcement.cpp
 )
 target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
 # The platform-provider static test reads the two production call sites to assert

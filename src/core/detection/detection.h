@@ -51,9 +51,25 @@ struct ResolvedModel {
 
 /// A camera's full detection config resolved for the runtime — the analog of
 /// camera::CameraWithAreas. Empty `models` means the camera runs no detection.
+///
+/// `compatibility_rejected` distinguishes the two ways `models` can be empty, and
+/// the difference is load-bearing (spec §7.2):
+///   * false + empty  — the camera has no attached models. It runs the
+///                      OrientationProcessor, exactly as it always has.
+///   * true  + empty  — at least one ATTACHED model was rejected by the central
+///                      policy, so the camera is inhibited AS A WHOLE. The
+///                      allowed subset is deliberately NOT returned (running it
+///                      would silently change what the camera reports), and the
+///                      caller must NOT demote the camera to an
+///                      OrientationProcessor — a demotion would look like a
+///                      working camera that has quietly stopped reading.
 struct CameraDetection {
     int64_t camera_id = 0;
     std::vector<ResolvedModel> models;
+    bool compatibility_rejected = false;
+    /// The FIRST rejected attachment's stable policy reason code (spec §4.2) —
+    /// diagnostics only; empty unless `compatibility_rejected`.
+    std::string policy_reason;
 };
 
 } // namespace denso::detection

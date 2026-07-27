@@ -8,9 +8,12 @@
 #include "camera/callback_generation.h"
 #include "camera/camera.h"
 #include "camera/warmup_gate.h"
+#include "detection/detection.h"   // CameraDetection
 #include "detection/engine_registry.h"
 #include "health/integrity.h"     // IntegrityVerdict
 #include "health/zone_health.h"   // ZoneHealth, ZoneCause
+#include "mode/mode.h"            // TargetMode
+#include "models/model_identity.h"  // ManifestView, PlatformInfo
 
 #include <QSqlDatabase>
 #include <QString>
@@ -19,6 +22,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -81,11 +85,22 @@ protected:
 private:
     void clear();             // stop + delete all streams and tiles
     void relayout_letterbox();  // centre the tile block as one 16:9-per-tile wall
-    void start_one(const camera::Camera& cam, CameraTile* tile);  // build proc+stream, start
+    // Build the processor + stream and start. `det` is the camera's ALREADY-RESOLVED
+    // detection config, passed in rather than re-queried: resolving it runs the
+    // compatibility policy, which hashes every attached artifact (a multi-MB
+    // TensorRT plan) on the GUI thread. reload() has just computed it, so taking it
+    // as a parameter removes a second full hash per camera from the boot path.
+    void start_one(const camera::Camera& cam, CameraTile* tile,
+                   const detection::CameraDetection& det);
     void on_model_ready(const QString& filename);
     void on_warmup_finished();
     void refresh_tile_inhibit(int64_t camera_id);  // push a camera's causes to its tile
     void refresh_status_file();                    // rewrite status.json (verdict + causes)
+    // Re-read the committed mode, the production manifest view and the measured
+    // platform. Called ONCE per build path, so every camera in one grid generation
+    // is judged against the SAME facts — the readiness verdict, the runtime
+    // resolution and the engine requests cannot drift apart mid-reload.
+    void refresh_compatibility_inputs();
 
     QSqlDatabase db_;
     QGridLayout* grid_ = nullptr;
@@ -95,9 +110,12 @@ private:
     WarmupState* warmup_ = nullptr;   // per-model warm readiness (not owned)
     PendingStart pending_;            // detection cams waiting on their models
     // Data needed to build a pending camera's stream once its models are ready.
+    // The resolved detection config is carried along so the deferred start does
+    // not re-run resolution (and re-hash every artifact) a second time.
     struct PendingCam {
         camera::Camera cam;
         CameraTile* tile;
+        detection::CameraDetection det;
     };
     std::map<int64_t, PendingCam> pending_cams_;
     std::unique_ptr<BrazingReporter> brazing_reporter_;  // GUI-thread reliable sender
@@ -106,6 +124,13 @@ private:
     // gate, the tile banners, and status.json. Rebuilt each reload().
     std::unique_ptr<health::ZoneHealth> health_;
     health::IntegrityVerdict verdict_;                   // boot readiness (per reload)
+    // Compatibility inputs for this grid generation (see refresh_compatibility_
+    // inputs). ManifestView has no default state to fall back on — it is either
+    // loaded or absent — so it is held as an optional rather than given a
+    // meaningless empty default that could be mistaken for "no manifest".
+    denso::mode::TargetMode mode_ = denso::mode::TargetMode::DigitReader;
+    std::optional<denso::models::ManifestView> view_;
+    denso::models::PlatformInfo platform_;
     std::map<int64_t, CameraTile*> tiles_by_cam_;        // camera id -> its tile
     uint64_t last_applied_seq_ = 0;   // drop-stale guard on the snapshot sequence
     uint64_t generation_ = 0;         // bumped by clear(); guards stale worker callbacks

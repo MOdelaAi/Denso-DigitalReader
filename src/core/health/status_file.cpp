@@ -51,6 +51,13 @@ bool write_status_file(const QString& path,
         // Ids as STRINGS: QJsonValue is a double, so >2^53 would lose precision.
         o["camera_id"] = QString::number(i.camera_id);
         o["detail"] = i.detail;
+        // The policy's OWN reason, alongside the kind's — so a diagnosis names the
+        // REAL cause (a hash mismatch reads model_provenance_failed, not
+        // model_mode_incompatible). Both strings are a file format. Emitted only
+        // when a policy actually produced one, so the record for kinds that
+        // consult no policy (EngineMissing / EnginesUnmanifested) is byte-for-byte
+        // what it has always been.
+        if (!i.policy_reason.isEmpty()) o["policy_reason"] = i.policy_reason;
         issues.append(o);
     }
     root["issues"] = issues;

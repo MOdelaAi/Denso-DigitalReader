@@ -1,7 +1,11 @@
 #include "health/integrity.h"
 
 #include "db/db.h"
+#include "detection/class_names.h"
+#include "detection/detection.h"
+#include "models/compatibility.h"
 #include "models/manifest.h"
+#include "models/model_identity.h"
 
 #include <QDir>
 #include <QFile>
@@ -40,6 +44,8 @@ QString reason_code(ZoneIssue::Kind k) {
     switch (k) {
         case ZoneIssue::Kind::EngineMissing:       return QStringLiteral("engine_missing");
         case ZoneIssue::Kind::EnginesUnmanifested: return QStringLiteral("engines_unmanifested");
+        case ZoneIssue::Kind::ModelCompatibilityRejected:
+            return QStringLiteral("model_compatibility_rejected");
     }
     return QStringLiteral("unknown");
 }
@@ -101,7 +107,10 @@ IntegrityVerdict evaluate_db_schema(const QString& db_path) {
     return v;  // Ready — an older-or-equal, structurally sound schema migrates normally
 }
 
-IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& models_dir) {
+IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& models_dir,
+                                    denso::mode::TargetMode mode,
+                                    const denso::models::ManifestView& view,
+                                    const denso::models::PlatformInfo& platform) {
     IntegrityVerdict v;
 
     // ── Global: the models dir must exist and be listable ────────────────────
@@ -137,19 +146,29 @@ IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& model
             v.status = Readiness::Blocked;
             return v;
         }
-        // BOOKKEEPING, NOT AUTHORIZATION. The manifested set is the union of every
-        // runtime artifact filename DECLARED across both backend blocks, for every
-        // generation — irrespective of the committed mode and irrespective of the
-        // backend this build actually runs. A file is "manifested" because it is
-        // described, not because it is usable here.
-        //
-        // Reading the raw g.engine would have been silently wrong once schema 2
-        // nested the filenames: the root field is empty there, so an appliance's
-        // own correctly-declared engine would report EnginesUnmanifested and
-        // degrade a box that is in fact healthy.
-        for (const auto& g : pr.manifest->generations)
-            for (const auto& f : g.declared_runtime_files()) manifested.insert(f);
     }
+
+    // BOOKKEEPING, NOT AUTHORIZATION. The manifested set is the union of every
+    // runtime artifact filename DECLARED across both backend blocks, for every
+    // generation — irrespective of the committed mode and irrespective of the
+    // backend this build actually runs. A file is "manifested" because it is
+    // described, not because it is usable here.
+    //
+    // Reading the raw g.engine would have been silently wrong once schema 2
+    // nested the filenames: the root field is empty there, so an appliance's own
+    // correctly-declared engine would report EnginesUnmanifested and degrade a box
+    // that is in fact healthy.
+    //
+    // Declarations are taken from the PASSED VIEW, not from the parse above, so
+    // this function has exactly ONE authority on what is declared — the same one
+    // the compatibility resolution below consults. The parse above exists solely
+    // to answer "is the file corrupt?", which a ManifestView cannot express
+    // (load_manifest_view collapses a corrupt file to an empty manifest). In
+    // production both come from the same path, and a corrupt file has already
+    // returned Blocked, so the two can never disagree — but deriving the set from
+    // the view means they cannot drift even in principle.
+    for (const auto& g : view.manifest().generations)
+        for (const auto& f : g.declared_runtime_files()) manifested.insert(f);
 
     // ── Degraded: engines on disk that the manifest does not describe ────────
     // COMPATIBILITY (spec §2.3): the production Jetson has engines and no
@@ -163,10 +182,21 @@ IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& model
         }
     }
 
-    // ── Per-zone: every camera-attached engine must exist on disk ────────────
+    // ── Per-zone: every camera-attached engine must exist on disk, and must be
+    //    ALLOWED by the central compatibility policy for the committed mode ────
+    //
+    // Both checks are camera-scoped and both are Degraded, so a row that fails
+    // both reports both — the file-existence fault and the policy fault are
+    // independent diagnoses, and suppressing either would hide a real cause.
+    //
+    // NOTE the deliberate asymmetry with the on-disk scan above: only ATTACHED
+    // models are judged here. A declared, valid artifact that no camera uses is a
+    // NORMAL installation state and must not degrade the appliance (spec §5.1) —
+    // reporting an ordinary, intended state as damage would train operators to
+    // ignore the field that exists to tell them something is wrong.
     QSqlQuery q(db);
     if (!q.exec(QStringLiteral(
-            "SELECT cm.camera_id, m.filename FROM camera_model cm "
+            "SELECT cm.camera_id, m.filename, m.class_names, m.id FROM camera_model cm "
             "JOIN model m ON m.id = cm.model_id"))) {
         // A FAILED query is a global blocker. Conflating it with "no rows" would
         // turn a broken DB into a silently empty fleet (spec §2.2).
@@ -177,8 +207,52 @@ IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& model
     while (q.next()) {
         const int64_t camera_id = q.value(0).toLongLong();
         const QString filename  = q.value(1).toString();
+        const int64_t model_id  = q.value(3).toLongLong();
+        // Same database-controlled column, same redaction rule as below: the detail
+        // reaches status.json, so the NAME is reduced to a plain filename or to
+        // "<invalid>". The catalog ROW ID is emitted beside it, unconditionally: it
+        // is an integer, so it can never carry a secret, and it keeps a model whose
+        // name cannot safely be printed precisely identifiable. For every ordinary
+        // filename this is the identity string EngineMissing has always reported,
+        // plus the id.
+        const QString safe_filename = QString::fromStdString(
+            denso::models::diagnostic_filename(filename.toStdString()));
+        const QString model_ref =
+            QStringLiteral("%1 (model #%2)").arg(safe_filename).arg(model_id);
         if (!QFileInfo::exists(dir.filePath(filename))) {
-            v.issues.push_back({ZoneIssue::Kind::EngineMissing, camera_id, filename});
+            v.issues.push_back(
+                {ZoneIssue::Kind::EngineMissing, camera_id, model_ref, {}});
+        }
+
+        // Identity is resolved from the DECLARATION, never inferred from the
+        // filename, the display name or the class signature. The rules live in
+        // exactly one place — models::model_compatibility — and this is a caller
+        // of it, not a second copy.
+        denso::detection::DetectionModel row;
+        row.filename = filename.toStdString();
+        row.class_names =
+            denso::detection::parse_class_names(q.value(2).toString().toStdString());
+        const denso::models::ModelMetadata md =
+            denso::models::resolve_model_metadata(view, row, platform);
+        const auto verdict = denso::models::model_compatibility(mode, md);
+        if (!verdict.allowed()) {
+            // Redaction-safe detail (spec §12): camera id + model identity only.
+            // No camera row is read here at all, so no camera URL/username/password
+            // can reach the diagnostic. The FILENAME, however, is a database column
+            // that a restored or hand-edited row controls — exactly the database
+            // this check exists for — so it is reduced before it can carry a
+            // credential-bearing URL into status.json, and the catalog row id is
+            // carried alongside so an unprintable name is still identifiable.
+            const QString canonical =
+                md.canonical_id.empty() ? QStringLiteral("<undeclared>")
+                                        : QString::fromStdString(md.canonical_id);
+            v.issues.push_back(
+                {ZoneIssue::Kind::ModelCompatibilityRejected, camera_id,
+                 QStringLiteral("camera %1: model %2 (%3) rejected: %4")
+                     .arg(camera_id)
+                     .arg(model_ref, canonical,
+                          QString::fromStdString(verdict.reason_code)),
+                 QString::fromStdString(verdict.reason_code)});
         }
     }
 

@@ -9,6 +9,10 @@
 #include "ui/camera/dialog/models_page.h"
 #include "camera/rtsp_templates.h"  // with_credentials
 #include "camera/snapshot.h"        // grab_snapshot, apply_orientation
+#include "mode/config.h"            // mode::load (the COMMITTED mode)
+#include "models/model_identity.h"  // load_manifest_view
+#include "paths/paths.h"
+#include "platform/platform_info.h"  // measured_platform_info
 #include "ui/common/async_runner.h"
 
 #include <QMessageBox>
@@ -226,12 +230,48 @@ bool CameraWizardController::save_models_only() {
     // configured, so surface the error and stay on the Models page rather
     // than silently reporting success and advancing (operator would believe
     // detection is set up when nothing was saved — no readings, no reports).
+    //
+    // The mode passed here is the COMMITTED one, read from the database — never
+    // the settings-page selector widget, which may hold a choice the operator has
+    // not applied (spec §6.3). Attaching against an unconfirmed mode would let the
+    // wizard authorize a model the appliance is not actually running.
+    denso::detection::AttachRefusal refusal;
     if (!denso::detection::set_camera_models(
-            db_, *editing_id_, pages_.models->selections(*editing_id_))) {
-        QMessageBox::warning(
-            pages_.models, QStringLiteral("Save failed"),
-            QStringLiteral("Could not save the detection models for this "
-                           "camera. Please try again."));
+            db_, *editing_id_, pages_.models->selections(*editing_id_),
+            denso::mode::load(db_),
+            denso::models::load_manifest_view(denso::paths::models_dir()),
+            denso::platform::measured_platform_info(), &refusal)) {
+        // Name the real cause. A compatibility refusal is a decision, not a
+        // malfunction: "please try again" would be actively misleading, because
+        // trying again does exactly the same thing.
+        if (!refusal.policy_reason.empty()) {
+            // Wrong-mode is only ONE of the seven ways the policy can refuse.
+            // Blaming the operating mode for an undeclared, mis-hashed or
+            // wrong-classes model would send the operator to switch a mode that
+            // was never the problem — the same reasoning that named the issue kind
+            // ModelCompatibilityRejected rather than ModelModeIncompatible.
+            const bool wrong_mode = refusal.policy_reason == "model_mode_incompatible";
+            const QString lead =
+                wrong_mode
+                    ? QStringLiteral("\"%1\" cannot be used in the current "
+                                     "operating mode and was not attached.")
+                    : QStringLiteral("\"%1\" was refused by the model "
+                                     "compatibility check and was not attached.");
+            QMessageBox::warning(
+                pages_.models, QStringLiteral("Model not compatible"),
+                (lead + QStringLiteral("\n\nModel: %2 (catalog #%4)\nReason: %3\n\n"
+                                       "No change was made to this camera's "
+                                       "detection models."))
+                    .arg(QString::fromStdString(refusal.filename),
+                         QString::fromStdString(refusal.canonical_id),
+                         QString::fromStdString(refusal.policy_reason))
+                    .arg(refusal.model_id));
+        } else {
+            QMessageBox::warning(
+                pages_.models, QStringLiteral("Save failed"),
+                QStringLiteral("Could not save the detection models for this "
+                               "camera. Please try again."));
+        }
         return false;
     }
     emit cameras_changed();

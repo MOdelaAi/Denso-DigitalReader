@@ -5,7 +5,27 @@
 #include <QDir>
 #include <QFile>
 #include <QSqlQuery>
+#include "mode/mode.h"
+#include "models/model_identity.h"
 using namespace denso;
+
+// Slice 8: evaluate_integrity now consults the central compatibility policy, so
+// it takes the committed mode, the production manifest view and the measured
+// platform. The cases in this file are about the DIRECTORY, MANIFEST and
+// ATTACHMENT-EXISTENCE checks, which predate that; they run in digit_reader with
+// a view over the SAME models dir, so identity resolves against the real on-disk
+// manifest exactly as production does. Empty PlatformInfo is the fail-closed
+// value (it corroborates no built_for) and is only read on the TensorRt backend.
+// Plain const, not constexpr: PlatformInfo holds std::strings and the Jetson gate
+// builds gcc11.
+static const models::PlatformInfo kNoPlatform{};
+
+static health::IntegrityVerdict evaluate(const QSqlDatabase& db,
+                                         const QString& models_dir) {
+    return health::evaluate_integrity(db, models_dir, mode::TargetMode::DigitReader,
+                                      models::load_manifest_view(models_dir),
+                                      kNoPlatform);
+}
 
 static void put(const QDir& d, const QString& name, const QByteArray& bytes) {
     QFile f(d.filePath(name)); REQUIRE(f.open(QIODevice::WriteOnly));
@@ -17,8 +37,7 @@ TEST_CASE("integrity: a clean empty install is Ready", "[integrity]") {
     QDir models(tmp.path()); REQUIRE(models.mkpath("models"));
     auto db = db::Db::open(QDir(tmp.path()).filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(),
-                                              QDir(tmp.path()).filePath("models"));
+    const auto v = evaluate(db->handle(), QDir(tmp.path()).filePath("models"));
     REQUIRE(v.status == health::Readiness::Ready);
 }
 
@@ -26,8 +45,7 @@ TEST_CASE("integrity: an unreadable models_dir is a GLOBAL blocker", "[integrity
     QTemporaryDir tmp; REQUIRE(tmp.isValid());
     auto db = db::Db::open(QDir(tmp.path()).filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(),
-                                              QDir(tmp.path()).filePath("nope"));
+    const auto v = evaluate(db->handle(), QDir(tmp.path()).filePath("nope"));
     REQUIRE(v.status == health::Readiness::Blocked);
     REQUIRE_FALSE(v.blockers.empty());
     REQUIRE(v.blockers[0].kind == health::GlobalBlocker::Kind::ModelsDirUnreadable);
@@ -40,7 +58,7 @@ TEST_CASE("integrity: a corrupt manifest is a GLOBAL blocker", "[integrity]") {
     put(models, "manifest.json", "{ this is not json");
     auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE(v.status == health::Readiness::Blocked);
     REQUIRE(v.blockers[0].kind == health::GlobalBlocker::Kind::ManifestCorrupt);
 }
@@ -55,7 +73,7 @@ TEST_CASE("integrity: an engine on disk but absent from the manifest is DEGRADED
     put(models, "digitv3.names.json", R"(["0","1"])");
     auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE(v.status == health::Readiness::Degraded);
     bool found = false;
     for (const auto& i : v.issues) {
@@ -76,7 +94,7 @@ TEST_CASE("integrity: a valid but empty manifest is accepted, not corrupt",
     put(models, "manifest.json", R"({"schema":1,"generations":[]})");
     auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE(v.status == health::Readiness::Ready);
     REQUIRE(v.blockers.empty());
 }
@@ -93,7 +111,7 @@ TEST_CASE("integrity: a failed attachment query BLOCKS, never a silent empty fle
     REQUIRE(db::run_migrations(db->handle()));
     QSqlQuery q(db->handle());
     REQUIRE(q.exec("DROP TABLE camera_model"));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE(v.status == health::Readiness::Blocked);
     REQUIRE_FALSE(v.blockers.empty());
     REQUIRE(v.blockers[0].kind == health::GlobalBlocker::Kind::DbQueryFailed);
@@ -163,7 +181,7 @@ TEST_CASE("integrity: a schema 2 tensorrt declaration manifests its engine",
     put(models, "manifest.json", schema2_manifest(/*ort=*/false, /*trt=*/true));
     auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE_FALSE(has_unmanifested(v, "digitv3.engine"));
     REQUIRE(v.blockers.empty());
     REQUIRE(v.status == health::Readiness::Ready);
@@ -178,7 +196,7 @@ TEST_CASE("integrity: a schema 2 onnxruntime declaration manifests its onnx",
     put(models, "manifest.json", schema2_manifest(/*ort=*/true, /*trt=*/false));
     auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE_FALSE(has_unmanifested(v, "digitv3.onnx"));
     REQUIRE(v.blockers.empty());
     REQUIRE(v.status == health::Readiness::Ready);
@@ -195,7 +213,7 @@ TEST_CASE("integrity: a schema 2 generation with both blocks manifests both file
     put(models, "manifest.json", schema2_manifest(/*ort=*/true, /*trt=*/true));
     auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE_FALSE(has_unmanifested(v, "digitv3.engine"));
     REQUIRE_FALSE(has_unmanifested(v, "digitv3.onnx"));
     REQUIRE(v.status == health::Readiness::Ready);
@@ -214,7 +232,7 @@ TEST_CASE("integrity: an undeclared file beside a schema 2 manifest stays DEGRAD
     put(models, "manifest.json", schema2_manifest(/*ort=*/false, /*trt=*/true));
     auto db = db::Db::open(root.filePath("denso.db")); REQUIRE(db);
     REQUIRE(db::run_migrations(db->handle()));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE(v.status == health::Readiness::Degraded);
     REQUIRE(has_unmanifested(v, "stray.engine"));
     REQUIRE_FALSE(has_unmanifested(v, "digitv3.engine"));
@@ -223,9 +241,11 @@ TEST_CASE("integrity: an undeclared file beside a schema 2 manifest stays DEGRAD
 
 TEST_CASE("integrity: the manifested set does not depend on the committed mode",
           "[integrity]") {
-    // evaluate_integrity takes no mode and consults no policy: the same manifest
-    // must yield the same verdict whatever mode.target says. Asserted directly so
-    // that a later slice cannot quietly make this bookkeeping mode-sensitive.
+    // The MANIFESTED-SET bookkeeping is mode-independent: a file is "manifested"
+    // because it is described, not because it is usable in the committed mode. So
+    // with no camera attached to anything, the same manifest must yield the same
+    // verdict whatever mode.target says. (Slice 8 made the verdict mode-aware for
+    // ATTACHED models only — precisely the asymmetry this case pins down.)
     QTemporaryDir tmp; REQUIRE(tmp.isValid());
     QDir root(tmp.path()); REQUIRE(root.mkpath("models"));
     QDir models(root.filePath("models"));
@@ -238,10 +258,10 @@ TEST_CASE("integrity: the manifested set does not depend on the committed mode",
 
     REQUIRE(q.exec("INSERT OR REPLACE INTO settings(key,value) "
                    "VALUES('mode.target','digit_reader')"));
-    const auto a = health::evaluate_integrity(db->handle(), models.path());
+    const auto a = evaluate(db->handle(), models.path());
     REQUIRE(q.exec("INSERT OR REPLACE INTO settings(key,value) "
                    "VALUES('mode.target','ball_leveler')"));
-    const auto b = health::evaluate_integrity(db->handle(), models.path());
+    const auto b = evaluate(db->handle(), models.path());
 
     REQUIRE(a.status == b.status);
     REQUIRE(a.issues.size() == b.issues.size());
@@ -262,7 +282,7 @@ TEST_CASE("integrity: a camera attached to a missing engine is a per-zone issue"
     REQUIRE(q.exec("INSERT INTO model(id,name,filename,class_names) "
                    "VALUES(1,'m','gone.engine','[\"0\"]')"));
     REQUIRE(q.exec("INSERT INTO camera_model(camera_id,model_id) VALUES(1,1)"));
-    const auto v = health::evaluate_integrity(db->handle(), models.path());
+    const auto v = evaluate(db->handle(), models.path());
     REQUIRE(v.status == health::Readiness::Degraded);
     bool found = false;
     for (const auto& i : v.issues) {

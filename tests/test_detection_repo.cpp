@@ -118,6 +118,34 @@ int64_t seed_model(const QSqlDatabase& db) {
     m.class_names = {"0", "1", "2", "3"};
     return *upsert_model(db, m);
 }
+// Write an attachment DIRECTLY, bypassing set_camera_models' compatibility gate.
+// The cases below are about the PERSISTENCE round-trip (rows, class selections,
+// ordering) over a deliberately identity-less fixture model ("denso.onnx", which
+// no manifest declares). Routing them through the policy would mean either
+// inventing a declared manifest they do not test, or asserting a refusal that
+// hides the SQL behaviour they exist to cover. The policy's own behaviour —
+// allow, refuse, roll back — is covered in tests/test_selectable_models.cpp
+// against a real declared fixture.
+void attach_directly(const QSqlDatabase& db, int64_t cam, int64_t model_id,
+                     const std::vector<denso::detection::ModelClassSelection>& cls) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO camera_model (camera_id, model_id) VALUES (?, ?)"));
+    q.addBindValue(static_cast<qlonglong>(cam));
+    q.addBindValue(static_cast<qlonglong>(model_id));
+    REQUIRE(q.exec());
+    const qlonglong cmid = q.lastInsertId().toLongLong();
+    for (const auto& s : cls) {
+        QSqlQuery c(db);
+        c.prepare(QStringLiteral(
+            "INSERT INTO camera_model_class (camera_model_id, class_id, conf) "
+            "VALUES (?, ?, ?)"));
+        c.addBindValue(cmid);
+        c.addBindValue(s.class_id);
+        c.addBindValue(static_cast<double>(s.conf));
+        REQUIRE(c.exec());
+    }
+}
 } // namespace
 
 TEST_CASE("set_camera_models + models_for round-trip attachments and classes") {
@@ -125,11 +153,8 @@ TEST_CASE("set_camera_models + models_for round-trip attachments and classes") {
     const int64_t cam = seed_camera(d.handle());
     const int64_t model = seed_model(d.handle());
 
-    CameraModel cm;
-    cm.camera_id = cam;
-    cm.model_id = model;
-    cm.classes = {ModelClassSelection{1, 0.6f}, ModelClassSelection{3, 0.4f}};
-    REQUIRE(set_camera_models(d.handle(), cam, {cm}));
+    attach_directly(d.handle(), cam, model,
+                    {ModelClassSelection{1, 0.6f}, ModelClassSelection{3, 0.4f}});
 
     const auto got = models_for(d.handle(), cam);
     REQUIRE(got.size() == 1);
@@ -140,40 +165,49 @@ TEST_CASE("set_camera_models + models_for round-trip attachments and classes") {
     REQUIRE(got[0].classes[1].class_id == 3);
 }
 
-TEST_CASE("set_camera_models replaces the previous set") {
+TEST_CASE("set_camera_models clears a camera's attachments") {
     auto d = mem();
     const int64_t cam = seed_camera(d.handle());
     const int64_t model = seed_model(d.handle());
-    CameraModel cm; cm.camera_id = cam; cm.model_id = model;
-    cm.classes = {ModelClassSelection{0, 0.5f}};
-    REQUIRE(set_camera_models(d.handle(), cam, {cm, cm}));
+    attach_directly(d.handle(), cam, model, {ModelClassSelection{0, 0.5f}});
+    attach_directly(d.handle(), cam, model, {ModelClassSelection{0, 0.5f}});
     REQUIRE(models_for(d.handle(), cam).size() == 2);
-    REQUIRE(set_camera_models(d.handle(), cam, {}));
+    // Detaching everything has nothing to judge, so it is allowed in every mode —
+    // the operator must always be able to clear an attachment.
+    REQUIRE(set_camera_models(d.handle(), cam, {}, denso::mode::TargetMode::DigitReader,
+                              empty_view(), kNoPlatform));
     REQUIRE(models_for(d.handle(), cam).empty());
 }
 
-TEST_CASE("detection_for resolves filename + class_names from the model") {
+TEST_CASE("detection_for is fail-closed when no manifest declares the model",
+          "[detection][repo]") {
     auto d = mem();
     const int64_t cam = seed_camera(d.handle());
-    const int64_t model = seed_model(d.handle());
-    CameraModel cm; cm.camera_id = cam; cm.model_id = model;
-    cm.classes = {ModelClassSelection{2, 0.7f}};
-    REQUIRE(set_camera_models(d.handle(), cam, {cm}));
+    const int64_t model = seed_model(d.handle());  // denso.onnx — UNDECLARED
+    attach_directly(d.handle(), cam, model, {ModelClassSelection{2, 0.7f}});
 
-    const auto det = detection_for(d.handle(), cam);
+    // The row exists and joins cleanly, but with no declaration the central policy
+    // rejects it (model_undeclared), so the camera is inhibited AS A WHOLE: no
+    // resolved model reaches the runtime and the caller is told WHY, rather than
+    // being handed an empty set it might mistake for "no detection configured".
+    const auto det = detection_for(d.handle(), cam, denso::mode::TargetMode::DigitReader,
+                                   empty_view(), kNoPlatform);
     REQUIRE(det.camera_id == cam);
-    REQUIRE(det.models.size() == 1);
-    REQUIRE(det.models[0].filename == "denso.onnx");
-    REQUIRE(det.models[0].class_names.size() == 4);
-    REQUIRE(det.models[0].classes.size() == 1);
-    REQUIRE(det.models[0].classes[0].class_id == 2);
-    REQUIRE(det.models[0].classes[0].conf == 0.7f);
+    REQUIRE(det.models.empty());
+    REQUIRE(det.compatibility_rejected);
+    REQUIRE(det.policy_reason == "model_undeclared");
 }
 
-TEST_CASE("detection_for is empty for a camera with no models") {
+TEST_CASE("detection_for is empty and NOT rejected for a camera with no models",
+          "[detection][repo]") {
     auto d = mem();
     const int64_t cam = seed_camera(d.handle());
-    REQUIRE(detection_for(d.handle(), cam).models.empty());
+    const auto det = detection_for(d.handle(), cam, denso::mode::TargetMode::DigitReader,
+                                   empty_view(), kNoPlatform);
+    REQUIRE(det.models.empty());
+    // The distinction that keeps a model-less camera streaming: nothing was
+    // rejected, so the caller still builds its OrientationProcessor.
+    REQUIRE_FALSE(det.compatibility_rejected);
 }
 
 TEST_CASE("attached_model_filenames is empty when no manifest declares the model") {
@@ -190,10 +224,10 @@ TEST_CASE("attached_model_filenames is empty when no manifest declares the model
     const int64_t model = seed_model(d.handle());  // denso.onnx — UNDECLARED
     const int64_t cam1 = seed_camera(d.handle());
     const int64_t cam2 = seed_camera(d.handle());
-    CameraModel a; a.camera_id = cam1; a.model_id = model;
-    CameraModel b; b.camera_id = cam2; b.model_id = model;  // same model, 2 cams
-    REQUIRE(set_camera_models(d.handle(), cam1, {a}));
-    REQUIRE(set_camera_models(d.handle(), cam2, {b}));
+    // Attached directly: set_camera_models would (correctly) refuse an undeclared
+    // model, and the point here is that the READ path excludes it too.
+    attach_directly(d.handle(), cam1, model, {});
+    attach_directly(d.handle(), cam2, model, {});  // same model, 2 cams
 
     // Fail-closed: an undeclared attachment is excluded from the required set in
     // BOTH modes (no manifest → resolve_model_metadata reports it undeclared →

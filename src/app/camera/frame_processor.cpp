@@ -24,6 +24,12 @@ QImage OrientationProcessor::process(const QImage& frame) {
     return apply_orientation(frame, degrees_, pitch_, roll_);
 }
 
+std::atomic<uint64_t> DetectionProcessor::s_constructed_{0};
+
+uint64_t DetectionProcessor::constructed_count() {
+    return s_constructed_.load(std::memory_order_relaxed);
+}
+
 DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
                                        std::vector<ModelRun> models,
                                        std::vector<denso::camera::CameraArea> areas,
@@ -34,6 +40,9 @@ DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
       models_(std::move(models)), areas_(std::move(areas)),
       camera_id_(camera_id), sink_(sink), zone_sink_(zone_sink),
       on_worker_failed_(std::move(on_worker_failed)) {
+    // Monotonic process-lifetime tally (see constructed_count()). relaxed: this is
+    // an observable counter, not an ordering primitive for other state.
+    s_constructed_.fetch_add(1, std::memory_order_relaxed);
     // Start the inference worker LAST, once every member is initialized — the
     // worker reads on_worker_failed_ every frame, so it must be set before start.
     worker_ = std::thread([this] { infer_loop(); });

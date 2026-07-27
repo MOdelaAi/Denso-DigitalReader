@@ -8,6 +8,48 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 using namespace denso::detection;
+
+// These cases are about the MIGRATE transaction, not the compatibility policy.
+// Their fixture engines ("old_a.engine"/"new_b.engine") deliberately have no real
+// identity, so going through set_camera_models / detection_for would put a policy
+// verdict between the test and the migrate logic it exists to check — a
+// compatibility change could then mask a migrate regression, and vice versa. So
+// the attachment is written and read DIRECTLY.
+static void attach_directly(const QSqlDatabase& db, int64_t cam, int64_t model_id,
+                            const std::vector<ModelClassSelection>& cls) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO camera_model (camera_id, model_id) VALUES (?, ?)"));
+    q.addBindValue(static_cast<qlonglong>(cam));
+    q.addBindValue(static_cast<qlonglong>(model_id));
+    REQUIRE(q.exec());
+    const qlonglong cmid = q.lastInsertId().toLongLong();
+    for (const auto& s : cls) {
+        QSqlQuery c(db);
+        c.prepare(QStringLiteral(
+            "INSERT INTO camera_model_class (camera_model_id, class_id, conf) "
+            "VALUES (?, ?, ?)"));
+        c.addBindValue(cmid);
+        c.addBindValue(s.class_id);
+        c.addBindValue(static_cast<double>(s.conf));
+        REQUIRE(c.exec());
+    }
+}
+
+/// The engine filenames a camera is attached to, in attachment order — the raw
+/// join detection_for used to expose before it began enforcing the policy.
+static std::vector<std::string> attached_files(const QSqlDatabase& db, int64_t cam) {
+    std::vector<std::string> out;
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT m.filename FROM camera_model cm JOIN model m ON m.id = cm.model_id "
+        "WHERE cm.camera_id = ? ORDER BY cm.id"));
+    q.addBindValue(static_cast<qlonglong>(cam));
+    REQUIRE(q.exec());
+    while (q.next()) out.push_back(q.value(0).toString().toStdString());
+    return out;
+}
+
 static denso::db::Db seed() {
     auto db = denso::db::Db::open_in_memory();
     REQUIRE(db); REQUIRE(denso::db::run_migrations(db->handle()));
@@ -17,8 +59,7 @@ static denso::db::Db seed() {
                    "VALUES(1,'C1','usb',640,480,15,0,0,0,1,1)"));
     DetectionModel old_m{0,"old","old_a.engine",{"0","1"}};
     auto oid = upsert_model(db->handle(), old_m); REQUIRE(oid);
-    CameraModel cm; cm.camera_id=1; cm.model_id=*oid; cm.classes={{0,0.5f},{1,0.5f}};
-    REQUIRE(set_camera_models(db->handle(), 1, {cm}));
+    attach_directly(db->handle(), 1, *oid, {{0,0.5f},{1,0.5f}});
     return std::move(*db);
 }
 static MigrateRequest ok_req() {
@@ -91,9 +132,7 @@ TEST_CASE("migrate_model swaps the model in one transaction and writes a receipt
     REQUIRE(res.ok);
     REQUIRE(res.affected_cameras == std::vector<int64_t>{1});
 
-    auto det = detection_for(db.handle(), 1);
-    REQUIRE(det.models.size() == 1);
-    REQUIRE(det.models[0].filename == "new_b.engine");
+    REQUIRE(attached_files(db.handle(), 1) == std::vector<std::string>{"new_b.engine"});
 
     QSqlQuery q(db.handle());
     REQUIRE(q.exec("SELECT count(*),old_model_id,new_engine_sha256,attachments "
@@ -112,9 +151,7 @@ TEST_CASE("migrate_model CAS refusal leaves the DB unchanged", "[migrate]") {
     REQUIRE_FALSE(res.ok);
     REQUIRE(res.error.find("2") != std::string::npos);
 
-    auto det = detection_for(db.handle(), 1);
-    REQUIRE(det.models.size() == 1);
-    REQUIRE(det.models[0].filename == "old_a.engine");
+    REQUIRE(attached_files(db.handle(), 1) == std::vector<std::string>{"old_a.engine"});
 
     QSqlQuery q(db.handle());
     REQUIRE(q.exec("SELECT count(*) FROM model_migration_receipt"));
@@ -128,9 +165,7 @@ TEST_CASE("migrate_model refuses an unmapped selected class and leaves the DB un
     auto res = migrate_model(db.handle(), r);
     REQUIRE_FALSE(res.ok);
 
-    auto det = detection_for(db.handle(), 1);
-    REQUIRE(det.models.size() == 1);
-    REQUIRE(det.models[0].filename == "old_a.engine");
+    REQUIRE(attached_files(db.handle(), 1) == std::vector<std::string>{"old_a.engine"});
 
     QSqlQuery q(db.handle());
     REQUIRE(q.exec("SELECT count(*) FROM model_migration_receipt"));
@@ -146,8 +181,7 @@ static void attach_second_camera(const QSqlDatabase& h) {
                    "VALUES(2,'C2','usb',640,480,15,0,0,0,1,1)"));
     auto oid = upsert_model(h, DetectionModel{0,"old","old_a.engine",{"0","1"}});
     REQUIRE(oid);
-    CameraModel cm; cm.camera_id=2; cm.model_id=*oid; cm.classes={{0,0.5f},{1,0.5f}};
-    REQUIRE(set_camera_models(h, 2, {cm}));
+    attach_directly(h, 2, *oid, {{0,0.5f},{1,0.5f}});
 }
 TEST_CASE("migrate_model swaps multiple cameras and records each attachment", "[migrate]") {
     auto db = seed();
@@ -156,8 +190,8 @@ TEST_CASE("migrate_model swaps multiple cameras and records each attachment", "[
     auto res = migrate_model(db.handle(), r);
     REQUIRE(res.ok);
     REQUIRE(res.affected_cameras == std::vector<int64_t>{1, 2});
-    REQUIRE(detection_for(db.handle(), 1).models.at(0).filename == "new_b.engine");
-    REQUIRE(detection_for(db.handle(), 2).models.at(0).filename == "new_b.engine");
+    REQUIRE(attached_files(db.handle(), 1) == std::vector<std::string>{"new_b.engine"});
+    REQUIRE(attached_files(db.handle(), 2) == std::vector<std::string>{"new_b.engine"});
     // One receipt whose attachments array holds both cameras, ids as STRINGS.
     QSqlQuery q(db.handle());
     REQUIRE(q.exec("SELECT attachments FROM model_migration_receipt"));
