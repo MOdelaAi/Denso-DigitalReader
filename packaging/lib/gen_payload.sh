@@ -31,6 +31,8 @@
 #   use : requires a genuine CALL — an occurrence that is neither a definition
 #         nor a type-led `;`-terminated declaration. A forward declaration or an
 #         uncalled dummy definition placed in the file does NOT satisfy it.
+#         A NAMESPACE-QUALIFIED call (`denso::models::symbol(a);`) is a call, not
+#         a declaration — see the `::` rule below.
 # It still cannot see through raw-string literals or macro-built signatures, and
 # textual matching cannot PROVE a symbol is compiled and reached at run time.
 # Its ONLY job is to keep the Slice-5 ordering assertion honest until Slice 7
@@ -63,8 +65,36 @@ if mode == "def":
 # remaining occurrence is an expression-context CALL. A bare `symbol(a);` call
 # statement survives (no type token precedes the symbol); a `Type symbol(a);`
 # declaration and a `symbol(...) { }` definition are removed.
+#
+# `(?<!:)` is load-bearing, not defensive. The statement-start anchor includes a
+# line start (`^` under re.M), because a declaration usually begins a line — but
+# so does the CONTINUATION of a wrapped statement, and a real call reads
+#     std::set<std::string> allow_list =
+#         denso::models::loadable_model_files(mode, metadata);
+# whose second line looks exactly like `<type-ish tokens> symbol(args);`. Without
+# this the qualifier `denso::models::` is swallowed as a "type", the genuine call
+# is stripped as a declaration, and the gate reports the symbol unused — which is
+# precisely how it refused the real tree the first time a Float stem was
+# approved. A declarator name is never preceded by `::`; a qualified call always
+# is. So: a `::` immediately before the symbol means call, not declaration.
+#
+# The two rules below are the exceptions `(?<!:)` and the `^` anchor create, and
+# they are stripped/kept EXPLICITLY rather than left to the general rule:
+#   friend : a `friend void ns::symbol(T);` declaration is a DECLARATION whose
+#            declarator-id IS qualified — the one shape `(?<!:)` would otherwise
+#            wave through as a call. Removed first, so a false POSITIVE (the
+#            dangerous direction for a gate that authorises shipping an engine)
+#            cannot survive.
+#   keyword: `return symbol(a);` at a line start reads as `<type> symbol(a);`
+#            because `return ` is consumed as the type — a false NEGATIVE, which
+#            fails closed but as a baffling refusal. A statement keyword is not a
+#            type, so those starts are excluded from the declaration rule.
 without = defn.sub(" ", src)
-without = re.sub(r"(?:(?<=[;{}])|^)\s*[A-Za-z_][\w:<>,&*\s]*\b" + s + r"\s*\([^;{]*\)\s*;",
+without = re.sub(r"(?:(?<=[;{}])|^)\s*friend\b[\w:<>,&*\s]*\b" + s + r"\s*\([^;{]*\)\s*;",
+                 " ", without, flags=re.M)
+without = re.sub(r"(?:(?<=[;{}])|^)\s*"
+                 r"(?!(?:return|co_return|co_await|co_yield|throw|delete|case|else)\b)"
+                 r"[A-Za-z_][\w:<>,&*\s]*\b(?<!:)" + s + r"\s*\([^;{]*\)\s*;",
                  " ", without, flags=re.M)
 sys.exit(0 if re.search(r"\b" + s + r"\s*\(", without) else 1)
 PY

@@ -4,6 +4,13 @@
 # box. Run from the repo root:
 #
 #   tests/manual/repro_build.sh models/digitv3.engine
+#   tests/manual/repro_build.sh models/digitv3.engine models/float-small.engine \
+#                               models/float-big.engine
+#
+# Pass the model set the release actually ships, in the order it ships them. A
+# gate that only ever rebuilds a single-model package cannot prove the shipped
+# multi-model package is reproducible, and the model set is exactly what the
+# manifest generator turns into bytes.
 #
 # WHY this exists. A clean build's artifacts are named `r<count>.g<sha>` with no
 # content hash, so the NAME is a truthful identifier only if one commit yields
@@ -28,9 +35,16 @@
 # while this gate runs means the restore discards your change.
 set -u
 
-ENGINE="${1-}"
-[ -n "$ENGINE" ] || { echo "usage: $0 <path/to.engine>" >&2; exit 2; }
-[ -f "$ENGINE" ] || { echo "no such engine: $ENGINE" >&2; exit 2; }
+MODEL_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -*) echo "usage: $0 <path/to.engine> [<path/to.engine> ...]" >&2; exit 2 ;;
+    esac
+    [ -f "$1" ] || { echo "no such engine: $1" >&2; exit 2; }
+    MODEL_ARGS+=(--model "$1")
+    shift
+done
+[ "${#MODEL_ARGS[@]}" -gt 0 ] || { echo "usage: $0 <path/to.engine> [<path/to.engine> ...]" >&2; exit 2; }
 [ "$(uname -m)" = "aarch64" ] || { echo "must run on the Jetson (this drives the real build)" >&2; exit 2; }
 
 pass=0; fail=0
@@ -55,7 +69,7 @@ restore() { git checkout -- "$CANARY" 2>/dev/null || true; }
 trap restore EXIT INT TERM
 
 sha_of() { sha256sum "$1" | cut -d' ' -f1; }
-build()  { ./tools/build_package.sh --model "$ENGINE" "$@" >/tmp/repro_build.log 2>&1 \
+build()  { ./tools/build_package.sh "${MODEL_ARGS[@]}" "$@" >/tmp/repro_build.log 2>&1 \
              || { echo "BUILD FAILED — tail of /tmp/repro_build.log:" >&2; tail -20 /tmp/repro_build.log >&2; return 1; }; }
 
 echo "== clean build, twice (dist/ is cleared first; it is git-ignored output)"
@@ -91,7 +105,7 @@ esac
 # door: same r<count>.g<sha> filename, different bytes. It must be refused for
 # a clean build, not silently honoured (the usual reproducible-builds
 # convention is wrong here — the name carries no content hash).
-if SOURCE_DATE_EPOCH=1600000000 ./tools/build_package.sh --model "$ENGINE" >/tmp/repro_override.log 2>&1; then
+if SOURCE_DATE_EPOCH=1600000000 ./tools/build_package.sh "${MODEL_ARGS[@]}" >/tmp/repro_override.log 2>&1; then
     bad "clean: a MISMATCHED SOURCE_DATE_EPOCH is refused"
 else
     grep -q "differs from the commit timestamp" /tmp/repro_override.log \
@@ -99,7 +113,7 @@ else
         || bad "clean: refusal names the cause (see /tmp/repro_override.log)"
 fi
 # ...but a MATCHING override is a no-op, so pinning the value explicitly works.
-if SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" ./tools/build_package.sh --model "$ENGINE" >/dev/null 2>&1; then
+if SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" ./tools/build_package.sh "${MODEL_ARGS[@]}" >/dev/null 2>&1; then
     is "clean: a MATCHING SOURCE_DATE_EPOCH still yields identical bytes" "$(sha_of "$(ls dist/*.deb)")" "$DEB1_SHA"
 else
     bad "clean: a MATCHING SOURCE_DATE_EPOCH is accepted"

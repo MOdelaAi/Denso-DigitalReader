@@ -13,4 +13,15 @@
 # Format: <stem> <sha256-of-.engine> <sha256-of-.names.json> <trtexec recipe used to build it>
 #
 # To approve a new engine: build it on-device, sha256sum both files, add the line.
+#
+# ORDERING RULE (spec 8.7.2): a `float-*` stem may only be approved once the
+# Slice-7 warm-up allow-list exists, because EngineRegistry::warm_up() scans the
+# whole models directory and would otherwise deserialize and run a Ball Leveler
+# engine on a Digital Number Reader appliance at every boot. That rule is
+# MACHINE-ENFORCED by assert_float_seeding_guarded (packaging/lib/gen_payload.sh),
+# which refuses the build if either Float line below is present without a real
+# definition of loadable_model_files in src/core/models/compatibility.cpp AND a
+# real call to it from src/app/ui/startup.cpp. Both exist as of Slice 7.
 digitv3 5247c3f3a70ce1b09b8807b7ed4bb27f7badd972b8628f355baac3ec434cf45a 47538d1023947674faffb92a905429bc9deaa0890f0549d4c1bed1d1a33f9026 trtexec --onnx=digitv3.onnx --saveEngine=digitv3.engine --fp16
+float-small 13aaac93943f82862b75ccb8e65887f7cf2fae52b237c2f93a819b1720459e24 cb7554643e37d6105b0ce54861f665b4b7a954fce8f3c2dcbb15d09262dcabe4 trtexec --onnx=float-small.onnx --saveEngine=float-small.engine --fp16
+float-big b496a0855d82e6ed6873a487d87bd05d21b08686a2991212ec38215aaa64f2ef a675f5e0145a1aa9735b4b59c18b8e30e829e62cf15a62d4f39656ebe238de66 trtexec --onnx=float-big.onnx --saveEngine=float-big.engine --fp16

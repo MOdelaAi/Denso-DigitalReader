@@ -25,6 +25,16 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # an edit to packaging/manifest/digitv3.descriptor.json that changes the output
 # fails the build until the candidate is re-reviewed and this constant updated.
 RELEASE_A_DIGITV3_MANIFEST_SHA256=fb26074d8e618caaf6f8d41737631c4b378aaa9197506aaa05586fc2ee898efd
+# The reviewed Release-B manifest identity: the three-generation payload
+# digitv3 + float-small + float-big, in EXACTLY that order.
+#
+# Order is part of the identity, not an accident: gen_model_manifest.py emits
+# generations in command-line order, so a different --model order is a different
+# manifest with different bytes, and this hash pins only the reviewed order.
+# Passing this same model SET in any other order is therefore REFUSED outright by
+# the gate below — NOT quietly demoted to an unpinned build, which would still cut
+# a valid, installable package whose manifest bytes nobody had reviewed.
+RELEASE_B_MANIFEST_SHA256=24c482045429b91bc2dbccb724752a12615f07a1914b7b263f7a63111fe17e81
 
 MODELS=()
 ALLOW_DIRTY=0
@@ -175,6 +185,40 @@ for m in "${MODELS[@]}"; do
     echo ">> model approved: $stem (engine $got_eng, sidecar $got_side)"
 done
 
+# ── which reviewed manifest identity this model set must reproduce.
+#
+# Decided HERE, before the multi-minute Release build, so a mis-invocation costs
+# seconds. gen_model_manifest.py emits generations in --model order, so the ORDER
+# is part of the manifest bytes and therefore part of the identity: a recognised
+# release cut is pinned only in its reviewed order.
+#
+# The same set in a different order is REFUSED rather than left unpinned. Falling
+# through would have been the quiet failure: it still produces a valid, installable
+# package, but one whose manifest bytes nobody reviewed, with the identity assert
+# silently skipped — exactly the outcome the pin exists to prevent.
+WANT_MANIFEST_SHA="-"
+STEM_SEQ=""
+for m in "${MODELS[@]}"; do STEM_SEQ="$STEM_SEQ $(basename "$m" .engine)"; done
+STEM_SET="$(for m in "${MODELS[@]}"; do basename "$m" .engine; done | LC_ALL=C sort | tr '\n' ' ')"
+case "$STEM_SEQ" in
+    " digitv3")                       WANT_MANIFEST_SHA="$RELEASE_A_DIGITV3_MANIFEST_SHA256" ;;
+    " digitv3 float-small float-big") WANT_MANIFEST_SHA="$RELEASE_B_MANIFEST_SHA256" ;;
+    *)
+        if [ "$STEM_SET" = "digitv3 float-big float-small " ]; then
+            echo "the Release-B model set was passed in a non-reviewed order:$STEM_SEQ" >&2
+            echo "  pass it as: --model <..>/digitv3.engine --model <..>/float-small.engine --model <..>/float-big.engine" >&2
+            echo "  generation order is part of the manifest bytes, so any other order would ship" >&2
+            echo "  a manifest that was never reviewed and skip the identity assert entirely." >&2
+            exit 1
+        fi ;;
+esac
+# A placeholder must never be silently treated as "no hard gate": that would turn
+# an un-reviewed release cut into a passing build. (A SHA-256 is hex, so it can
+# never legitimately contain this substring.)
+case "$WANT_MANIFEST_SHA" in
+    *PENDING*) echo "the pinned manifest hash for model set '$STEM_SEQ' is a placeholder — generate the candidate, review it, and pin the real sha256" >&2; exit 1 ;;
+esac
+
 # ── build
 echo ">> building Release"
 cmake -S . -B build-pkg -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release >/dev/null
@@ -200,13 +244,10 @@ install -m 0644 assets/icon.png                     "$STAGE/usr/share/icons/hico
 # models.approved + SHA256SUMS, all 0644, via the sourceable emitter so its
 # shape is provable off-Jetson. The ordering assertion (no Float approved before
 # the Slice-7 warm-up allow-list exists) runs inside it, BEFORE anything stages.
-# The Release-A single-digitv3 payload is asserted byte-identical to the reviewed
-# manifest candidate; any other/larger model set skips that specific assert (the
-# descriptor's expected hashes + manifest_matches_models_dir still bind it).
-WANT_MANIFEST_SHA="-"
-if [ "${#MODELS[@]}" = "1" ] && [ "$(basename "${MODELS[0]}" .engine)" = "digitv3" ]; then
-    WANT_MANIFEST_SHA="$RELEASE_A_DIGITV3_MANIFEST_SHA256"
-fi
+# A recognised release cut is asserted byte-identical to its reviewed manifest
+# candidate ($WANT_MANIFEST_SHA, decided before the build); any other model set
+# skips that specific assert (the descriptor's expected hashes +
+# manifest_matches_models_dir still bind it).
 echo ">> staging model payload + schema-2 manifest"
 stage_model_payload "$STAGE" "$HERE" packaging/models.approved packaging/manifest \
     "$WANT_MANIFEST_SHA" "${MODELS[@]}" \

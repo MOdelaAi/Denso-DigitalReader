@@ -1,0 +1,50 @@
+{
+  "name": "float-big",
+  "canonical_id": "float-big",
+  "family": "float_ball",
+  "task": "detect",
+  "input_size": 640,
+  "state": "installed",
+  "installed_utc": "2026-07-29T00:00:00Z",
+  "tensorrt": {
+    "expected_engine_sha256": "b496a0855d82e6ed6873a487d87bd05d21b08686a2991212ec38215aaa64f2ef",
+    "expected_sidecar_sha256": "a675f5e0145a1aa9735b4b59c18b8e30e829e62cf15a62d4f39656ebe238de66",
+    "built_for": {
+      "trt": "10.3",
+      "cuda": "12.6",
+      "sm": "87"
+    }
+  },
+  "provenance": {
+    "source_pt": "float-big.pt",
+    "source_pt_sha256": "3cf0a655af70bcaa960cf96e174cffedf1c8ca41d70293fd19a88fe07727c3b1",
+    "onnx": "float-big.onnx",
+    "onnx_sha256": "e34ae396052b6c00d5de381030f35e202adec7126fcbe732a988478a15db393a",
+    "onnx_opset": 13,
+    "training_ultralytics": "8.4.21",
+    "export_ultralytics": "8.4.21",
+    "batch": 1,
+    "dynamic": false,
+    "nms": false,
+    "precision": "fp16",
+    "jetpack": "inferred_from_l4t_r36.5.0",
+    "export_onnx_command": "YOLO(\"float-big.pt\").export(format=\"onnx\", imgsz=640, simplify=True, opset=13)",
+    "export_engine_command": "trtexec --onnx=float-big.onnx --saveEngine=float-big.engine --fp16"
+  },
+  "provenance_evidence": {
+    "source_pt": "float-big.pt, the Ball Leveler big-ball checkpoint named by the Slice-2 export record (denso-artifacts model-mode-compatibility/slice3-ce3ff73/provenance/float-big.provenance.json, key source_pt)",
+    "source_pt_sha256": "measured from the checkpoint at export time and recorded in the Slice-2 export record (float-big.provenance.json, key source_pt_sha256)",
+    "onnx": "float-big.onnx, the artifact the approved trtexec recipe in packaging/models.approved compiles",
+    "onnx_sha256": "measured from float-big.onnx by the Slice-2 exporter (float-big.provenance.json, key onnx_sha256); the Slice-3 build report records the same value as the ONNX it compiled (slice3-engine-build.json entry float-big.engine, key source_onnx_sha256), so the two records describe one artifact chain",
+    "onnx_opset": "measured from the ONNX: actual_onnx_opset = 13 AND actual_onnx_opset_from_args_metadata = 13; opset 13 was requested and Ultralytics kept it (unlike digitv3, which was downgraded to 12)",
+    "training_ultralytics": "float-big.pt checkpoint `version` key = 8.4.21 (float-big.provenance.json, key training_ultralytics)",
+    "export_ultralytics": "float-big.onnx metadata `version` = 8.4.21 (float-big.provenance.json, key export_ultralytics). It differs from float-small's 8.4.33 because this checkpoint was exported on its own training version; the record sets controlled_deviation = false, so no approved deviation was invoked.",
+    "batch": "float-big.onnx metadata batch = 1 and input_shape = [1,3,640,640]",
+    "dynamic": "float-big.onnx metadata args dynamic = False",
+    "nms": "float-big.onnx metadata args nms = False",
+    "precision": "the approved trtexec recipe in packaging/models.approved uses --fp16; the Slice-3 build report records the same flag in exact_trtexec_command for this engine",
+    "jetpack": "INFERENCE, labelled as such: the nvidia-jetpack meta-package is NOT installed on 192.168.1.15; L4T R36.5.0 was measured on the device during the Slice-3 engine build (slice3-engine-build.json, key l4t_version) and is the supported baseline in AGENTS.md/build_package.sh. Same treatment as digitv3.",
+    "export_onnx_command": "the export call recorded verbatim by the Slice-2 exporter (float-big.provenance.json, key export_command)",
+    "export_engine_command": "verbatim from the float-big line of packaging/models.approved; slice3-engine-build.json entry float-big.engine records exact_trtexec_command as /usr/src/tensorrt/bin/trtexec with these same arguments (cwd the models directory) and build_exit_code 0"
+  }
+}

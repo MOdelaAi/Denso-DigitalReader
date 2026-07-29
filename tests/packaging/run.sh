@@ -680,9 +680,239 @@ printf 'void launch(){ auto a = loadable_model_files(m,mode,v); (void)a; }\n' > 
 # (28) removing the Float approval -> passes regardless of the symbol
 assert_float_seeding_guarded "$M/models.approved" "$ORD/root" >/dev/null 2>&1
 rc_is "slice5: no Float approved -> ordering assertion passes" $? 0
-# and the REAL committed tree (digitv3-only approval) passes trivially
+
+# ── Slice 12 — the ordering assertion is now LOAD-BEARING on the real tree.
+# Release A's counterpart here asserted that the committed models.approved
+# approved no Float stem and so passed the assertion trivially. As of the
+# Release B artifact cut both Float stems ARE approved, so the same call passes
+# for a substantive reason: the Slice-7 allow-list really is defined and really
+# is called from startup. Both halves are pinned — that the approvals exist, and
+# that they would be REFUSED against a tree without the symbol.
+
+# First, the call shape the REAL startup.cpp uses: namespace-qualified, on the
+# continuation line of a wrapped assignment. At a line start that reads exactly
+# like `<type tokens> symbol(args);` — the declaration shape — and it is a CALL.
+# This is the case that made the gate refuse the real tree the first time a Float
+# stem was approved, so it is pinned here in both directions.
+cat > "$ORD/root/src/app/ui/startup.cpp" <<'EOF'
+void launch() {
+    std::set<std::string> allow_list =
+        denso::models::loadable_model_files(mode, metadata);
+    (void)allow_list;
+}
+EOF
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice12: a namespace-qualified call on a wrapped line satisfies 'use'" $? 0
+# ...and the declaration rule is NOT weakened by that: a declarator name is
+# preceded by whitespace, never by '::', so a wrapped bare declaration is still
+# stripped and still fails.
+cat > "$ORD/root/src/app/ui/startup.cpp" <<'EOF'
+void launch() { }
+std::set<std::string>
+    loadable_model_files(denso::models::TargetMode m);
+EOF
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice12: a wrapped bare DECLARATION still does NOT satisfy 'use'" $? 1
+# The one DECLARATION whose declarator-id is legitimately qualified. Admitting it
+# as a call is the dangerous direction — it would authorise shipping a Float
+# engine on the strength of a declaration that calls nothing.
+cat > "$ORD/root/src/app/ui/startup.cpp" <<'EOF'
+class C {
+    friend void denso::models::loadable_model_files(TargetMode);
+};
+void launch() { }
+EOF
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice12: a QUALIFIED friend declaration does NOT satisfy 'use'" $? 1
+# ...and a statement keyword is not a type: `return symbol(a);` is a call. (Left
+# unhandled this fails closed, but as a refusal nobody could diagnose.) The BARE
+# form is the discriminating one — it flips if `return` is dropped from the
+# keyword exclusion. The qualified form is covered by `(?<!:)` either way, so it
+# is general coverage of the return shape, not proof of the exclusion.
+printf 'std::set<std::string> launch(){ return denso::models::loadable_model_files(m,v); }\n' \
+    > "$ORD/root/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice12: a qualified call in a return statement satisfies 'use'" $? 0
+printf 'std::set<std::string> launch(){ return loadable_model_files(m,v); }\n' \
+    > "$ORD/root/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice12: a bare call in a return statement satisfies 'use'" $? 0
+
+RBAPPR="$(awk 'NF && $1 !~ /^#/ && $1 ~ /^float-/ { print $1 }' "$REPO/packaging/models.approved" | LC_ALL=C sort | tr '\n' ',')"
+is "slice12: the committed models.approved approves both Float stems" "$RBAPPR" "float-big,float-small,"
+# EXACTLY these three — not "at least". An extra approved stem, or a lost
+# digitv3 row, is a change to what may be seeded and must fail this cut.
+RBALL="$(awk 'NF && $1 !~ /^#/ { print $1 }' "$REPO/packaging/models.approved" | LC_ALL=C sort | tr '\n' ',')"
+is "slice12: the committed models.approved approves EXACTLY the three release stems" \
+   "$RBALL" "digitv3,float-big,float-small,"
 assert_float_seeding_guarded "$REPO/packaging/models.approved" "$REPO" >/dev/null 2>&1
-rc_is "slice5: the committed digitv3-only models.approved passes the ordering assertion" $? 0
+rc_is "slice12: the committed Float-approved models.approved passes against the real tree" $? 0
+# ...and it passes ONLY because of the symbol. Same file, a tree whose
+# compatibility.cpp/startup.cpp exist but define/call nothing -> refusal.
+mkdir -p "$ORD/bare/src/core/models" "$ORD/bare/src/app/ui"
+printf 'int unrelated(){ return 0; }\n' > "$ORD/bare/src/core/models/compatibility.cpp"
+printf 'void launch(){ }\n'             > "$ORD/bare/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$REPO/packaging/models.approved" "$ORD/bare" >/dev/null 2>&1
+rc_is "slice12: the committed models.approved is REFUSED against a tree lacking the allow-list" $? 1
+
+# ── Slice 12 — the Release B payload: three approved pairs, three generations.
+# Fixture bytes, real descriptors' shape, the REAL repo root (so the ordering
+# assertion runs against the tree that must authorise this cut).
+RB="$T/slice12"; mkdir -p "$RB/src" "$RB/desc" "$RB/stage" "$RB/stage2"
+: > "$RB/models.approved"
+for s in digitv3 float-small float-big; do
+    case "$s" in
+        digitv3)     names='["0","1","2","3","4","5","6","7","8","9"]'; fam=digit_numeric ;;
+        float-small) names='["Small"]'; fam=float_ball ;;
+        float-big)   names='["Big"]';   fam=float_ball ;;
+    esac
+    printf 'FAKE-ENGINE-BYTES-%s-not-a-real-plan' "$s" > "$RB/src/$s.engine"
+    printf '%s' "$names" > "$RB/src/$s.names.json"
+    reh="$(sha256sum "$RB/src/$s.engine" | cut -d' ' -f1)"
+    rsh="$(sha256sum "$RB/src/$s.names.json" | cut -d' ' -f1)"
+    printf '%s %s %s trtexec --onnx=%s.onnx --saveEngine=%s.engine --fp16\n' \
+           "$s" "$reh" "$rsh" "$s" "$s" >> "$RB/models.approved"
+    python3 - "$RB/desc/$s.descriptor.json" "$s" "$fam" "$reh" "$rsh" <<'PY'
+import json, sys
+p, name, fam, eh, sh = sys.argv[1:6]
+json.dump({
+    "name": name, "canonical_id": name, "family": fam,
+    "task": "detect", "input_size": 640, "state": "installed",
+    "installed_utc": "2026-07-29T00:00:00Z",
+    "tensorrt": {"expected_engine_sha256": eh, "expected_sidecar_sha256": sh,
+                 "built_for": {"trt": "10.3", "cuda": "12.6", "sm": "87"}},
+    "provenance": {"source_pt_sha256": "0"*64, "onnx_sha256": "1"*64,
+                   "export_ultralytics": "8.4.33", "precision": "fp16",
+                   "export_engine_command":
+                       "trtexec --onnx=%s.onnx --saveEngine=%s.engine --fp16" % (name, name)},
+    "provenance_evidence": {"source_pt_sha256": "fixture", "onnx_sha256": "fixture",
+                            "export_ultralytics": "fixture", "precision": "fixture",
+                            "export_engine_command": "fixture"},
+}, open(p, "w"), indent=2)
+PY
+done
+
+# The canonical Release-B order: digitv3 first, then small, then big. Generation
+# order follows this argument order and is part of the manifest's identity.
+stage_model_payload "$RB/stage" "$REPO" "$RB/models.approved" "$RB/desc" "-" \
+    "$RB/src/digitv3.engine" "$RB/src/float-small.engine" "$RB/src/float-big.engine" >/dev/null 2>&1
+rc_is "slice12: stage_model_payload succeeds for the three-model Release B set" $? 0
+RD="$RB/stage/opt/denso"
+
+is "slice12: the manifest declares exactly three generations, in cut order" \
+   "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print(",".join(g["canonical_id"] for g in d["generations"]))' "$RD/lib/manifest.json")" \
+   "digitv3,float-small,float-big"
+python3 - "$REPO" "$RD/lib/manifest.json" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/tools")
+import gen_model_manifest as g
+g.validate_manifest_object(json.load(open(sys.argv[2], encoding="utf-8")))
+PY
+rc_is "slice12: the three-generation manifest parses and validates" $? 0
+
+# Every approved pair is really in the payload, engine AND sidecar.
+RBMISS=""
+for s in digitv3 float-small float-big; do
+    [ -f "$RD/models/$s.engine" ]     || RBMISS="$RBMISS $s.engine"
+    [ -f "$RD/models/$s.names.json" ] || RBMISS="$RBMISS $s.names.json"
+done
+is "slice12: all three engine/sidecar pairs are staged" "$RBMISS" ""
+is "slice12: the payload holds exactly six model files" \
+   "$(find "$RD/models" -type f | wc -l | tr -d ' ')" "6"
+( cd "$RD" && sha256sum -c lib/SHA256SUMS >/dev/null 2>&1 ) \
+    && ok "slice12: SHA256SUMS -c passes over the three-model payload" \
+    || bad "slice12: SHA256SUMS -c passes over the three-model payload"
+manifest_matches_models_dir "$RD/lib/manifest.json" "$RD/models" >/dev/null 2>&1
+rc_is "slice12: the manifest declares exactly the three staged pairs" $? 0
+
+# built_for is NORMALISED major.minor, for EVERY generation.
+#
+# This is the Slice-12 hard prerequisite, and it is a correctness rule, not a
+# style one. The Slice-7 runtime platform provider (src/app/platform) reports
+# trt=10.3 / cuda=12.6 / sm=87 on the appliance, and the compatibility policy
+# compares built_for against it EXACTLY. The archived Slice-4 Float descriptors
+# declared the full versions 10.3.0.30 / 12.6.68 / 87, which can never match —
+# a Float engine declared that way is permanently unloadable while every hash
+# and signature still looks correct. digitv3 already used the normalised form.
+is "slice12: every staged generation declares the normalised built_for" \
+   "$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+print(",".join("%s=%s/%s/%s" % (g["canonical_id"],
+      g["runtime"]["tensorrt"]["built_for"]["trt"],
+      g["runtime"]["tensorrt"]["built_for"]["cuda"],
+      g["runtime"]["tensorrt"]["built_for"]["sm"]) for g in d["generations"]))' "$RD/lib/manifest.json")" \
+   "digitv3=10.3/12.6/87,float-small=10.3/12.6/87,float-big=10.3/12.6/87"
+# ...and the COMMITTED descriptors, not just the fixture, carry that same form.
+is "slice12: the committed descriptors declare the normalised built_for" \
+   "$(python3 -c '
+import json,sys
+out=[]
+for n in ("digitv3","float-small","float-big"):
+    b=json.load(open(sys.argv[1]+"/packaging/manifest/"+n+".descriptor.json",encoding="utf-8"))["tensorrt"]["built_for"]
+    out.append("%s=%s/%s/%s" % (n,b["trt"],b["cuda"],b["sm"]))
+print(",".join(out))' "$REPO")" \
+   "digitv3=10.3/12.6/87,float-small=10.3/12.6/87,float-big=10.3/12.6/87"
+
+# Float artifacts are now expected — ONNX, PyTorch checkpoints and staging dirs
+# are not, and never become expected. The Linux app catalogs *.engine only.
+is "slice12: no .onnx anywhere in the Release B payload" \
+   "$(find "$RB/stage" -iname '*.onnx' | wc -l | tr -d ' ')" "0"
+is "slice12: no .pt anywhere in the Release B payload" \
+   "$(find "$RB/stage" -iname '*.pt' | wc -l | tr -d ' ')" "0"
+is "slice12: no staging directory under opt/denso" \
+   "$(find "$RD" -type d -iname '*stag*' | wc -l | tr -d ' ')" "0"
+grep -q 'allowed_modes' "$RD/lib/manifest.json" \
+    && bad "slice12: no allowed_modes in the three-generation manifest" \
+    || ok "slice12: no allowed_modes in the three-generation manifest"
+
+case "$(uname -s 2>/dev/null)" in
+    Linux)
+        RBMODES=""
+        for f in models/digitv3.engine models/digitv3.names.json \
+                 models/float-small.engine models/float-small.names.json \
+                 models/float-big.engine models/float-big.names.json \
+                 lib/manifest.json lib/models.approved lib/SHA256SUMS; do
+            [ "$(stat -c %a "$RD/$f")" = "644" ] || RBMODES="$RBMODES $f=$(stat -c %a "$RD/$f")"
+        done
+        is "slice12: every Release B payload file is mode 0644" "$RBMODES" "" ;;
+    *) echo "skip - slice12: payload file modes (POSIX bits not modelled on $(uname -s 2>/dev/null || echo unknown))" ;;
+esac
+
+stage_model_payload "$RB/stage2" "$REPO" "$RB/models.approved" "$RB/desc" "-" \
+    "$RB/src/digitv3.engine" "$RB/src/float-small.engine" "$RB/src/float-big.engine" >/dev/null 2>&1
+# Assert the SECOND staging succeeded before comparing: otherwise a missing or
+# truncated second output reports as a mere "not reproducible" hash mismatch and
+# the real failure (staging broke) is never named.
+rc_is "slice12: the second Release B staging succeeds" $? 0
+is "slice12: the three-generation manifest is byte-reproducible" \
+   "$(sha256sum < "$RD/lib/manifest.json")" "$(sha256sum < "$RB/stage2/opt/denso/lib/manifest.json")"
+is "slice12: the three-model SHA256SUMS is byte-reproducible" \
+   "$(sha256sum < "$RD/lib/SHA256SUMS")" "$(sha256sum < "$RB/stage2/opt/denso/lib/SHA256SUMS")"
+
+# Refusals that still hold now that Float is approved: an unpaired Float engine,
+# and a Float engine that is NOT in models.approved. Both must stop the build —
+# approving the family must not soften the pair rule or the approval rule.
+mkdir -p "$RB/nosidecar" "$RB/stage3" "$RB/stage4"
+cp "$RB/src/float-big.engine" "$RB/nosidecar/float-big.engine"
+stage_model_payload "$RB/stage3" "$REPO" "$RB/models.approved" "$RB/desc" "-" \
+    "$RB/nosidecar/float-big.engine" >"$RB/stage3.out" 2>&1
+rc_is "slice12: a Float engine with no sidecar is REFUSED" $? 1
+# ...and the exit status alone is not the evidence: assert the REASON, so an
+# incidental earlier failure cannot pass as the pair rule doing its job.
+grep -q 'float-big has no sidecar' "$RB/stage3.out" \
+    && ok "slice12: the no-sidecar refusal names the missing sidecar" \
+    || bad "slice12: the no-sidecar refusal names the missing sidecar"
+grep -v '^float-big ' "$RB/models.approved" > "$RB/models.approved.nobig"
+stage_model_payload "$RB/stage4" "$REPO" "$RB/models.approved.nobig" "$RB/desc" "-" \
+    "$RB/src/digitv3.engine" "$RB/src/float-big.engine" >"$RB/stage4.out" 2>&1
+rc_is "slice12: an unapproved Float stem is REFUSED even though the family is approved" $? 1
+grep -q 'float-big is not in models.approved' "$RB/stage4.out" \
+    && ok "slice12: the unapproved-stem refusal names the approval rule" \
+    || bad "slice12: the unapproved-stem refusal names the approval rule"
+# Neither refusal may leave the rejected pair staged.
+is "slice12: a refused Float engine is not left in the payload" \
+   "$(find "$RB/stage3" "$RB/stage4" -name 'float-big.*' 2>/dev/null | wc -l | tr -d ' ')" "0"
 
 # ── seed-manifest decision (every branch) + the atomic write mechanics.
 SM="$T/seedm"; mkdir -p "$SM/pkg" "$SM/data"
