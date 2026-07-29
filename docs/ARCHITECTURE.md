@@ -221,9 +221,9 @@ database pass as a fresh install.
 ## Packaging & ship pipeline (`packaging/`, `tools/`)
 
 Not CMake targets: POSIX shell, so they are proven by their own harnesses rather
-than ctest — `tests/packaging/run.sh` (130 assertions natively, 124 under MSYS2:
-the file-mode ones are Linux-only) and, Jetson-only, `tests/manual/repro_build.sh`
-(19). AGENTS.md holds the operator runbook and the derived-dependency rules;
+than ctest — `tests/packaging/run.sh` (216 assertions natively on the Jetson; the
+file-mode ones are Linux-only and skip elsewhere) and, Jetson-only,
+`tests/manual/repro_build.sh` (19). AGENTS.md holds the operator runbook and the derived-dependency rules;
 README.md holds the copy-paste install. This section is the *why*.
 
 | Path | Role |
@@ -837,6 +837,223 @@ provider DLLs and every `models/*.onnx` are copied beside the exe by a
 `POST_BUILD` step; the GPU provider DLLs come from the git-ignored
 `third_party/gpu_ep/` (see `docs/GPU_SETUP.md`), and a missing GPU stack silently
 degrades to the CPU provider.
+
+## Model / operating-mode compatibility
+
+Which model may be loaded, selected and attached in which operating mode. The
+maintainer/operator contract — the matrix, the manifest format, every reason
+code, how to add a model — is **`docs/MODEL_COMPATIBILITY.md`**. This section is
+the *architecture*: the seams, the direction of the data flow, and why the pieces
+are separated the way they are.
+
+### Declaration vs corroboration vs authorization
+
+Three questions, three owners, deliberately never merged:
+
+| Question | Owner | Notes |
+|---|---|---|
+| *What is this artifact?* — **declaration** | schema-2 `manifest.json` | identity is declared, never inferred from a filename or class signature |
+| *Is the artifact on disk actually that?* — **corroboration** | `models::resolve_model_metadata` | SHA-256 over the active backend's files, ordered class names/count, and (TensorRT only) the platform triple |
+| *May that thing run in this mode?* — **authorization** | `models::model_compatibility` | one compiled policy, `src/core/models/compatibility.cpp` |
+
+The separation is what makes the models directory safe to hand to an operator.
+Because the manifest states only *what an artifact is* and carries no
+`allowed_modes` field to parse into, editing a file there can **narrow** what is
+authorized (a hash stops matching) but can never **widen** it. Widening requires
+recompiling the registry.
+
+The registry itself is two `constexpr` tables (family→modes, canonical id→family)
+with compile-time invariants: every family allows ≥1 mode, **no family allows
+both modes**, and every model's family is registered. `CompatibilityResult`
+default-constructs to a rejection, so a path that forgets to assign a verdict
+denies rather than permits.
+
+### The `ManifestView` backend boundary
+
+`ManifestView` (`src/core/models/model_identity.h`) binds a parsed manifest, a
+models directory, and a **backend fixed at construction**. The production
+constructor binds `active_backend()` — the one compile-time platform split that
+decides which backend's manifest block is read, mirroring the `BackendEngine`
+alias split in `engine_registry.h`; the explicit-`Backend` constructor is a test
+seam so both platforms' resolution is exercised off-host.
+
+This is why no enforcement API takes a `Backend` parameter. The backend is
+resolved *away* at `resolve_model_metadata`, which yields a `ModelMetadata` for
+the active backend only. `model_compatibility` therefore never sees a backend at
+all and is a pure function of mode + identity — the property that makes a
+TensorRT `built_for` mismatch structurally incapable of rejecting an ONNX Runtime
+deployment (`built_for` lives only inside `runtime.tensorrt`, which the ONNX path
+never reads).
+
+Symmetrically, `denso_core` never probes the device: `PlatformInfo` is supplied by
+the caller from the one application-layer provider,
+`platform::measured_platform_info()`, which probes **and normalizes** exactly
+once. A probe failure yields an *empty* `PlatformInfo`, never a substituted
+constant — empty corroborates no `built_for`, so nothing is authorized.
+
+### Central-policy data flow
+
+```text
+catalog row (DB)  ─┐
+manifest.json  ────┼─> resolve_model_metadata ─> ModelMetadata ─> model_compatibility ─> verdict
+PlatformInfo   ────┘   (per ACTIVE backend)      (identity +       (mode + identity)     + reason
+                                                  corroboration)
+```
+
+Five production paths consume that verdict, and **all five call the same
+function**:
+
+1. **warm-up allow-list** — `loadable_model_files` → `EngineRegistry`'s
+   `allow_list`;
+2. **mode-filtered fail-loud required set** — `detection::attached_model_filenames`
+   (`try_attached_model_filenames` for `--check`, which must distinguish "no
+   attachments" from "query failed");
+3. **selectable-model list** — `detection::selectable_models`;
+4. **attachment write + runtime resolution** — `detection::set_camera_models` and
+   `detection::detection_for`;
+5. **boot / integrity** — `health::evaluate_integrity`, shared by GUI boot, the
+   live grid and `--check`.
+
+`mode`, `view` and `platform` are **non-defaulted** on every one of them, so a
+forgotten call site fails to compile rather than silently authorizing. `startup.cpp`
+resolves the three inputs **once** and reuses them for both the readiness verdict
+and the warm-up firewall — the set of models the appliance may *load* and the set
+it reports as *rejected* are then two readings of the same facts and cannot drift.
+
+### The warm-up firewall
+
+`EngineRegistry::warm_up()` scans the models directory and would otherwise
+deserialize every runtime artifact it finds, attachment or not. The allow-list
+turns that scan into a filter: a file not in it is **skipped** — never `get()`-ed,
+never deserialized, never warmed — with one informational line carrying the
+directory-entry name verbatim (a filesystem name, not a database column, so no
+sanitizer is applied there; the DB-controlled diagnostic paths below do reduce).
+`get()` called for a filename outside the allow-list **throws**: reaching it means
+a caller bypassed the policy, and failing loud beats quietly running a rejected
+plan. There is no default allow-list.
+
+This is what makes an **idle wrong-mode artifact a normal state** rather than a
+fault: declared, valid, unattached and wrong-mode, it is skipped by warm-up,
+absent from the required set, produces no camera issue, and leaves the appliance
+**Ready / exit 0**. A `digit_reader` appliance carries all three packaged model
+pairs and loads only `digitv3`.
+
+### Camera-scoped inhibition
+
+A rejected **attached** model is a per-camera fault, never a whole-machine one.
+`evaluate_integrity` emits `ZoneIssue{ModelCompatibilityRejected}` with the real
+`camera_id` and the policy's verbatim reason → **Degraded / exit 10**, not
+Blocked / 78. `CameraGrid` installs `ZoneCause::ModelUnavailable` before the
+camera can publish, and `start_one` refuses the camera outright: no
+`DetectionProcessor`, no `engines_->get()`, tile Offline, siblings unaffected.
+
+Two design points that are easy to get wrong and are load-bearing here:
+
+- **No new `ZoneCause` bit.** To a camera, "model rejected by policy" and "engine
+  missing from disk" are the same thing — it has no usable model — so the existing
+  `ModelUnavailable` bit is reused. The cause bitmask is a file format; the
+  distinct diagnosis survives in the issue's reason code and detail.
+- **All-or-nothing per camera.** `detection_for` returns an **empty** model set
+  with `compatibility_rejected`, never the allowed subset, and `set_camera_models`
+  refuses a mixed set inside the transaction. Running a camera on the surviving
+  half of an attachment set the operator did not choose would silently change what
+  that camera measures — and a demotion to orientation-only would look healthy
+  while reading nothing.
+
+### UI filtering
+
+The unfiltered catalog (`detection::list_models`) is never rendered by a selection
+surface; `selectable_models` is. It returns each allowed row **paired with its
+resolved metadata** as one value (not two containers indexed in step), in catalog
+order, rejected entries **absent** — not greyed, not annotated. Fail-closed: an
+absent/schema-1/invalid manifest declares nothing, so the list is empty; it never
+falls back to the raw catalog.
+
+Absence creates one hazard the wizard must handle explicitly: a model a camera is
+*attached* to but that is no longer offered cannot be carried by the page's
+selection set, so a plain save would **detach** it — converting a diagnosable,
+inhibited camera into an apparently-healthy camera with no model. It cannot simply
+be preserved either, since `set_camera_models` refuses any set containing a
+rejected model. So `CameraWizardController` recomputes the hidden set from the same
+three inputs the page was given, names exactly what will be removed, and writes
+nothing if the operator declines.
+
+Mode always comes from the **committed** database value (`mode::load(db)`), never
+the settings-page selector, which may hold an unapplied choice.
+
+### Package artifact-placement sequence
+
+The manifest is load-bearing — without it nothing is selectable or loadable — but
+packaging cannot deliver it as an upgrade side effect: `postinst` is structural by
+design (it creates the `/opt/denso/data/models` and `install-state` skeleton and
+chmods the latter — no ownership, no artifact), and the `.deb` payload contains no
+file under `/opt/denso/data`. Shipping enforcement and the manifest together would
+install enforcing code onto an appliance with no manifest and inhibit every
+camera. Hence the ordering:
+
+```text
+Release A   schema-2 support + a declaration for the EXISTING digitv3
+            + seed-manifest + verify that changes nothing under models/
+            (NOT globally read-only).             NO Float artifact.
+   ↓        (no application behaviour change)
+Gate A      upgrade rehearsal on the Jetson — blocking
+   ↓
+Release B   the policy, then the warm-up firewall, then camera-scoped
+            enforcement, UI filtering, on-device validation …
+   ↓
+Slice 12    the FIRST package carrying Float artifacts
+```
+
+The firewall had to exist before Float placement, because a Float engine in the
+models directory during Release A would have been deserialized and run on a Digital
+Number Reader appliance at every boot. The ordering is **machine-enforced** by
+`assert_float_seeding_guarded` (`packaging/lib/gen_payload.sh`), which refuses the
+build if a `float-*` stem is approved without a real `loadable_model_files` and a
+real call to it from `startup.cpp`.
+
+Placement itself is two-stage and stays inside the existing ownership split: the
+package stages the approved pairs into **`/opt/denso/models`** with the generated
+manifest, `models.approved` and `SHA256SUMS` in `/opt/denso/lib`; `denso-setup
+configure` seeds them pair-wise, as the target user, into the operator-owned
+**`/opt/denso/data/models`**, which is where the app reads them.
+`seed-manifest` places `manifest.json` and nothing else — explicit,
+manifest-only, atomic, idempotent, canonical-equivalence-accepting, and never a
+model replacement. `verify` only observes: no `--repair` exists and it changes
+nothing under `models/` — though it is **not** globally read-only, since it
+retains its pre-existing DB-backup write outside `models/`.
+
+### Status and reason output
+
+Both vocabularies reaching `status.json` are **file formats**: never rename, reuse
+or renumber, only add.
+
+- `health::reason_code(ZoneIssue::Kind)` → `model_compatibility_rejected` for a
+  policy refusal, alongside the existing `engine_missing` /
+  `engines_unmanifested`.
+- The issue additionally carries `policy_reason` — the central policy's own code,
+  verbatim, from the fixed first-failure-wins order (`model_undeclared` →
+  `model_unknown_id` → `model_family_mismatch` → `model_shape_unsupported` →
+  `model_classes_mismatch` → `model_provenance_failed` →
+  `model_mode_incompatible`).
+
+The kind is deliberately *not* named after the wrong-mode branch: it covers all
+seven refusals, and naming it `ModelModeIncompatible` would make six other faults
+describe themselves as a mode problem and send an operator hunting for a mode
+switch that never happened. Only a genuine valid wrong-mode model reports
+`model_mode_incompatible`. Diagnostics are redaction-safe: a database-controlled
+filename is reduced by `models::diagnostic_filename` (a fail-closed allow-list) and
+paired with the catalog row id, so an unprintable name is still identifiable.
+
+### Current Ball Leveler lock
+
+The compatibility layer for `ball_leveler` is complete — the mode persists, the
+policy authorizes `float_ball` models for it, and the package ships their
+artifacts. The **application feature is not implemented**: no production Leveler
+wizard, `CameraStream`, `DetectionProcessor`, `ZoneHealth` wiring or reporter is
+constructed, `mode_setup_required` stays permanently true, and no ball position,
+percentage, calibration or final level-result algorithm exists anywhere in the
+tree. Packaged, declared, authorizable artifacts are not a shipped feature;
+unlocking it requires a new approved design and plan.
 
 ## Reading log
 

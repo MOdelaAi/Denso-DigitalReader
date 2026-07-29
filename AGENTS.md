@@ -83,6 +83,48 @@ TRT engine on first run. Warm-up stays off the capture/GUI threads.
 `models/*.engine`, TRT caches, and the local ONNX Runtime drop-in are **not**
 repo artifacts.
 
+## Model / operating-mode compatibility — agent constraints
+
+**Read [`docs/MODEL_COMPATIBILITY.md`](docs/MODEL_COMPATIBILITY.md) BEFORE any
+model-related change** — manifest, policy, enforcement, packaging approval or
+mode gating. It is the contract; this section is the short list of things that
+will be rejected in review.
+
+- **Never duplicate the family→mode matrix.** It exists only in
+  `src/core/models/compatibility.cpp`. Do not copy it into a manifest, a SQL
+  `WHERE`, a UI condition, a shell script, a test fixture that then gets used as
+  policy, or a second document consumed by code. The table in
+  `docs/MODEL_COMPATIBILITY.md` is prose for humans and nothing may read it.
+- **Use the central APIs across all five enforcement paths** — warm-up allow-list
+  (`models::loadable_model_files`), required set
+  (`detection::attached_model_filenames`), selection
+  (`detection::selectable_models`), attachment/resolution
+  (`detection::set_camera_models` / `detection::detection_for`), and integrity
+  (`health::evaluate_integrity`). A new path that re-derives compatibility is a
+  second authority; add a caller of the policy instead.
+- **No default `mode` / `ManifestView` / `PlatformInfo` parameters on safety
+  APIs.** A defaulted argument lets a forgotten call site silently authorize. A
+  forgotten call site must fail to **compile**.
+- **Never `git add .` or `git add -A`** in this repo. `models/` is git-ignored by
+  pattern and a stray 38 MB model has been swept in before. Stage explicit paths,
+  and never stage `*.engine`, `*.onnx`, `*.pt`, `*.names.json`, `*.deb`, or the
+  pre-existing untracked `packaging/denso-digitalreader.service`.
+- **Never access `192.168.1.81`.** It is reserved for the user's manual `.deb`
+  testing. No automated or remote step may contact, configure or reference it.
+- **Use `192.168.1.15` for all Jetson validation** — builds, `ctest`,
+  `tests/packaging/run.sh`, `tests/manual/repro_build.sh`, package inspection.
+  Anything needing `sm_87`, real TensorRT or NVDEC can only be proven there.
+- **Do not unlock Ball Leveler without a new approved plan.** No Leveler wizard,
+  production `CameraStream`, `DetectionProcessor`, `ZoneHealth` wiring or
+  reporter, and no ball position / percentage / calibration / level-result
+  algorithm. The mode persisting and the policy authorizing Float models is
+  **not** permission to build the feature.
+- **Never expose credentials or credential-bearing URLs** in logs, `status.json`,
+  diagnostics, evidence files, specs or commits. Reuse
+  `logging/redact.cpp::sanitize_url`; for catalog filenames reaching a diagnostic,
+  reuse `models::diagnostic_filename` (a fail-closed allow-list) — do not write a
+  third redactor.
+
 ## Camera capture (`gst_pipeline.cpp` + `camera_stream.cpp`)
 
 RTSP uses **hardware NVDEC** GStreamer pipelines:
@@ -159,10 +201,10 @@ MANIFEST's `ldd` output** — that one alone re-randomized the .deb on every
 build and is invisible, since only the hex changes.
 
 **Testing this tree** — it is shell, so **`ctest` does not cover it**:
-`tests/packaging/run.sh` (130 assertions natively; 124 on MSYS2, where the
-file-mode ones are skipped) is the harness to run for *any* packaging change, and
-`tests/manual/repro_build.sh <engine>` is the Jetson-only reproducibility gate
-(19). The latter must run **exclusively**: it refuses a dirty tree, then makes and
+`tests/packaging/run.sh` (216 assertions natively on the Jetson; the file-mode
+ones are Linux-only and skip elsewhere) is the harness to run for *any* packaging
+change, and `tests/manual/repro_build.sh <engine>...` is the Jetson-only
+reproducibility gate (19). The latter must run **exclusively**: it refuses a dirty tree, then makes and
 reverts its own edits to `packaging/lib/policy.sh`, so a concurrent edit to that
 file is discarded by its restore. Design rationale for all of the above is
 **Packaging & ship pipeline** in `docs/ARCHITECTURE.md`.

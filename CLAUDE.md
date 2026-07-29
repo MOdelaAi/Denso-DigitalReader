@@ -77,7 +77,7 @@ Two trees sit **outside** the CMake graph and so outside `ctest`:
 | Path | Role |
 |---|---|
 | `packaging/`, `tools/` | The POSIX-shell `.deb` ship pipeline: `tools/build_package.sh` (the whole build), `packaging/lib/` (`policy.sh` = the one JetPack-damage rule + the `gen_preflight.sh`/`gen_bundle.sh` emitters), `packaging/denso-setup`, `packaging/debian/`. |
-| `tests/packaging/`, `tests/manual/` | Their harnesses: `run.sh` (130 assertions natively, 124 on MSYS2 — file modes are Linux-only) and the Jetson-only `repro_build.sh` (proves clean builds are byte-reproducible). |
+| `tests/packaging/`, `tests/manual/` | Their harnesses: `run.sh` (216 assertions natively on the Jetson; the file-mode ones are Linux-only and skip elsewhere) and the Jetson-only `repro_build.sh` (19 — proves clean builds are byte-reproducible). |
 
 Run `tests/packaging/run.sh` for any packaging change — a green `ctest` says
 nothing about that tree. See **Packaging & ship pipeline** in
@@ -207,6 +207,66 @@ finish warming**. Warm-up never lands on a capture thread.
 `models/*.engine`, `models/*.names.json` and `models/trt_cache/` are git-ignored:
 a sidecar is generated on-device beside its engine and is exactly as
 device-specific as it is.
+
+## Model / operating-mode compatibility
+
+Which model may load in which mode. **Full reference:
+[`docs/MODEL_COMPATIBILITY.md`](docs/MODEL_COMPATIBILITY.md)** — read it before
+touching anything below. The rules, condensed:
+
+- **Identity is DECLARED in the schema-2 `manifest.json`**, never inferred from a
+  filename, display name or class signature. A catalog row joins to a generation
+  by the *active backend's* declared artifact filename; the identity returned is
+  the generation's. Artifacts only *corroborate* (SHA-256 + ordered class names +
+  `built_for`) — they never declare.
+- **ONE compiled policy decides authorization**:
+  `models::model_compatibility()` in `src/core/models/compatibility.cpp`. The
+  family→modes matrix lives in that TU and nowhere else — not in the manifest, a
+  SQL `WHERE`, a UI `if`, or a shell test. Adding/widening a model is a **code
+  change** with tests and review.
+- **Five enforcement paths, all calling that one policy**: (1) the warm-up
+  allow-list (`loadable_model_files` → `EngineRegistry`), (2) the mode-filtered
+  fail-loud required set (`attached_model_filenames`), (3) the selectable-model
+  list (`selectable_models`), (4) attachment write + runtime resolution
+  (`set_camera_models` / `detection_for`), (5) boot/integrity
+  (`health::evaluate_integrity`). None of them may hold a rule of its own, and
+  `mode`/`view`/`platform` have **no defaults** — a forgotten call site must fail
+  to compile, never silently authorize.
+- **The manifest carries NO `allowed_modes`** — there is no field to parse one
+  into, so a stray key is inert and can never become a second authority.
+- **Reason codes are a FILE FORMAT** (they reach `status.json`): never rename,
+  reuse or renumber. First-failure-wins order is a contract —
+  `model_undeclared` → `model_unknown_id` → `model_family_mismatch` →
+  `model_shape_unsupported` → `model_classes_mismatch` →
+  `model_provenance_failed` → `model_mode_incompatible` → `model_allowed`. Only a
+  genuine valid wrong-mode model may report `model_mode_incompatible`.
+- **A rejected ATTACHED model inhibits only its camera**: Degraded/exit 10, never
+  Blocked/78; no `DetectionProcessor`, no `get()`, siblings keep running. It
+  reuses `ZoneCause::ModelUnavailable` — **no new `ZoneCause` bit**.
+- **An idle wrong-mode artifact is a NORMAL state.** Declared, valid, unattached:
+  skipped by warm-up, never deserialized, not in the required set, no camera
+  issue — the appliance stays **Ready / exit 0**. A `digit_reader` box carries all
+  three model pairs and loads only `digitv3`.
+- **Jetson `built_for` is NORMALIZED**: `trt=10.3 / cuda=12.6 / sm=87`, compared
+  **exactly** against `platform::measured_platform_info()`. The raw provenance
+  strings (`10.3.0.30`, `12.6.68`) in `runtime.tensorrt.built_for` produce
+  `model_provenance_failed` — measured, not theoretical. Never add fuzzy matching.
+- **`seed-manifest` vs `verify`**: `seed-manifest` is explicit, manifest-only,
+  atomic, idempotent, accepts canonical equivalence, refuses a differing manifest
+  or mismatched artifacts, and **never** replaces a model. `verify` only
+  *observes* — no `--repair` exists, and it changes nothing under `models/`. It is
+  **not** globally read-only (it writes a DB backup dir outside `models/`); don't
+  document it as such.
+- **Model artifacts are protected and staged explicitly.** `models/` is
+  git-ignored by pattern; never `git add -A`. `packaging/models.approved` approves
+  the engine **and** sidecar as a pair — a `float-*` stem may only be approved
+  once the warm-up allow-list exists (machine-enforced by
+  `assert_float_seeding_guarded`).
+- **Ball Leveler UI stays LOCKED.** The mode persists and the policy authorizes
+  Float models for it, but no production Leveler wizard, `CameraStream`,
+  `DetectionProcessor`, `ZoneHealth` or reporter is constructed, and no ball
+  position / percentage / calibration / level-result algorithm exists. Unlocking
+  it needs a new approved design and plan.
 
 ## Hard rules
 
