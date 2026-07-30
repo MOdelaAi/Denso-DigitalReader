@@ -55,6 +55,7 @@ add_executable(denso_tests
     test_safe_process.cpp
     test_frame_processor.cpp
     test_zone_assembly.cpp
+    test_zone_overlay_draw.cpp
     test_zone_aggregator.cpp
     test_brazing_payload.cpp
     test_brazing_retry_policy.cpp
@@ -127,10 +128,9 @@ add_executable(denso_integration_tests
     # Zone Runtime Overlay: structural guards that aggregation is not gated on
     # backend config and that CameraTile stays rendering-only.
     test_zone_runtime_wiring.cpp
-    # Zone Runtime Overlay: rendered row content (pure zone_row_text) plus
-    # offscreen tile geometry at real tile sizes. Needs the real CameraTile, so
-    # it belongs here with the app objects. No device, model or socket is touched.
-    test_zone_overlay_render.cpp
+    # Zone annotation: the values are burned into the camera frame, so this
+    # drives the REAL frame processors and asserts on the delivered image.
+    test_zone_frame_pipeline.cpp
     test_mode_switch_flow.cpp
     # Slice 7 warm-up firewall: constructs EngineRegistry (backend-coupled), so it
     # belongs here with the app objects, not in the backend-free denso_tests. The

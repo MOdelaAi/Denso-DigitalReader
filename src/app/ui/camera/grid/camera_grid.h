@@ -150,13 +150,12 @@ private:
     std::optional<denso::models::ManifestView> view_;
     denso::models::PlatformInfo platform_;
     std::map<int64_t, CameraTile*> tiles_by_cam_;        // camera id -> its tile
-    // Zone overlay polling. The projection is PULLED on the GUI thread at a fixed
-    // low rate rather than pushed from the inference worker: pushing would marshal
-    // once per inference frame per camera, and the overlay only needs to be
-    // readable, not frame-accurate. `last_zone_view_` is the last set delivered to
-    // each tile, so an unchanged camera is not repainted.
+    // Zone housekeeping tick. The VALUES do not travel through here — they are
+    // drawn straight into each camera frame by the frame processor's annotation
+    // step, which pulls this same projection on the capture thread. What is left
+    // for this timer is the two things a frame cannot carry: draining the inhibit
+    // onsets to the log, and keeping status.json current.
     QTimer* zone_timer_ = nullptr;
-    std::map<int64_t, std::vector<ZoneRuntimeEntry>> last_zone_view_;
     // What has actually reached status.json, and what is still owed. Owns both
     // the 5 Hz write throttle and the buffer of drained-but-unpublished onsets;
     // neither advances on a write that failed.

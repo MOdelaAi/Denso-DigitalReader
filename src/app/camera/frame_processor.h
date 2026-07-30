@@ -13,6 +13,7 @@
 #include "camera/camera.h"  // CameraArea
 #include "detection/detection.h"
 #include "brazing/zone_sink.h"  // ZoneSink (+ ZoneReading)
+#include "brazing/zone_runtime.h"  // ZoneRuntimeEntry
 #include "detection/inference_engine.h"
 #include "detection/merge_detections.h"  // NamedDetection
 
@@ -41,18 +42,34 @@ public:
     virtual QImage process(const QImage& frame) = 0;
 };
 
+/// Supplies THIS camera's zone rows for the frame being drawn, already filtered
+/// by camera_id — so a frame can never show a zone number another camera owns.
+///
+/// CONTRACT: invoked on the CAPTURE THREAD, once per displayed frame. The
+/// implementation must be thread-safe and cheap; the wiring binds it to
+/// ZoneReporter::runtime_view(), which is mutex-guarded and returns copies.
+/// Empty (unset) means this camera draws no zone annotation.
+using ZoneViewFn = std::function<std::vector<ZoneRuntimeEntry>()>;
+
 /// Applies the camera's saved orientation (rotation + pitch + roll) to each
 /// frame. The no-op case (0/0/0) returns the frame unchanged, so an unoriented
 /// camera pays nothing.
+///
+/// It also carries the zone annotation, so a camera with zone-numbered ROIs but
+/// NO detection model still shows its zones (as Acquiring/Paused) instead of
+/// silently losing the overlay. The QImage->Mat->QImage round trip happens only
+/// when there is actually something to draw.
 class OrientationProcessor : public FrameProcessor {
 public:
-    OrientationProcessor(int degrees, double pitch, double roll);
+    OrientationProcessor(int degrees, double pitch, double roll,
+                         ZoneViewFn zone_view = {});
     QImage process(const QImage& frame) override;
 
 private:
     int degrees_;
     double pitch_;
     double roll_;
+    ZoneViewFn zone_view_;
 };
 
 /// Optional per-frame capture hook for the detection pipeline. When a
@@ -107,7 +124,8 @@ public:
                        std::vector<denso::camera::CameraArea> areas = {},
                        int64_t camera_id = 0, ReadingSink* sink = nullptr,
                        ZoneSink* zone_sink = nullptr,
-                       WorkerFailedFn on_worker_failed = {});
+                       WorkerFailedFn on_worker_failed = {},
+                       ZoneViewFn zone_view = {});
     ~DetectionProcessor() override;  // stops + joins the inference worker
 
     DetectionProcessor(const DetectionProcessor&) = delete;
@@ -128,6 +146,9 @@ private:
     ReadingSink* sink_ = nullptr;     // non-owning; null = no reading capture
     ZoneSink* zone_sink_ = nullptr;   // non-owning; null = no zone reporting
     WorkerFailedFn on_worker_failed_; // empty = no inference-failure escalation
+    // This camera's zone rows, read once per displayed frame on the capture
+    // thread. Empty = no zone annotation for this camera.
+    ZoneViewFn zone_view_;
 
     // Latest-frame slot handed to the inference worker (drop-oldest).
     std::mutex slot_mtx_;

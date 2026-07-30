@@ -53,6 +53,7 @@ add_library(denso_camera STATIC
     camera/stream_pacing.cpp
     camera/warmup_gate.cpp
     camera/zone_assembly.cpp
+    camera/zone_overlay.cpp
     camera/frame_processor.cpp
 )
 target_include_directories(denso_camera PUBLIC

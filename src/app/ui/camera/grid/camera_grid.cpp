@@ -64,48 +64,13 @@ void CameraGrid::poll_zone_runtime() {
     if (!reporter_) {
         return;  // torn down between the last tick and this one
     }
-    // ONE call, then group. The projection is already a value copy, so nothing
-    // below holds the reporter's lock.
-    std::map<int64_t, std::vector<ZoneRuntimeEntry>> by_camera;
-    for (const ZoneRuntimeEntry& e : reporter_->runtime_view()) {
-        by_camera[e.camera_id].push_back(e);
-    }
-    // Stable ordering so a tile's rows never jump around between ticks.
-    for (auto& [camera_id, rows] : by_camera) {
-        (void)camera_id;
-        std::sort(rows.begin(), rows.end(),
-                  [](const ZoneRuntimeEntry& a, const ZoneRuntimeEntry& b) {
-                      return a.zone_no < b.zone_no;
-                  });
-    }
+    // The zone VALUES are no longer routed to the tiles from here: they are drawn
+    // into the camera frame itself by the annotation step in the frame processor
+    // (camera/zone_overlay.h), which reads this same projection on the capture
+    // thread through a per-camera ZoneViewFn. That is the ONE visible annotation.
+    // This timer keeps the two channels the frame cannot carry:
 
-    for (const auto& [camera_id, tile] : tiles_by_cam_) {
-        const auto it = by_camera.find(camera_id);
-        const std::vector<ZoneRuntimeEntry> rows =
-            (it == by_camera.end()) ? std::vector<ZoneRuntimeEntry>{} : it->second;
-
-        // Repaint ONLY on change: at 5 Hz across four tiles an unconditional
-        // update() would burn the compositor redrawing identical text.
-        auto& last = last_zone_view_[camera_id];
-        if (last == rows) {
-            continue;
-        }
-        last = rows;
-        if (rows.empty()) {
-            tile->clear_zone_runtime_view();   // camera lost its zones
-        } else {
-            tile->set_zone_runtime_view(rows);
-        }
-    }
-
-    // Forget cameras that no longer have a tile, so a rebuilt grid cannot
-    // inherit a stale "unchanged" verdict and skip the first real update.
-    for (auto it = last_zone_view_.begin(); it != last_zone_view_.end();) {
-        it = (tiles_by_cam_.count(it->first) == 0) ? last_zone_view_.erase(it)
-                                                   : std::next(it);
-    }
-
-    // ── The ALARM channel, distinct from the rendering above ──────────────────
+    // ── The ALARM channel ─────────────────────────────────────────────────────
     // Drain the escalations the aggregator raised since the last tick. The drain
     // is destructive, so a standing inhibit is announced once and this timer
     // cannot re-announce it however often it fires.
@@ -179,8 +144,7 @@ void CameraGrid::clear() {
     if (zone_timer_) {
         zone_timer_->stop();
     }
-    last_zone_view_.clear();
-    // Drop the cached zone picture too: a rebuilt grid must not inherit an
+    // Drop the cached zone picture: a rebuilt grid must not inherit an
     // "unchanged" verdict and skip publishing its first real zone state. Owed
     // alarms are deliberately NOT dropped — they have been logged but not yet
     // published, and a rebuild is not a reason to lose one.
@@ -495,10 +459,34 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile,
         return;
     }
 
+    // THIS camera's zone rows, read on the capture thread once per displayed
+    // frame and drawn into the image by the frame processor. Bound to cam.id and
+    // filtered on camera_id, so a frame can never carry a zone number belonging
+    // to another camera even when two cameras share one. The reporter outlives
+    // every stream (clear() deletes the streams, which joins their capture
+    // threads, BEFORE reporter_.reset()), so this pointer cannot dangle.
+    ZoneViewFn zone_view;
+    if (reporter_) {
+        ZoneReporter* rep = reporter_.get();
+        const int64_t cid = cam.id;
+        zone_view = [rep, cid] {
+            std::vector<ZoneRuntimeEntry> mine;
+            for (const ZoneRuntimeEntry& e : rep->runtime_view()) {
+                if (e.camera_id == cid) mine.push_back(e);
+            }
+            // Stable ordering so the rows never jump between frames.
+            std::sort(mine.begin(), mine.end(),
+                      [](const ZoneRuntimeEntry& a, const ZoneRuntimeEntry& b) {
+                          return a.zone_no < b.zone_no;
+                      });
+            return mine;
+        };
+    }
+
     std::unique_ptr<FrameProcessor> proc;
     if (det.models.empty()) {
         proc = std::make_unique<OrientationProcessor>(
-            static_cast<int>(cam.rotation), cam.pitch, cam.roll);
+            static_cast<int>(cam.rotation), cam.pitch, cam.roll, zone_view);
     } else {
         // Engine-construction firewall. engines_->get() builds the native TensorRT
         // engine on Linux, whose ctor THROWS on a missing/bad <engine>.names.json
@@ -517,7 +505,7 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile,
             }
             if (runs.empty()) {
                 proc = std::make_unique<OrientationProcessor>(
-                    static_cast<int>(cam.rotation), cam.pitch, cam.roll);
+                    static_cast<int>(cam.rotation), cam.pitch, cam.roll, zone_view);
             } else {
                 proc = std::make_unique<DetectionProcessor>(
                     static_cast<int>(cam.rotation), cam.pitch, cam.roll,
@@ -536,7 +524,9 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile,
                             health_->set_cause(
                                 id, health::ZoneCause::InferenceWorkerFailed, failed);
                         });
-                    });
+                    },
+                    // Drawn into the frame right after the detection boxes.
+                    zone_view);
             }
         } catch (const std::exception& e) {
             qCritical().noquote()

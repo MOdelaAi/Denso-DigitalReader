@@ -206,27 +206,35 @@ TEST_CASE("Zone status writes are change-gated and onsets bypass the gate",
     CHECK(src.mid(consume_at, 1200).contains(QStringLiteral("[zone] camera")));
 }
 
-// MUTATION: "update every tile on every timer tick" must die — 5 Hz x 4 tiles of
-// byte-identical text is pure compositor burn on a box that runs for months. And
-// MUTATION: "retain a stale overlay for a camera or zone that has gone away" must
-// die too: a tile left showing numbers for a camera that no longer reports is
-// worse than showing nothing.
-TEST_CASE("Grid repaints only changed tiles and drops stale overlays",
+// The zone VALUES no longer travel to the tiles: they are burned into each
+// camera frame by the frame processor. This pins that routing.
+//
+// MUTATION: "push zone rows to the tile again" must die — that would restore the
+// duplicate Qt panel alongside the frame annotation.
+TEST_CASE("CameraGrid routes zone values into the frame rather than the tiles",
           "[zone_runtime][wiring]") {
     const QString src = read_source("/src/app/ui/camera/grid/camera_grid.cpp");
+
+    // A per-camera provider, filtered on camera_id so a frame can never carry a
+    // zone number belonging to another camera.
+    CHECK(src.contains(QStringLiteral("ZoneViewFn zone_view")));
+    CHECK(src.contains(QStringLiteral("e.camera_id == cid")));
+
+    // Handed to BOTH processors: a model-less camera must keep its overlay.
+    CHECK(src.count(QStringLiteral("cam.pitch, cam.roll, zone_view")) == 2);
+    CHECK(src.contains(QStringLiteral("zone_view);")));
+
+    // And the timer no longer paints anything.
     const int poll_at = src.indexOf(QStringLiteral("void CameraGrid::poll_zone_runtime()"));
-    const int next_at = src.indexOf(QStringLiteral("std::pair<std::set<int>, std::set<int>> CameraGrid::zone_status_projection"));
+    const int next_at = src.indexOf(QStringLiteral("CameraGrid::zone_status_projection"));
     REQUIRE(poll_at > 0);
     REQUIRE(next_at > poll_at);
     const QString body = src.mid(poll_at, next_at - poll_at);
-
-    // The change gate: an unchanged row set skips the tile entirely.
-    CHECK(body.contains(QStringLiteral("if (last == rows)")));
-    // A camera that lost every zone has its panel dropped, not left frozen.
-    CHECK(body.contains(QStringLiteral("clear_zone_runtime_view()")));
-    // And a camera that lost its TILE is forgotten, so a rebuilt grid cannot
-    // inherit an "unchanged" verdict and skip its first real update.
-    CHECK(body.contains(QStringLiteral("last_zone_view_.erase(it)")));
+    CHECK_FALSE(body.contains(QStringLiteral("set_zone_runtime_view")));
+    CHECK_FALSE(body.contains(QStringLiteral("clear_zone_runtime_view")));
+    // What it DOES keep: the alarm drain and the status write.
+    CHECK(body.contains(QStringLiteral("consume_zone_onsets();")));
+    CHECK(body.contains(QStringLiteral("refresh_status_file();")));
 }
 
 // REQUIREMENT 5 + 10: zone diagnostics are credential-safe, and the slice must

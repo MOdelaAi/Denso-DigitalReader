@@ -2,6 +2,7 @@
 
 #include "camera/area_geometry.h"             // inside_any_area
 #include "camera/zone_assembly.h"    // group_into_zones
+#include "camera/zone_overlay.h"     // draw_zone_runtime_overlay
 #include "camera/frame_convert.h"  // qimage_to_mat, mat_to_qimage
 #include "camera/snapshot.h"       // apply_orientation
 #include "detection/merge_detections.h"  // merge_detections
@@ -14,14 +15,33 @@
 #include <chrono>
 #include <cstdio>
 #include <optional>
+#include <utility>
 
 namespace denso::ui {
 
-OrientationProcessor::OrientationProcessor(int degrees, double pitch, double roll)
-    : degrees_(degrees), pitch_(pitch), roll_(roll) {}
+OrientationProcessor::OrientationProcessor(int degrees, double pitch, double roll,
+                                           ZoneViewFn zone_view)
+    : degrees_(degrees), pitch_(pitch), roll_(roll),
+      zone_view_(std::move(zone_view)) {}
 
 QImage OrientationProcessor::process(const QImage& frame) {
-    return apply_orientation(frame, degrees_, pitch_, roll_);
+    const QImage oriented = apply_orientation(frame, degrees_, pitch_, roll_);
+    if (!zone_view_) {
+        return oriented;
+    }
+    // A model-less camera can still own zone-numbered ROIs; without this it
+    // would silently lose the overlay the detection path draws. Cost is paid
+    // ONLY when there is something to draw — no zones, no conversion.
+    const std::vector<ZoneRuntimeEntry> zones = zone_view_();
+    if (zones.empty()) {
+        return oriented;
+    }
+    cv::Mat bgr = qimage_to_mat(oriented);   // owns its bytes — see frame_convert.h
+    if (bgr.empty()) {
+        return oriented;
+    }
+    draw_zone_runtime_overlay(bgr, zones);
+    return mat_to_qimage(bgr);
 }
 
 std::atomic<uint64_t> DetectionProcessor::s_constructed_{0};
@@ -35,11 +55,13 @@ DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
                                        std::vector<denso::camera::CameraArea> areas,
                                        int64_t camera_id, ReadingSink* sink,
                                        ZoneSink* zone_sink,
-                                       WorkerFailedFn on_worker_failed)
+                                       WorkerFailedFn on_worker_failed,
+                                       ZoneViewFn zone_view)
     : degrees_(degrees), pitch_(pitch), roll_(roll),
       models_(std::move(models)), areas_(std::move(areas)),
       camera_id_(camera_id), sink_(sink), zone_sink_(zone_sink),
-      on_worker_failed_(std::move(on_worker_failed)) {
+      on_worker_failed_(std::move(on_worker_failed)),
+      zone_view_(std::move(zone_view)) {
     // Monotonic process-lifetime tally (see constructed_count()). relaxed: this is
     // an observable counter, not an ordering primitive for other state.
     s_constructed_.fetch_add(1, std::memory_order_relaxed);
@@ -115,6 +137,18 @@ QImage DetectionProcessor::process(const QImage& frame) {
     }
     if (dw == bgr.cols && dh == bgr.rows && !boxes.empty()) {
         draw_detections(bgr, boxes);
+    }
+
+    // Zone values, drawn with the same OpenCV primitives as the boxes above and
+    // BEFORE the frame becomes a QImage — so the picture the tile receives
+    // already carries them. Unconditional on the boxes: a camera whose detector
+    // has produced nothing yet still shows its zones as Acquiring.
+    //
+    // `bgr` is display-only. qimage_to_mat() returned a Mat that owns its bytes,
+    // and the inference worker took its own bgr.copyTo(pending_) above, so
+    // nothing here can reach inference, snapshots or any other consumer.
+    if (zone_view_) {
+        draw_zone_runtime_overlay(bgr, zone_view_());
     }
     return mat_to_qimage(bgr);
 }
