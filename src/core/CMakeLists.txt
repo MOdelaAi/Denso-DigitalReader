@@ -33,6 +33,7 @@ add_library(denso_core STATIC
     reading/repo.cpp
     brazing/config.cpp
     level/calibration.cpp
+    level/edit.cpp
     level/measure.cpp
     level/repo.cpp
     mode/config.cpp
