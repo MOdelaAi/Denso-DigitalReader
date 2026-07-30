@@ -83,6 +83,7 @@ add_executable(denso_tests
     test_boot_schema.cpp
     test_callback_generation.cpp
     test_mode.cpp
+    test_level_measure.cpp
     test_level_persistence.cpp
     test_mode_confirm_text.cpp
     test_model_empty_state.cpp
