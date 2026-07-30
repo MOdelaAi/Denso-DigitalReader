@@ -85,6 +85,7 @@ add_executable(denso_tests
     test_mode.cpp
     test_mode_reset.cpp
     test_mode_confirm_text.cpp
+    test_model_empty_state.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),
@@ -95,6 +96,7 @@ add_executable(denso_tests
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/grid_layout.cpp     # grid layout algo
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_status_publication.cpp  # status publication bookkeeping
     ${CMAKE_SOURCE_DIR}/src/app/ui/settings/mode_confirm_text.cpp  # pure confirm-copy builder
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/dialog/model_empty_state.cpp  # pure Models-step empty-state copy
     ${CMAKE_SOURCE_DIR}/src/app/ui/startup_mode.cpp                # cold-start probe
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_rotation.cpp
     ${CMAKE_SOURCE_DIR}/src/app/logging/redact.cpp
@@ -102,6 +104,9 @@ add_executable(denso_tests
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_throttle.cpp
 )
 target_include_directories(denso_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
+# test_model_empty_state.cpp reads src/core/models/compatibility.cpp to assert
+# every reject() reason code has an operator-facing explanation.
+target_compile_definitions(denso_tests PRIVATE DENSO_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(denso_tests PRIVATE denso_core denso_detection denso_brazing denso_camera Catch2::Catch2)
 target_include_directories(denso_tests PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(denso_tests PRIVATE ${OpenCV_LIBS} Qt6::Gui)
@@ -143,6 +148,10 @@ add_executable(denso_integration_tests
     # --check path, so it needs denso_app. The EngineRegistry gets an injected
     # counting factory, so no ORT/TensorRT engine is ever loaded.
     test_model_mode_enforcement.cpp
+    # The mode-switch model-refresh defect: drives the REAL ModelsPage against a
+    # real DB + on-disk manifest, so it needs denso_app. Artifacts are tiny text
+    # files and no camera is contacted, so no engine is ever deserialized.
+    test_models_page_refresh.cpp
     # Slice 9 UI filtering seam: drives the REAL ModelsPage/MainWindow, so it needs
     # denso_app. Also reads the ModelsPage source (DENSO_SOURCE_DIR, defined below)
     # to prove the page holds no compatibility rule of its own.

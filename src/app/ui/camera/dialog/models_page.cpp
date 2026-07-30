@@ -1,6 +1,8 @@
 #include "ui/camera/dialog/models_page.h"
 
 #include "detection/repo.h"
+#include "models/model_identity.h"          // diagnostic_filename
+#include "ui/camera/dialog/model_empty_state.h"
 
 #include <QCheckBox>
 #include <QDoubleSpinBox>
@@ -28,6 +30,17 @@ ModelsPage::ModelsPage(QWidget* parent) : QWidget(parent) {
     models_layout_ = new QVBoxLayout(models_holder);
     models_layout_->setContentsMargins(0, 0, 0, 0);
     root->addWidget(models_holder);
+
+    // The empty state lives OUTSIDE models_layout_, which load_for() empties on
+    // every reload: a label parented into that layout would be deleted by the
+    // next rebuild and the page would silently go blank again.
+    empty_state_ = new QLabel;
+    empty_state_->setObjectName(QStringLiteral("modelsEmptyState"));
+    empty_state_->setWordWrap(true);
+    empty_state_->setTextInteractionFlags(Qt::TextSelectableByMouse);  // copy the code
+    empty_state_->setProperty("warning", true);
+    empty_state_->hide();
+    root->addWidget(empty_state_);
 
     // ── Classes to detect ──
     root->addWidget(new QLabel(QStringLiteral("Classes to detect")));
@@ -88,9 +101,38 @@ void ModelsPage::load_for(int64_t camera_id, denso::mode::TargetMode mode,
     // it is handed. A model the policy rejects never reaches a checkbox, so it can
     // be neither displayed nor returned by selections().
     offered_.clear();
-    for (auto& s : denso::detection::selectable_models(db_, mode, view, platform)) {
-        offered_.push_back(std::move(s.row));
+    // ONE evaluation of the catalog, read twice: the rows the policy ALLOWS become
+    // the offered set, and the rows it refused become the empty-state reasons. Two
+    // separate calls could disagree; this cannot. A rejected row still never
+    // reaches a checkbox, so it can be neither displayed as selectable nor
+    // returned by selections().
+    std::vector<RejectedModelNote> rejected;
+    for (auto& e : denso::detection::evaluated_models(db_, mode, view, platform)) {
+        if (e.result.allowed()) {
+            offered_.push_back(std::move(e.row));
+            continue;
+        }
+        // diagnostic_filename, never the raw column: the catalog filename is
+        // operator-editable and must not carry anything credential-shaped into a
+        // label (spec §12). The row id keeps an unprintable name identifiable.
+        rejected.push_back(RejectedModelNote{
+            QStringLiteral("%1 (catalog #%2)")
+                .arg(QString::fromStdString(
+                         denso::models::diagnostic_filename(e.row.filename)))
+                .arg(e.row.id),
+            e.result.reason_code});
     }
+
+    // Never a blank page. When nothing is offered, say which mode this is and why
+    // each catalog model was refused, in the policy's own stable reason codes.
+    if (offered_.empty()) {
+        empty_state_->setText(model_empty_state_text(mode, rejected));
+        empty_state_->show();
+    } else {
+        empty_state_->clear();
+        empty_state_->hide();
+    }
+
     const auto attached = denso::detection::models_for(db_, camera_id);
 
     // Seed remembered selections from the DB (name → {selected, conf}), first

@@ -626,13 +626,23 @@ TEST_CASE("ModelsPage source contains no model or mode token",
         // And it MUST go through the repository seam.
         (void)text;
     }
-    // The seam itself: models_page.cpp calls selectable_models.
+    // The seam itself: models_page.cpp goes through the repository's evaluation,
+    // which is where the ONE policy is applied. It used to call selectable_models;
+    // it now calls evaluated_models, of which selectable_models is the filtered
+    // reading, so that the models it OFFERS and the reasons it shows for the ones
+    // it does not are produced by a single evaluation and cannot disagree.
     QFile impl(QStringLiteral(DENSO_SOURCE_DIR
                               "/src/app/ui/camera/dialog/models_page.cpp"));
     REQUIRE(impl.open(QIODevice::ReadOnly));
     const QString text = QString::fromUtf8(impl.readAll());
-    CHECK(text.contains(QStringLiteral("selectable_models")));
-    // ...and no longer renders the unfiltered catalog.
+    CHECK(text.contains(QStringLiteral("evaluated_models")));
+    // evaluated_models deliberately RETURNS the rejected rows too, so the page
+    // carries the one obligation selectable_models used to discharge for it: an
+    // offered model must be gated on the policy's own verdict. Without this the
+    // page would render rejected models as selectable — the exact fail-open the
+    // filtering seam exists to prevent.
+    CHECK(text.contains(QStringLiteral("result.allowed()")));
+    // ...and it still never renders the unfiltered catalog.
     CHECK_FALSE(text.contains(QStringLiteral("list_models")));
 }
 

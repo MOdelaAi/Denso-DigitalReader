@@ -122,10 +122,25 @@ PROVENANCE_KEYS = (
     "training_ultralytics", "export_ultralytics", "batch", "dynamic", "nms",
     "precision", "jetpack", "export_onnx_command", "export_engine_command",
 )
-# The subset `validate_manifest` refuses to accept empty.
-PROVENANCE_REQUIRED = (
-    "source_pt_sha256", "onnx_sha256", "export_ultralytics", "precision",
-    "export_engine_command",
+# The subset `validate_manifest` refuses to accept empty. Under the ENGINE-ONLY
+# artifact policy this is just `precision`, a property of the engine plan itself.
+PROVENANCE_REQUIRED = ("precision",)
+
+# ENGINE-ONLY ARTIFACT POLICY — the emission-side enforcement.
+#
+# The production artifact pair is <model-id>.engine + <model-id>.names.json, and
+# the approved ENGINE BYTES are the provenance authority. A .onnx or .pt is not
+# required, not packaged, not searched for and not relied upon by runtime
+# loading, approval, provenance, manifest generation, packaging or deployment.
+#
+# So a generated manifest may not carry a source-chain field AT ALL. This is
+# refused here rather than merely "not required", because a stale descriptor key
+# would otherwise silently publish a lineage claim the project does not make and
+# cannot check. The C++ parser stays tolerant of these keys so manifests already
+# installed on an appliance keep validating; generation is where the line is held.
+PROVENANCE_FORBIDDEN = (
+    "source_pt", "source_pt_sha256", "onnx", "onnx_sha256", "onnx_opset",
+    "training_ultralytics", "export_ultralytics", "export_onnx_command",
 )
 
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -584,6 +599,141 @@ def measured_hash(path: Path, expected: str | None, label: str) -> str:
     return digest
 
 
+# --------------------------------------------------------------------------- #
+# Direct engine approval (engine-only artifact policy)
+# --------------------------------------------------------------------------- #
+
+# The checks a candidate .engine must have passed on the target device before its
+# bytes may be approved. Mirrors the project's approval policy; every one of them
+# is a statement about the ENGINE ITSELF, which is why no source chain is needed.
+APPROVAL_CHECKS = (
+    "regular_file", "sha256_recorded", "deserialize", "synthetic_inference",
+    "input_binding", "output_binding", "class_count_matches_sidecar",
+    "sidecar_present", "sidecar_json_valid", "identity_and_family",
+    "decoder_matches_runtime", "target_platform",
+)
+
+
+def validate_approval(descriptor: dict, descriptor_name: str, engine_sha: str,
+                      sidecar_sha: str, built_for: dict, input_size: int,
+                      class_names: list) -> None:
+    """Refuse to build a generation whose engine bytes were never approved.
+
+    The approval record is REPO-CONTROLLED REVIEW DATA and is deliberately NOT
+    published into the manifest: the runtime authorizes on hashes, not on a
+    narrative. Its job here is to make "these exact bytes were validated on the
+    target device" a machine-checked precondition of generation rather than a
+    claim in a commit message. It is cross-checked against the hashes actually
+    MEASURED from the files, so an approval record can never drift onto a
+    different artifact than the one being packaged.
+    """
+    ap = descriptor.get("approval")
+    if not isinstance(ap, dict):
+        raise ManifestError(
+            f"{descriptor_name}: a tensorrt generation requires an `approval` "
+            "object recording the direct on-device validation of these exact "
+            "engine bytes (engine-only artifact policy)")
+
+    for key in ("validated_on", "device", "engine_sha256", "sidecar_sha256",
+                "trt", "cuda", "sm", "checks"):
+        if key not in ap:
+            raise ManifestError(
+                f"{descriptor_name}: approval is missing required key {key!r}")
+
+    if ap["engine_sha256"] != engine_sha:
+        raise ManifestError(
+            f"{descriptor_name}: approval.engine_sha256 ({ap['engine_sha256']}) "
+            f"is not the engine that was measured ({engine_sha}). The approval "
+            "record describes different bytes than the artifact being packaged.")
+    if ap["sidecar_sha256"] != sidecar_sha:
+        raise ManifestError(
+            f"{descriptor_name}: approval.sidecar_sha256 ({ap['sidecar_sha256']}) "
+            f"is not the sidecar that was measured ({sidecar_sha}).")
+
+    # The engine must have been approved for the platform it declares it was
+    # built for, or the approval attests to a run that proves nothing about the
+    # target the policy will compare against.
+    for key in ("trt", "cuda", "sm"):
+        if str(ap[key]) != str(built_for[key]):
+            raise ManifestError(
+                f"{descriptor_name}: approval.{key} ({ap[key]!r}) does not match "
+                f"tensorrt.built_for.{key} ({built_for[key]!r}); the engine was "
+                "not approved on the platform it declares")
+
+    checks = ap["checks"]
+    if not isinstance(checks, dict):
+        raise ManifestError(f"{descriptor_name}: approval.checks must be an object")
+    missing = [c for c in APPROVAL_CHECKS if c not in checks]
+    if missing:
+        raise ManifestError(
+            f"{descriptor_name}: approval.checks is missing {missing}. Every "
+            "direct-validation check must be recorded with its observed result.")
+    unrecorded = sorted(c for c in APPROVAL_CHECKS
+                        if not str(checks.get(c) or "").strip())
+    if unrecorded:
+        raise ManifestError(
+            f"{descriptor_name}: approval.checks entries {unrecorded} are empty. "
+            "Record what was OBSERVED, not that a box was ticked.")
+
+    # ── The observations above are the HUMAN record. They are prose, so on their
+    #    own a non-empty rule would happily accept "not tested" — an approval that
+    #    asserts nothing. The load-bearing outcomes are therefore ALSO required as
+    #    machine-checkable values, and cross-checked against the artifact's own
+    #    declaration. A descriptor cannot claim an approval whose measured shapes,
+    #    class count or platform disagree with what it is declaring.
+    for key, want_type in (("deserialize_ok", bool), ("inference_ok", bool),
+                           ("input_shape", list), ("output_shape", list),
+                           ("class_count", int)):
+        if key not in ap:
+            raise ManifestError(
+                f"{descriptor_name}: approval is missing required outcome {key!r}. "
+                "Prose observations alone cannot prove a check succeeded.")
+        if want_type is bool and not isinstance(ap[key], bool):
+            raise ManifestError(
+                f"{descriptor_name}: approval.{key} must be a JSON boolean, found "
+                f"{ap[key]!r}")
+        if want_type is int and not sc.is_exact_int(ap[key]):
+            raise ManifestError(
+                f"{descriptor_name}: approval.{key} must be an integer, found "
+                f"{ap[key]!r}")
+        if want_type is list and not (isinstance(ap[key], list) and ap[key]):
+            raise ManifestError(
+                f"{descriptor_name}: approval.{key} must be a non-empty array, "
+                f"found {ap[key]!r}")
+
+    if ap["deserialize_ok"] is not True:
+        raise ManifestError(
+            f"{descriptor_name}: approval.deserialize_ok is not true — the engine "
+            "did not deserialize on the target device and must not be approved")
+    if ap["inference_ok"] is not True:
+        raise ManifestError(
+            f"{descriptor_name}: approval.inference_ok is not true — no synthetic "
+            "inference succeeded on the target device; the engine must not be approved")
+
+    want_input = [1, 3, input_size, input_size]
+    if ap["input_shape"] != want_input:
+        raise ManifestError(
+            f"{descriptor_name}: approval.input_shape {ap['input_shape']} does not "
+            f"match the declared input_size {input_size} (expected {want_input})")
+    if ap["class_count"] != len(class_names):
+        raise ManifestError(
+            f"{descriptor_name}: approval.class_count {ap['class_count']} does not "
+            f"match the {len(class_names)} class name(s) the sidecar declares")
+
+    # The output shape must be one the runtime can actually decode, AND must be
+    # the one implied by this model's own class count — the check that stops a
+    # raw-YOLO plan being approved under an end2end declaration or vice versa.
+    out_shape = ap["output_shape"]
+    raw_yolo = [1, 4 + len(class_names), 8400]
+    end2end_ok = (len(out_shape) == 3 and out_shape[0] == 1 and out_shape[2] == 6)
+    if out_shape != raw_yolo and not end2end_ok:
+        raise ManifestError(
+            f"{descriptor_name}: approval.output_shape {out_shape} is neither the "
+            f"raw-YOLO layout implied by {len(class_names)} class(es) ({raw_yolo}, "
+            "decoded by decode_yolo) nor an end2end [1,N,6] layout (decoded by "
+            "decode_yolo_end2end). The runtime has no decoder for it.")
+
+
 def build_generation(descriptor: dict, descriptor_name: str,
                      default_installed_utc: str | None,
                      skip_structural: bool) -> tuple[dict, dict]:
@@ -595,7 +745,7 @@ def build_generation(descriptor: dict, descriptor_name: str,
     unknown = set(descriptor) - {
         "name", "canonical_id", "family", "task", "input_size", "state",
         "installed_utc", "onnxruntime", "tensorrt", "provenance_from",
-        "provenance", "provenance_evidence",
+        "provenance", "provenance_evidence", "approval",
     }
     if unknown:
         raise ManifestError(
@@ -748,6 +898,10 @@ def build_generation(descriptor: dict, descriptor_name: str,
         }
         artifact_hashes["engine"] = {"file": engine_name, "sha256": engine_sha}
         artifact_hashes["sidecar"] = {"file": sidecar_name, "sha256": sidecar_sha}
+        # Engine-only policy: these exact bytes must carry a direct on-device
+        # approval, cross-checked against what was just measured.
+        validate_approval(descriptor, descriptor_name, engine_sha, sidecar_sha,
+                          built_for, input_size, list(class_names))
 
     # -- provenance: extracted from evidence, then explicitly cited additions -- #
     values, sources = load_evidence(
@@ -797,6 +951,17 @@ def build_generation(descriptor: dict, descriptor_name: str,
             f"{descriptor_name}: provenance.onnx_sha256 "
             f"({values.get('onnx_sha256')}) does not match the measured ONNX "
             f"({onnx_sha}); the provenance record describes a different artifact")
+
+    # Engine-only: refuse a source-chain field regardless of whether a descriptor
+    # supplied it directly or an evidence file injected it. Checked on the merged
+    # result so neither route can slip one past.
+    forbidden = sorted(k for k in PROVENANCE_FORBIDDEN if k in values)
+    if forbidden:
+        raise ManifestError(
+            f"{descriptor_name}: provenance field(s) {forbidden} are forbidden by "
+            "the engine-only artifact policy. The approved .engine bytes are the "
+            "provenance authority; a manifest must not carry an ONNX/PT/source "
+            "chain. Remove them from the descriptor (and from provenance_from).")
 
     missing = [k for k in PROVENANCE_REQUIRED
                if not str(values.get(k, "")).strip()]

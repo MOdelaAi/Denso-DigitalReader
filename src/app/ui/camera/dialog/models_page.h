@@ -30,6 +30,7 @@
 class QVBoxLayout;
 class QCheckBox;
 class QDoubleSpinBox;
+class QLabel;
 class QLineEdit;
 
 namespace denso::ui {
@@ -72,6 +73,10 @@ private:
     QVBoxLayout* models_layout_ = nullptr;  // ensemble model checkboxes
     QLineEdit* search_ = nullptr;
     QVBoxLayout* class_layout_ = nullptr;   // class rows
+    // Shown INSTEAD of an unexplained blank page when the policy offers nothing.
+    // Its text is built by the pure model_empty_state unit from the verdicts the
+    // policy itself returned — this page still decides nothing about eligibility.
+    QLabel* empty_state_ = nullptr;
 
     // The models this page may OFFER — the policy's answer for the committed mode,
     // cached for the class-list rebuilds. NOT the catalog: a rejected model is

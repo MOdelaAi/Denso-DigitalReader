@@ -559,7 +559,8 @@ printf 'FAKE-ENGINE-BYTES-for-testing-only-not-a-real-plan' > "$M/src/digitv3.en
 printf '["0","1","2","3","4","5","6","7","8","9"]' > "$M/src/digitv3.names.json"
 EH="$(sha256sum "$M/src/digitv3.engine" | cut -d' ' -f1)"
 SH="$(sha256sum "$M/src/digitv3.names.json" | cut -d' ' -f1)"
-printf 'digitv3 %s %s trtexec --onnx=digitv3.onnx --saveEngine=digitv3.engine --fp16\n' "$EH" "$SH" > "$M/models.approved"
+printf 'digitv3 %s %s engine-only fixture approval
+' "$EH" "$SH" > "$M/models.approved"
 python3 - "$M/desc/digitv3.descriptor.json" "$EH" "$SH" <<'PY'
 import json, sys
 p, eh, sh = sys.argv[1:4]
@@ -569,12 +570,21 @@ json.dump({
     "installed_utc": "2026-07-23T00:00:00Z",
     "tensorrt": {"expected_engine_sha256": eh, "expected_sidecar_sha256": sh,
                  "built_for": {"trt": "10.3", "cuda": "12.6", "sm": "87"}},
-    "provenance": {"source_pt_sha256": "0"*64, "onnx_sha256": "1"*64,
-                   "export_ultralytics": "8.4.33", "precision": "fp16",
-                   "export_engine_command": "trtexec --onnx=digitv3.onnx --saveEngine=digitv3.engine --fp16"},
-    "provenance_evidence": {"source_pt_sha256": "fixture", "onnx_sha256": "fixture",
-                            "export_ultralytics": "fixture", "precision": "fixture",
-                            "export_engine_command": "fixture"},
+    "provenance": {"precision": "fp16", "jetpack": "fixture"},
+    "provenance_evidence": {"precision": "fixture", "jetpack": "fixture"},
+    "approval": {
+        "policy": "engine-only fixture", "validated_on": "2026-07-30",
+        "device": "fixture", "engine_sha256": eh, "sidecar_sha256": sh,
+        "trt": "10.3", "cuda": "12.6", "sm": "87",
+        "deserialize_ok": True, "inference_ok": True,
+        "input_shape": [1, 3, 640, 640], "output_shape": [1, 300, 6],
+        "class_count": 10,
+        "checks": {k: "fixture" for k in (
+            "regular_file", "sha256_recorded", "deserialize", "synthetic_inference",
+            "input_binding", "output_binding", "class_count_matches_sidecar",
+            "sidecar_present", "sidecar_json_valid", "identity_and_family",
+            "decoder_matches_runtime", "target_platform")},
+    },
 }, open(p, "w"), indent=2)
 PY
 
@@ -770,24 +780,35 @@ for s in digitv3 float-small float-big; do
     printf '%s' "$names" > "$RB/src/$s.names.json"
     reh="$(sha256sum "$RB/src/$s.engine" | cut -d' ' -f1)"
     rsh="$(sha256sum "$RB/src/$s.names.json" | cut -d' ' -f1)"
-    printf '%s %s %s trtexec --onnx=%s.onnx --saveEngine=%s.engine --fp16\n' \
-           "$s" "$reh" "$rsh" "$s" "$s" >> "$RB/models.approved"
-    python3 - "$RB/desc/$s.descriptor.json" "$s" "$fam" "$reh" "$rsh" <<'PY'
+    printf '%s %s %s engine-only fixture approval
+' \
+           "$s" "$reh" "$rsh" >> "$RB/models.approved"
+    python3 - "$RB/desc/$s.descriptor.json" "$s" "$fam" "$reh" "$rsh" "$names" <<'PY'
 import json, sys
-p, name, fam, eh, sh = sys.argv[1:6]
+p, name, fam, eh, sh, names = sys.argv[1:7]
 json.dump({
     "name": name, "canonical_id": name, "family": fam,
     "task": "detect", "input_size": 640, "state": "installed",
     "installed_utc": "2026-07-29T00:00:00Z",
     "tensorrt": {"expected_engine_sha256": eh, "expected_sidecar_sha256": sh,
                  "built_for": {"trt": "10.3", "cuda": "12.6", "sm": "87"}},
-    "provenance": {"source_pt_sha256": "0"*64, "onnx_sha256": "1"*64,
-                   "export_ultralytics": "8.4.33", "precision": "fp16",
-                   "export_engine_command":
-                       "trtexec --onnx=%s.onnx --saveEngine=%s.engine --fp16" % (name, name)},
-    "provenance_evidence": {"source_pt_sha256": "fixture", "onnx_sha256": "fixture",
-                            "export_ultralytics": "fixture", "precision": "fixture",
-                            "export_engine_command": "fixture"},
+    "provenance": {"precision": "fp16", "jetpack": "fixture"},
+    "provenance_evidence": {"precision": "fixture", "jetpack": "fixture"},
+    "approval": {
+        "policy": "engine-only fixture", "validated_on": "2026-07-30",
+        "device": "fixture", "engine_sha256": eh, "sidecar_sha256": sh,
+        "trt": "10.3", "cuda": "12.6", "sm": "87",
+        "deserialize_ok": True, "inference_ok": True,
+        "input_shape": [1, 3, 640, 640],
+        "output_shape": ([1, 300, 6] if name == "digitv3"
+                         else [1, 4 + len(json.loads(names)), 8400]),
+        "class_count": len(json.loads(names)),
+        "checks": {k: "fixture" for k in (
+            "regular_file", "sha256_recorded", "deserialize", "synthetic_inference",
+            "input_binding", "output_binding", "class_count_matches_sidecar",
+            "sidecar_present", "sidecar_json_valid", "identity_and_family",
+            "decoder_matches_runtime", "target_platform")},
+    },
 }, open(p, "w"), indent=2)
 PY
 done

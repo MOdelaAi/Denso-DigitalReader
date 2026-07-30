@@ -10,9 +10,30 @@
 # application semantics just as much as a wrong engine, and would otherwise
 # ship unchecked as long as the engine hash matched.
 #
-# Format: <stem> <sha256-of-.engine> <sha256-of-.names.json> <trtexec recipe used to build it>
+# Format: <stem> <sha256-of-.engine> <sha256-of-.names.json> <approval reference>
+# Only columns 1-3 are parsed; column 4 is the human approval reference.
 #
-# To approve a new engine: build it on-device, sha256sum both files, add the line.
+# ENGINE-ONLY ARTIFACT POLICY. The production artifact pair is
+# <model-id>.engine + <model-id>.names.json, and the approved ENGINE BYTES are
+# the provenance authority. No .onnx or .pt is required, packaged, searched for
+# or relied upon by runtime loading, approval, provenance, manifest generation,
+# packaging, deployment or acceptance testing. No row here asserts an ONNX or PT
+# lineage, and none may.
+#
+# To approve an engine: put the exact bytes on the target device, validate them
+# DIRECTLY there (regular file; sha256 recorded; TensorRT deserialization; one
+# real synthetic inference; input and output bindings and shapes; class count
+# against the canonical sidecar; sidecar present and valid JSON; identity and
+# family; decoder matches the runtime; validated on the target TRT/CUDA/SM
+# platform), record every observation in the stem's descriptor `approval` block,
+# then add or update the row. gen_model_manifest.py re-measures both files and
+# refuses if they disagree with the descriptor or with that approval record.
+#
+# A REBUILT ENGINE IS A NEW ARTIFACT, NEVER A HASH CORRECTION. A TensorRT plan
+# may differ byte-for-byte after a rebuild; that is expected and is not grounds
+# for rejection. It does mean the new bytes need their own explicit approval
+# before this row changes. Hash enforcement is never relaxed: the runtime keeps
+# refusing any .engine whose bytes do not match the approved SHA-256.
 #
 # ORDERING RULE (spec 8.7.2): a `float-*` stem may only be approved once the
 # Slice-7 warm-up allow-list exists, because EngineRegistry::warm_up() scans the
@@ -22,6 +43,6 @@
 # which refuses the build if either Float line below is present without a real
 # definition of loadable_model_files in src/core/models/compatibility.cpp AND a
 # real call to it from src/app/ui/startup.cpp. Both exist as of Slice 7.
-digitv3 5247c3f3a70ce1b09b8807b7ed4bb27f7badd972b8628f355baac3ec434cf45a 47538d1023947674faffb92a905429bc9deaa0890f0549d4c1bed1d1a33f9026 trtexec --onnx=digitv3.onnx --saveEngine=digitv3.engine --fp16
-float-small 13aaac93943f82862b75ccb8e65887f7cf2fae52b237c2f93a819b1720459e24 cb7554643e37d6105b0ce54861f665b4b7a954fce8f3c2dcbb15d09262dcabe4 trtexec --onnx=float-small.onnx --saveEngine=float-small.engine --fp16
-float-big b496a0855d82e6ed6873a487d87bd05d21b08686a2991212ec38215aaa64f2ef a675f5e0145a1aa9735b4b59c18b8e30e829e62cf15a62d4f39656ebe238de66 trtexec --onnx=float-big.onnx --saveEngine=float-big.engine --fp16
+digitv3 5247c3f3a70ce1b09b8807b7ed4bb27f7badd972b8628f355baac3ec434cf45a 47538d1023947674faffb92a905429bc9deaa0890f0549d4c1bed1d1a33f9026 directly validated + approved on Jetson .15 (TRT 10.3/CUDA 12.6/SM 87), out [1,300,6] decode_yolo_end2end, 10 classes; see packaging/manifest/digitv3.descriptor.json approval
+float-small 129fe461e55f7eb2aaac894c3021016ccd20bfe6be8422215bddbb6157ef4f27 cb7554643e37d6105b0ce54861f665b4b7a954fce8f3c2dcbb15d09262dcabe4 directly validated + approved on Jetson .15 2026-07-30 (TRT 10.3/CUDA 12.6/SM 87), out [1,5,8400] decode_yolo, 1 class; rebuilt engine, new bytes explicitly approved; see packaging/manifest/float-small.descriptor.json approval
+float-big a95ffadca3aa96622d40d338505ccd7cfdf57b1faec62efa0645a32739e89351 a675f5e0145a1aa9735b4b59c18b8e30e829e62cf15a62d4f39656ebe238de66 directly validated + approved on Jetson .15 2026-07-30 (TRT 10.3/CUDA 12.6/SM 87), out [1,5,8400] decode_yolo, 1 class; rebuilt engine, new bytes explicitly approved; see packaging/manifest/float-big.descriptor.json approval

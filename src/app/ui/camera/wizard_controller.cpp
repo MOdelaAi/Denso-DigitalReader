@@ -532,10 +532,22 @@ void CameraWizardController::finish_and_leave(QWidget* parent) {
 
 void CameraWizardController::areas_back() {
     // Direct entry (per-row Areas) has no Models step to return to.
-    if (entered_areas_directly_)
+    if (entered_areas_directly_) {
         emit request_show_list();
-    else
-        show_page_(3);
+        return;
+    }
+    // RE-ENTER, never just show_page_(3). The Models page is created once and
+    // reused for the whole application lifetime, so raising page 3 without
+    // reloading renders whatever the last load_for() left behind — a list filtered
+    // for a mode that may no longer be committed, against a manifest that may have
+    // been reseeded since. enter_models() re-reads all three authorization inputs
+    // (committed mode, manifest view, measured platform) and rebuilds the model
+    // cards AND the class rows from them.
+    //
+    // Lossless: save_models() persists the selections through save_models_only()
+    // before enter_areas() ever runs, so reseeding from the database restores
+    // exactly what was saved.
+    enter_models();
 }
 
 } // namespace denso::ui

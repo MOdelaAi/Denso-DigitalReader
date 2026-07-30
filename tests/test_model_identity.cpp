@@ -433,29 +433,80 @@ TEST_CASE("schema 2 rejects a missing provenance object", "[model_identity]") {
     REQUIRE_FALSE(accepted(g.json()));
 }
 
-TEST_CASE("schema 2 rejects a blank provenance source_pt_sha256",
-          "[model_identity]") {
+// ENGINE-ONLY ARTIFACT POLICY. The production artifact pair is
+// <model-id>.engine + <model-id>.names.json and the approved ENGINE BYTES are
+// the provenance authority. A .onnx / .pt is not required, not packaged and
+// never consulted, so a manifest must NOT be refused for omitting the source
+// chain. These three cases previously asserted the opposite; they are inverted
+// deliberately, and the runtime authorization they might be mistaken for is
+// pinned separately below.
+TEST_CASE("engine-only: a blank provenance source_pt_sha256 is accepted",
+          "[model_identity][engine_only]") {
     Gen2 g;
     auto r = parse_manifest(g.json());
     REQUIRE(r.manifest.has_value());
     r.manifest->generations.at(0).provenance.source_pt_sha256.clear();
-    REQUIRE(validate_manifest(*r.manifest).has_value());
+    REQUIRE_FALSE(validate_manifest(*r.manifest).has_value());
 }
 
-TEST_CASE("schema 2 rejects a blank provenance onnx_sha256", "[model_identity]") {
+TEST_CASE("engine-only: a blank provenance onnx_sha256 is accepted",
+          "[model_identity][engine_only]") {
     Gen2 g;
     auto r = parse_manifest(g.json());
     REQUIRE(r.manifest.has_value());
     r.manifest->generations.at(0).provenance.onnx_sha256.clear();
-    REQUIRE(validate_manifest(*r.manifest).has_value());
+    REQUIRE_FALSE(validate_manifest(*r.manifest).has_value());
 }
 
-TEST_CASE("schema 2 rejects a blank provenance export_ultralytics",
-          "[model_identity]") {
+TEST_CASE("engine-only: a blank provenance export_ultralytics is accepted",
+          "[model_identity][engine_only]") {
     Gen2 g;
     auto r = parse_manifest(g.json());
     REQUIRE(r.manifest.has_value());
     r.manifest->generations.at(0).provenance.export_ultralytics.clear();
+    REQUIRE_FALSE(validate_manifest(*r.manifest).has_value());
+}
+
+TEST_CASE("engine-only: a manifest carrying NO source chain at all validates",
+          "[model_identity][engine_only]") {
+    // The shape tools/gen_model_manifest.py now emits: engine + sidecar hashes,
+    // built_for, and precision. Nothing about a checkpoint, an export or an ONNX.
+    Gen2 g;
+    auto r = parse_manifest(g.json());
+    REQUIRE(r.manifest.has_value());
+    auto& p = r.manifest->generations.at(0).provenance;
+    p.source_pt.clear();
+    p.source_pt_sha256.clear();
+    p.onnx.clear();
+    p.onnx_sha256.clear();
+    p.onnx_opset = 0;
+    p.training_ultralytics.clear();
+    p.export_ultralytics.clear();
+    p.export_onnx_command.clear();
+    p.export_engine_command.clear();
+    REQUIRE_FALSE(validate_manifest(*r.manifest).has_value());
+}
+
+TEST_CASE("engine-only: hash enforcement is NOT weakened by the relaxation",
+          "[model_identity][engine_only]") {
+    // The whole point of the relaxation is that it touches what a manifest must
+    // DECLARE, never what an artifact must PROVE. The engine and sidecar digests
+    // remain strict 64-lowercase-hex and a generation is still refused without
+    // them — otherwise dropping the source chain would have opened a hole.
+    Gen2 g;
+    auto r = parse_manifest(g.json());
+    REQUIRE(r.manifest.has_value());
+    const std::string good = r.manifest->generations.at(0).runtime.tensorrt->engine_sha256;
+    REQUIRE(good.size() == 64);
+
+    r.manifest->generations.at(0).runtime.tensorrt->engine_sha256.clear();
+    REQUIRE(validate_manifest(*r.manifest).has_value());
+
+    r.manifest->generations.at(0).runtime.tensorrt->engine_sha256 = "NOTHEX";
+    REQUIRE(validate_manifest(*r.manifest).has_value());
+
+    r.manifest->generations.at(0).runtime.tensorrt->engine_sha256 = good;
+    r.manifest->generations.at(0).runtime.tensorrt->sidecar_sha256.clear();
     REQUIRE(validate_manifest(*r.manifest).has_value());
 }
 
@@ -490,12 +541,25 @@ TEST_CASE("provenance digests are validated as non-empty, NOT as strict hex",
     REQUIRE(accepted(g.json()));
 }
 
-TEST_CASE("schema 2 rejects a blank provenance export_engine_command",
-          "[model_identity]") {
+TEST_CASE("engine-only: a blank provenance export_engine_command is accepted",
+          "[model_identity][engine_only]") {
+    // Also inverted by the engine-only policy. The canonical value of this field
+    // is a trtexec recipe naming a .onnx, i.e. an export-source reference — which
+    // a generated manifest may no longer carry at all. `precision` remains the
+    // one required provenance field because it describes the PLAN, not a source.
     Gen2 g;
     auto r = parse_manifest(g.json());
     REQUIRE(r.manifest.has_value());
     r.manifest->generations.at(0).provenance.export_engine_command.clear();
+    REQUIRE_FALSE(validate_manifest(*r.manifest).has_value());
+}
+
+TEST_CASE("engine-only: provenance.precision is still required",
+          "[model_identity][engine_only]") {
+    Gen2 g;
+    auto r = parse_manifest(g.json());
+    REQUIRE(r.manifest.has_value());
+    r.manifest->generations.at(0).provenance.precision.clear();
     REQUIRE(validate_manifest(*r.manifest).has_value());
 }
 

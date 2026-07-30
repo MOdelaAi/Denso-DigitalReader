@@ -38,6 +38,35 @@ struct SelectableModel {
     denso::models::ModelMetadata metadata;
 };
 
+/// A catalog row, its resolved identity, AND the policy's verdict on it — the
+/// unfiltered evaluation, kept as one value for the same reason SelectableModel
+/// is (parallel containers rot). This carries the REJECTED entries too, which is
+/// the whole point: a selection UI that shows nothing must be able to say WHY,
+/// and the only truthful answer is the reason code the policy itself produced.
+struct EvaluatedModel {
+    DetectionModel                      row;
+    denso::models::ModelMetadata        metadata;
+    denso::models::CompatibilityResult  result;
+};
+
+/// Every catalog model judged by the central policy for `mode`, in catalog-id
+/// order, WITHOUT dropping the rejections.
+///
+/// This is NOT a selection list and must never be rendered as one — `result`
+/// decides, and only `selectable_models` (defined in terms of this) applies that
+/// filter. It exists so an empty Models step can name the stable reason code for
+/// each model it is not offering, instead of rendering a blank page whose cause
+/// is indistinguishable between a missing manifest, a failed provenance check and
+/// a wrong-mode model.
+///
+/// Holds no rule of its own: the family→mode matrix stays in
+/// src/core/models/compatibility.cpp and this is one more of its callers.
+/// READ-ONLY.
+std::vector<EvaluatedModel> evaluated_models(
+    const QSqlDatabase& db, denso::mode::TargetMode mode,
+    const denso::models::ManifestView& view,
+    const denso::models::PlatformInfo& platform);
+
 /// The catalog reduced to the models the central policy ALLOWS in `mode`, each
 /// paired with its resolved metadata. THE only list a selection UI may render
 /// (spec §6.1) — and the read counterpart of `set_camera_models`, so the wizard

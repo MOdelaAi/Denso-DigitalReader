@@ -349,18 +349,29 @@ std::optional<std::string> validate_schema2(const ModelGeneration& g) {
             return "runtime.tensorrt.built_for.sm must be non-empty for generation " + g.name;
     }
 
-    // Provenance: only the fields that make an artifact traceable are enforced.
+    // Provenance under the ENGINE-ONLY artifact policy.
+    //
+    // The production artifact pair is <model-id>.engine + <model-id>.names.json,
+    // and the approved ENGINE BYTES are the provenance authority. A .onnx or .pt
+    // is not required, not packaged and not consulted, so this validator no
+    // longer refuses a manifest for lacking source_pt_sha256, onnx_sha256 or
+    // export_ultralytics. Those three requirements described an artifact chain
+    // the appliance never had access to and never checked: nothing in the
+    // runtime reads them. `provenance_ok` (model_identity.cpp) has always
+    // authorized on the engine hash, the sidecar hash and built_for alone, and
+    // that is UNCHANGED — this relaxes what a manifest must DECLARE, never what
+    // an artifact must PROVE.
+    //
+    // Deliberately a relaxation, not a rejection: the parser still reads the
+    // legacy fields, so a manifest already installed on an appliance keeps
+    // validating. Refusing them here would brick a running box on upgrade.
+    // Emission is where the policy is enforced — tools/gen_model_manifest.py
+    // REFUSES to put an onnx/pt key into a manifest it generates.
+    //
+    // `precision` stays required: it is a property of the engine plan itself.
     const auto& p = g.provenance;
-    if (p.source_pt_sha256.empty())
-        return "provenance.source_pt_sha256 must be non-empty for generation " + g.name;
-    if (p.onnx_sha256.empty())
-        return "provenance.onnx_sha256 must be non-empty for generation " + g.name;
-    if (p.export_ultralytics.empty())
-        return "provenance.export_ultralytics must be non-empty for generation " + g.name;
     if (p.precision.empty())
         return "provenance.precision must be non-empty for generation " + g.name;
-    if (p.export_engine_command.empty())
-        return "provenance.export_engine_command must be non-empty for generation " + g.name;
     return std::nullopt;
 }
 }  // namespace

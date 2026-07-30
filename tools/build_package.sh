@@ -24,7 +24,7 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # generated manifest for the single-digitv3 payload MUST hash to exactly this, so
 # an edit to packaging/manifest/digitv3.descriptor.json that changes the output
 # fails the build until the candidate is re-reviewed and this constant updated.
-RELEASE_A_DIGITV3_MANIFEST_SHA256=fb26074d8e618caaf6f8d41737631c4b378aaa9197506aaa05586fc2ee898efd
+RELEASE_A_DIGITV3_MANIFEST_SHA256=1e6eb46206dcc03352496f3643f94d4e83927645a4a6396c869c5fe9b6c27e91
 # The reviewed Release-B manifest identity: the three-generation payload
 # digitv3 + float-small + float-big, in EXACTLY that order.
 #
@@ -34,7 +34,7 @@ RELEASE_A_DIGITV3_MANIFEST_SHA256=fb26074d8e618caaf6f8d41737631c4b378aaa9197506a
 # Passing this same model SET in any other order is therefore REFUSED outright by
 # the gate below — NOT quietly demoted to an unpinned build, which would still cut
 # a valid, installable package whose manifest bytes nobody had reviewed.
-RELEASE_B_MANIFEST_SHA256=24c482045429b91bc2dbccb724752a12615f07a1914b7b263f7a63111fe17e81
+RELEASE_B_MANIFEST_SHA256=ca8e9d6d991e52e0845060e9b75b1b7d393460abaef229ed1a5030a590cc7c16
 
 MODELS=()
 ALLOW_DIRTY=0
