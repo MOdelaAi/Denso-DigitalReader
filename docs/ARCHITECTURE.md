@@ -570,28 +570,33 @@ freeze the UI.
 
 ## Operating modes (`src/core/mode/`)
 
-The appliance does exactly **one** job at a time, selected by an explicit,
-destructive operator action. Two modes exist:
+The appliance does exactly **one** job at a time, selected by an explicit
+operator action. Two modes exist:
 
 | Mode | Token | This release |
 |---|---|---|
 | Digital Number Reader | `digit_reader` | the shipping job — `DetectionProcessor` + zone reporting |
-| Floating Ball Leveler | `ball_leveler` | **an unavailable destination** — see below |
+| Floating Ball Leveler | `ball_leveler` | persistence exists; the operator surface is **still guarded** — see below |
 
-**There is no Floating Ball algorithm.** Selecting `ball_leveler` persists the
-mode, performs the full reset, retains every camera connection, and lands on an
-explicit "setup is not available in this release" state. It constructs no
-stream, no processor and no reporter, exposes no wizard, and reports
-`mode_setup_required: true` permanently. The mode *machinery* is what exists —
-inventing a Leveler persistence model before the algorithm spec would bake in
-guesses the algorithm would then have to live with.
+**Ball Leveler persistence exists; the operator surface does not.** Schema v14
+gives Ball Leveler a durable home (`ball_level_calibration`), and
+`save_level_configuration` is its one write chokepoint. What is still NOT
+implemented: the calibration UI, inference, percentage mapping, OpenCV level
+annotation, the runtime state machine and the EngineRegistry replacement.
+Selecting `ball_leveler` therefore still persists the mode, retains every camera
+connection, and lands on an explicit "setup is not available in this release"
+state — no stream, no processor, no reporter, no wizard. `mode_setup_required`
+is no longer hardcoded `true`: it is driven by real calibration, and answers
+`nullopt` (undeterminable) rather than guessing when its query fails.
 
 ### `mode.target` — a key, not a schema change
 
 `src/core/mode/` lives in `denso_core` — **Widgets-free, `Qt6::Core`/`Sql` only**
-(the load/save/reset entry points take a `QSqlDatabase`) — and rides the existing
-`settings` key/value table under the key **`mode.target`**, so **the schema stays
-at v13 — this feature adds no migration.**
+(the load/save/switch entry points take a `QSqlDatabase`) — and rides the existing
+`settings` key/value table under the key **`mode.target`**, so the mode key itself
+needs no migration. **The schema is at v14**, raised by the additive
+`ball_level_calibration` table (one row per camera, `camera_id PRIMARY KEY`), not
+by anything the mode key required.
 
 `parse_target_mode` follows the `parse_display_mode` contract: **any absent,
 unknown or corrupt token resolves to `digit_reader`, never to the newer mode**,
@@ -677,17 +682,19 @@ values**.
 
 ### Operator-facing surface
 
-Confirmation is up-front (real counts, stated consequence, **default Cancel**,
-no type-to-confirm). The safe action is what Enter triggers: `Cancel` is given
+Confirmation is up-front (stated consequence, **default Cancel**, no
+type-to-confirm). The safe action is what Enter triggers: `Cancel` is given
 `setDefault`/`setAutoDefault(true)` and initial focus, and the accept button's
-auto-default is explicitly cleared so the button box cannot promote the
-destructive action. There is no confirm/revert countdown, because the
-processing setup is deleted and a countdown that "reverts" would be a lie. The
-counts must be real — a failed count query aborts the confirmation rather than
-rendering "0".
+auto-default is explicitly cleared so the button box cannot promote the switch.
+The copy carries **no counts and promises no deletion** — it states that camera
+connections and BOTH modes' setup are kept, that processing pauses while the
+target mode is prepared, and that reporting is turned off with its address kept.
+It must never say "cannot be undone": the switch is reversible, and saying
+otherwise would frighten an operator out of a safe action. There is no
+confirm/revert countdown — nothing is destroyed, so there is nothing to revert.
 
-`CameraView` has **three** states, because after a switch `camera::all()` is
-non-empty while `runtime()` is empty and the old "No cameras yet" copy would be a
+`CameraView` has **three** states, because `camera::all()` can be non-empty while
+`runtime()` is empty and the old "No cameras yet" copy would be a
 lie: the empty state (+ Add Camera), the retained-connections
 setup-required state (`digit_reader`, with a Set up cameras action), and the
 retained-connections **unavailable** state (`ball_leveler`, with **no** setup

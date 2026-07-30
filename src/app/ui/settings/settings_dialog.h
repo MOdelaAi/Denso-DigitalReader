@@ -58,9 +58,9 @@ signals:
     void reset_defaults_requested();
     // Application-wide operating-mode switch INTENT (spec §5/§7). `target` is
     // static_cast<int>(mode::TargetMode). Emitted only when the operator clicks
-    // Switch and Reset (never for a bare selector change, never for seeding). The
-    // Slice-7 orchestrator handles it (preview_counts → ModeConfirmDialog →
-    // teardown → switch_and_reset → rebuild). This slice performs none of that.
+    // Switch (never for a bare selector change, never for seeding). MainWindow
+    // handles it (ModeConfirmDialog → teardown → switch_mode → rebuild). This
+    // dialog performs none of that.
     void switch_mode_requested(int target);
 
 private:

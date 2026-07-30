@@ -32,6 +32,8 @@ add_library(denso_core STATIC
     detection/migrate.cpp
     reading/repo.cpp
     brazing/config.cpp
+    level/calibration.cpp
+    level/repo.cpp
     mode/config.cpp
     mode/reset.cpp
     models/hashing.cpp

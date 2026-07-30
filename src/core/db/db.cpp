@@ -14,7 +14,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 13;
+constexpr int SCHEMA_VERSION = 14;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -438,6 +438,49 @@ bool run_migrations(const QSqlDatabase& db) {
                  "forward_map       TEXT NOT NULL,"
                  "inverse_map       TEXT NOT NULL,"
                  "attachments       TEXT NOT NULL)")) {
+            return false;
+        }
+    }
+
+    if (version < 14) {
+        // Ball Leveler measurement configuration - ONE row per camera, and the
+        // SOLE durable Ball Leveler model-binding + calibration authority.
+        //
+        // `camera_id` is the PRIMARY KEY, not an ordinary column beside a surrogate
+        // `id`: that is what makes "one Floating Ball measurement per camera" true
+        // by CONSTRUCTION rather than by a rule a caller can forget. A second
+        // measurement for one camera is not a validation failure, it is a
+        // constraint violation.
+        //
+        // Deliberately NOT stored in `camera_model`: that table's contract is a
+        // digit-reader ensemble (N models, a per-model class subset, a per-class
+        // confidence, cross-model merge), while Ball Leveler v1 is exactly one
+        // model, one class and one threshold. Sharing it would make five invalid
+        // states representable.
+        //
+        // Geometry is NORMALIZED oriented-frame coordinates, like
+        // camera_area.points. `view_revision` fingerprints the view-significant
+        // camera fields the calibration was drawn against - a rotation / pitch /
+        // roll / resolution / source change makes the geometry refer to a different
+        // physical view, which must invalidate the measurement WITHOUT deleting the
+        // operator's work.
+        //
+        // ADDITIVE ONLY. No existing table is dropped, altered or repurposed, so
+        // every Digital Reader row survives this upgrade untouched.
+        if (!run("CREATE TABLE IF NOT EXISTS ball_level_calibration ("
+                 "    camera_id     INTEGER PRIMARY KEY REFERENCES camera(id),"
+                 "    model_id      INTEGER NOT NULL REFERENCES model(id),"
+                 "    class_id      INTEGER NOT NULL,"
+                 "    conf          REAL    NOT NULL,"
+                 "    rect_x        REAL    NOT NULL,"
+                 "    rect_y        REAL    NOT NULL,"
+                 "    rect_w        REAL    NOT NULL,"
+                 "    rect_h        REAL    NOT NULL,"
+                 "    y_100         REAL    NOT NULL,"
+                 "    y_0           REAL    NOT NULL,"
+                 "    hold_ms       INTEGER NOT NULL,"
+                 "    view_revision TEXT    NOT NULL"
+                 ")")) {
             return false;
         }
     }

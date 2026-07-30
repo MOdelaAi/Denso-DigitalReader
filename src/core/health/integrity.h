@@ -44,7 +44,8 @@ struct ZoneIssue {
     /// and send an operator hunting for a mode switch that never happened
     /// (spec §7.3). The kind says what happened to the CAMERA; `policy_reason`
     /// carries the actual cause.
-    enum class Kind { EngineMissing, EnginesUnmanifested, ModelCompatibilityRejected };
+    enum class Kind { EngineMissing, EnginesUnmanifested, ModelCompatibilityRejected,
+                      LevelCalibrationInvalid };
     Kind    kind;
     int64_t camera_id = 0;   // 0 = not camera-scoped (e.g. EnginesUnmanifested)
     QString detail;

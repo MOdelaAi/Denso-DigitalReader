@@ -238,36 +238,14 @@ void MainWindow::on_switch_mode(int target) {
     const mode::TargetMode want = mode::from_index(target);
     if (want == current_mode_) return;  // no switch to the already-active mode
 
-    // Real counts, read immediately before the dialog (§7.1, decision A3). A count
-    // query FAILURE must abort here: rendering it as "0" would let the operator
-    // authorise deleting data they were just told was empty.
-    const auto counts = mode::preview_counts(db_);
-    if (!counts) {
-        // KNOWN LIMITATION, recorded deliberately: this message cannot name the
-        // failing statement. preview_counts() answers only yes/no, and its queries
-        // are local QSqlQuery objects it discards — Qt keeps statement errors on the
-        // QSqlResult, not on the connection, so QSqlDatabase::lastError() would be
-        // empty or (worse) a stale driver-level error from something unrelated.
-        // Appending that would be misinformation, which is worse than none. Carrying
-        // the real text needs preview_counts() to return it, i.e. an API change in
-        // src/core/mode/reset.h — that belongs to the slice that owns it, not here.
-        // The ROLLBACK path, which does have the error, does surface it verbatim.
-        const QString msg = QStringLiteral(
-            "Could not read what the switch would delete, so it was not started. "
-            "No cameras or settings were changed.");
-        qWarning().noquote() << "[mode] switch aborted: preview_counts failed;"
-                             << "no teardown, no confirmation shown";
-        last_switch_error_ = msg;
-        // The operator picked a target we are refusing to act on — put the selector
-        // back on the mode that is actually in effect, so Settings never displays an
-        // uncommitted target as if it were current.
-        settings_->set_current_mode(current_mode_);
-        show_non_modal(this, QMessageBox::Warning, QStringLiteral("Switch and Reset"), msg);
-        return;  // NOTHING torn down — this is before any lifecycle step
-    }
-
+    // NO count preview and NO pre-dialog abort gate. Both existed solely to
+    // guarantee that the destructive switch could state exactly what it was about
+    // to delete; a switch now deletes nothing, so there is nothing to count, and
+    // a broken count query is no longer a reason to refuse an operator a
+    // non-destructive, fully reversible action.
+    //
     // The dialog only asks; it reads no DB and starts no transaction.
-    ModeConfirmDialog dlg(want, *counts, this);
+    ModeConfirmDialog dlg(want, this);
     if (dlg.exec() != QDialog::Accepted) {
         settings_->set_current_mode(current_mode_);  // Cancel restores the selector
         return;                                      // …and changes nothing else
@@ -333,10 +311,10 @@ mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
         camera_view_->teardown_for_switch();
         fire(SwitchEvent::TeardownCompleted);
 
-        // ── 3. The atomic reset. Runs from this modal handler with no other writer
-        // active, so the counts shown above cannot have gone stale.
+        // ── 3. The atomic, NON-DESTRUCTIVE switch. Writes mode.target and
+        // disables reporting in one transaction and deletes nothing.
         fire(SwitchEvent::TransactionStarted);
-        const auto r = mode::switch_and_reset(db_, target);
+        const auto r = mode::switch_mode(db_, target);
         if (r.ok) {
             outcome = Outcome::Committed;
             fire(SwitchEvent::TransactionCommitted);
@@ -449,7 +427,7 @@ mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
                                 failure);
                 break;
         }
-        show_non_modal(this, QMessageBox::Critical, QStringLiteral("Switch and Reset"),
+        show_non_modal(this, QMessageBox::Critical, QStringLiteral("Switch Target Mode"),
                        body);
     }
 

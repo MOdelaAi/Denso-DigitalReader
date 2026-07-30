@@ -26,7 +26,7 @@ TEST_CASE("Settings mode selector emits an intent only, never for the active mod
 
     denso::ui::SettingsDialog dlg(db->handle());
     auto* combo = dlg.findChild<QComboBox*>(QStringLiteral("modeSelect"));
-    auto* btn = dlg.findChild<QPushButton*>(QStringLiteral("switchAndResetButton"));
+    auto* btn = dlg.findChild<QPushButton*>(QStringLiteral("switchModeButton"));
     REQUIRE(combo != nullptr);
     REQUIRE(btn != nullptr);
 

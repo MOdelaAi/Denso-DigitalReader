@@ -159,3 +159,93 @@ isolated test DB but are never printed, logged, committed or included in evidenc
 Slices 1 and 2 are independent of each other and of the UI. Slice 4 depends on 2;
 slice 5 depends on 3 and 4. Slice 5 is the only one that changes operator-visible
 availability.
+
+---
+
+## Lean V1 amendment — operator approved
+
+Approved 2026-07-30, AFTER Slice 1 was implemented. This amendment **supersedes
+the process and v1 scope above wherever they conflict**. The historical findings,
+decisions and rationale above are deliberately left unrewritten — they record why
+the design is what it is, and several of them are still load-bearing.
+
+Goal: deliver a working operator flow sooner, without dropping any
+correctness-critical protection.
+
+### Delivery shape
+
+The remaining five implementation slices are replaced by three phases:
+
+| Phase | Contents | Gate |
+|---|---|---|
+| **A** — Measurement core + calibration UI | former Slices 2 + 3: calibration rectangle, 0%/100% ball-centre lines, percentage calculation clamped to 0-100, rejection of reversed/degenerate/non-finite calibration, one compatible Float model, highest-confidence valid detection inside the rectangle, save/reload/edit, Digital Reader configuration preserved | focused tests |
+| **B** — Processor + overlay + mode activation | former Slices 4 + 5: `BallLevelProcessor`, Ball-specific `CameraGrid` branch, OpenCV overlay on the final display Mat (rectangle, reference lines, ball box + centre, percentage), mode activation, correct Float engine loading, **guard removal only once the complete path is green** | Codex processor/threading review |
+| **C** — Package + live acceptance | final complete-diff Codex review, `.deb` build + inspection, installed-runtime verification on `.15`, authorised live-camera acceptance, mode-switch and restart-persistence acceptance | final Codex review |
+
+### Runtime state — minimum useful model
+
+```text
+Unconfigured | Acquiring | Healthy | Unavailable | CalibrationInvalid
+```
+
+`Unavailable` may carry a safe reason code (`camera_offline`, `paused`,
+`model_unavailable`, `inhibited`). **An old value must never be displayed as a
+current live measurement.**
+
+### EngineRegistry — decision deferred, not designed away
+
+Before Phase B, make a SHORT source-based comparison of (1) replacing
+`EngineRegistry` + `WarmupState` in-process versus (2) safely re-executing the
+same application binary after the committed mode switch (a self-reexec, which is
+NOT the same as exiting and relying on a supervisor — there is no supervisor).
+Choose on actual lifecycle, unsaved UI state, lock-file behaviour and failure
+recovery. Keep it concise. Mandatory either way: no union allow-list; no
+wrong-mode engine reaches warm-up or inference; committed mode and displayed mode
+agree; failure is explicit; the operator can switch back.
+
+### Review + test cadence
+
+- Codex gates for the rest of the project: architecture (done), processor/threading
+  (end of Phase B), final complete-feature (before package/live acceptance). No
+  per-slice or per-UI-edit reviews.
+- During development: focused tests only. One full CTest before Codex. After
+  Codex, rerun the full suite only if PRODUCTION code changed —
+  documentation-only corrections do not require another full run.
+
+### Requirement disposition
+
+**Retained (non-negotiable):** query failure distinct from missing data;
+transactional database changes; Ball configuration always uses BallLeveler
+compatibility; `digitv3` cannot enter Ball configuration; Float models cannot
+enter Digital Reader; invalid class ids rejected; mode switching preserves both
+modes' data; invalid calibration rejected; percentage clamped to 0-100;
+production guards remain until the complete Ball runtime works; one full suite
+before commit; package + installed-runtime testing at the end.
+
+**Simplified:** detection tie-break — a simple stable deterministic rule replaces
+the exhaustive ordering hierarchy; runtime state machine — five states replace
+eight; slice structure — three phases replace five slices.
+
+**Deferred to a follow-up project** (unless live acceptance proves them
+necessary): `HoldingLastValid` behaviour and its hold timer; the status-file
+`level` array; Backend level reporting; historical level persistence; the
+exhaustive eight-state runtime machine; exhaustive deterministic detection
+ordering; multiple independent tanks per camera; automatic selection or merging
+of Float models.
+
+**Waived:** mutations 6-12 as executable apply/build/restore cycles. The same
+risks are instead pinned by named automated tests (one Ball configuration per
+camera; invalid writes leave no partial row; Digital Reader data survives
+switching; Ball calibration survives switching; mode and reporting settings roll
+back atomically; inactive-mode data does not degrade the active mode; all
+production guards present). Mutations 1-5 were executed and killed and remain
+valid evidence. *(Historical note: 6-12 were in fact also executed and killed
+before the waiver arrived, so the evidence exists — the waiver removes the
+obligation, not the result.)*
+
+### Not implemented
+
+Nothing in Phases A-C is implemented yet. Slice 1 delivered PERSISTENCE ONLY:
+schema v14 `ball_level_calibration`, the write chokepoint, mode-scoped integrity,
+and the non-destructive switch. The Ball Leveler operator surface remains
+guarded.

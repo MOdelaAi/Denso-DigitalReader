@@ -1,109 +1,99 @@
-// Slice 5 — the pure confirmation-copy builder for the destructive Switch-and-
-// Reset dialog (spec §7.1). mode_confirm_body is Qt-Core-only, so it is unit-
-// tested here in the backend-free denso_tests and compiled into BOTH denso_tests
-// and denso_app (like grid_layout.cpp). The copy must state, from REAL counts,
-// what is KEPT (camera connections) and what is destroyed (processing setup) —
-// and must NEVER imply the cameras/connections themselves are deleted.
+// Slice 1 (revised) — the pure confirmation-copy builder for the Switch Target
+// Mode dialog. mode_confirm_body is Qt-Core-only, so it is unit-tested here in
+// the backend-free denso_tests and compiled into BOTH denso_tests and denso_app
+// (like grid_layout.cpp).
+//
+// The copy's contract CHANGED with the non-destructive switch. It must now state
+// what is PRESERVED — camera connections, both modes' configuration — that
+// processing pauses while the target mode is prepared, and that reporting is
+// disabled. It must NEVER promise deletion or irreversibility: the switch does
+// neither, and a dialog that says otherwise would frighten an operator out of a
+// safe, reversible action.
 #include <catch2/catch_test_macros.hpp>
 
 #include "mode/mode.h"
-#include "mode/reset.h"                    // mode::SwitchCounts
 #include "ui/settings/mode_confirm_text.h"  // mode_confirm_body
 
 #include <QString>
 
-using denso::mode::SwitchCounts;
 using denso::mode::TargetMode;
 
-namespace {
-// The plan's example counts (spec §7.1): 3 cameras, 3 model bindings, 7 areas,
-// zones {3,4,5,7}, 1284 readings, 2 receipts.
-SwitchCounts example_counts() {
-    SwitchCounts c;
-    c.cameras = 3;
-    c.model_bindings = 3;
-    c.areas = 7;
-    c.zones = {3, 4, 5, 7};
-    c.readings = 1284;
-    c.receipts = 2;
-    return c;
-}
-}  // namespace
-
-TEST_CASE("confirmation body renders every real count", "[mode_confirm]") {
-    const QString body =
-        denso::ui::mode_confirm_body(TargetMode::BallLeveler, example_counts());
-
-    // 1. camera count; 2. area count; 3. model-binding count; 5. receipt count.
-    CHECK(body.contains(QStringLiteral("3 camera connections")));
-    CHECK(body.contains(QStringLiteral("7 detection areas")));
-    CHECK(body.contains(QStringLiteral("3 model bindings")));
-    CHECK(body.contains(QStringLiteral("2 model-rollback receipts")));
-    // 4. reading count uses grouped thousands (an explicit en-US locale, never the
-    //    non-grouping C locale — which would render "1284").
-    CHECK(body.contains(QStringLiteral("1,284")));
-    CHECK_FALSE(body.contains(QStringLiteral("1284")));
-    // 6. the distinct zone numbers are shown (count + the list).
-    CHECK(body.contains(QStringLiteral("4 reported zones (3, 4, 5, 7)")));
-}
-
-TEST_CASE("confirmation body states connections are KEPT and setup is destroyed",
+TEST_CASE("the confirmation promises no deletion and no irreversibility",
           "[mode_confirm]") {
-    const QString body =
-        denso::ui::mode_confirm_body(TargetMode::BallLeveler, example_counts());
+    // MUTATION GUARD: this is the assertion that fails if the destructive copy is
+    // ever restored. Both directions are checked, for both targets.
+    for (auto target : {TargetMode::BallLeveler, TargetMode::DigitReader}) {
+        const QString body = denso::ui::mode_confirm_body(target);
+        CHECK_FALSE(body.contains(QStringLiteral("cannot be undone")));
+        CHECK_FALSE(body.contains(QStringLiteral("will be deleted")));
+        CHECK_FALSE(body.contains(QStringLiteral("destroy"), Qt::CaseInsensitive));
+        CHECK_FALSE(body.contains(QStringLiteral("erase"), Qt::CaseInsensitive));
+        CHECK_FALSE(body.contains(QStringLiteral("permanent"), Qt::CaseInsensitive));
+        CHECK_FALSE(body.contains(QStringLiteral("setup again"), Qt::CaseInsensitive));
+    }
+}
 
-    // 7. camera connections are explicitly stated as kept, with preserved fields.
-    CHECK(body.contains(QStringLiteral("camera connections will be kept")));
-    CHECK(body.contains(QStringLiteral(
-        "sources, credentials, resolution and orientation are preserved")));
-    // The processing setup being deleted names the mode being LEFT (digit_reader).
-    CHECK(body.contains(QStringLiteral("Digital Number Reader setup will be deleted")));
-    CHECK(body.contains(QStringLiteral("processing setup again")));
-    // 8. reporting is explicitly stated as disabled.
+TEST_CASE("the confirmation states camera connections are preserved",
+          "[mode_confirm]") {
+    const QString body = denso::ui::mode_confirm_body(TargetMode::BallLeveler);
+    CHECK(body.contains(QStringLiteral("camera connections are kept")));
+    CHECK(body.contains(QStringLiteral("credentials")));
+}
+
+TEST_CASE("the confirmation states BOTH modes' configuration is preserved",
+          "[mode_confirm]") {
+    // Leaving digit_reader: the digit workspace is named as kept, and so is any
+    // Ball work already done. Naming BOTH matters — "nothing is deleted" alone
+    // reads as "nothing happens".
+    const QString to_ball = denso::ui::mode_confirm_body(TargetMode::BallLeveler);
+    CHECK(to_ball.contains(QStringLiteral("Nothing is deleted")));
+    CHECK(to_ball.contains(QStringLiteral("Digital Number Reader setup")));
+    CHECK(to_ball.contains(QStringLiteral("Floating Ball Leveler setup you have")));
+    CHECK(to_ball.contains(QStringLiteral("switch back")));
+
+    // …and the mirror image on the way back.
+    const QString to_digit = denso::ui::mode_confirm_body(TargetMode::DigitReader);
+    CHECK(to_digit.contains(QStringLiteral("Floating Ball Leveler setup")));
+    CHECK(to_digit.contains(QStringLiteral("Digital Number Reader setup you have")));
+}
+
+TEST_CASE("the confirmation discloses the processing pause honestly per target",
+          "[mode_confirm]") {
+    // digit_reader genuinely resumes, so it may say so.
+    const QString to_digit = denso::ui::mode_confirm_body(TargetMode::DigitReader);
+    CHECK(to_digit.contains(QStringLiteral("Processing pauses")));
+    CHECK(to_digit.contains(QStringLiteral("starts again on its own")));
+
+    // ball_leveler does NOT resume in this release - it lands on the guarded
+    // "not available" page. Promising automatic resumption there would be a
+    // straight falsehood, so the copy must only claim the stop.
+    const QString to_ball = denso::ui::mode_confirm_body(TargetMode::BallLeveler);
+    CHECK(to_ball.contains(QStringLiteral("Processing stops")));
+    CHECK(to_ball.contains(QStringLiteral("Floating Ball Leveler is prepared")));
+    CHECK_FALSE(to_ball.contains(QStringLiteral("starts again on its own")));
+}
+
+TEST_CASE("the confirmation states reporting is disabled and the address kept",
+          "[mode_confirm]") {
+    const QString body = denso::ui::mode_confirm_body(TargetMode::DigitReader);
     CHECK(body.contains(QStringLiteral("reporting will be turned off")));
-    // 9. the server URL/address is explicitly stated as retained + manual re-enable.
     CHECK(body.contains(QStringLiteral("server address is kept")));
     CHECK(body.contains(QStringLiteral("re-enable reporting yourself")));
-    // 10. the operation is stated as irreversible.
-    CHECK(body.contains(QStringLiteral("cannot be undone")));
 }
 
 TEST_CASE("Ball Leveler unavailability appears ONLY for the Ball Leveler target",
           "[mode_confirm]") {
-    // 11. present for ball_leveler...
-    const QString to_ball =
-        denso::ui::mode_confirm_body(TargetMode::BallLeveler, example_counts());
-    CHECK(to_ball.contains(QStringLiteral("not available in this release")));
-    CHECK(to_ball.contains(QStringLiteral("Switch to Floating Ball Leveler?")));
-
-    // ...and absent for digit_reader (the leaving mode is then ball_leveler).
-    const QString to_digit =
-        denso::ui::mode_confirm_body(TargetMode::DigitReader, example_counts());
-    CHECK_FALSE(to_digit.contains(QStringLiteral("not available in this release")));
-    CHECK(to_digit.contains(QStringLiteral("Switch to Digital Number Reader?")));
-    CHECK(to_digit.contains(QStringLiteral("Floating Ball Leveler setup will be deleted")));
-    // Connections are still kept regardless of direction.
-    CHECK(to_digit.contains(QStringLiteral("camera connections will be kept")));
+    // GUARD (Slice 1): the wizard is still not operator-accessible, and the copy
+    // must say so before the operator commits — but only when that is the target.
+    CHECK(denso::ui::mode_confirm_body(TargetMode::BallLeveler)
+              .contains(QStringLiteral("not available in this release")));
+    CHECK_FALSE(denso::ui::mode_confirm_body(TargetMode::DigitReader)
+                    .contains(QStringLiteral("not available in this release")));
 }
 
-TEST_CASE("confirmation body never implies the cameras themselves are deleted",
-          "[mode_confirm]") {
-    // 12. The valid copy legitimately contains both "camera" and "deleted" (the
-    //     PROCESSING setup is deleted), so we reject exact forbidden implications,
-    //     NOT a naive camera+delete co-occurrence.
-    for (const TargetMode t : {TargetMode::BallLeveler, TargetMode::DigitReader}) {
-        const QString body = denso::ui::mode_confirm_body(t, example_counts());
-        CHECK_FALSE(body.contains(QStringLiteral("camera connections will be deleted")));
-        CHECK_FALSE(body.contains(QStringLiteral("delete cameras")));
-        CHECK_FALSE(body.contains(QStringLiteral("remove camera connections")));
-        CHECK_FALSE(body.contains(QStringLiteral("cameras will be deleted")));
-    }
-}
-
-TEST_CASE("zero zones renders a count with no empty parenthesis", "[mode_confirm]") {
-    SwitchCounts c = example_counts();
-    c.zones.clear();
-    const QString body = denso::ui::mode_confirm_body(TargetMode::BallLeveler, c);
-    CHECK(body.contains(QStringLiteral("0 reported zones")));
-    CHECK_FALSE(body.contains(QStringLiteral("()")));
+TEST_CASE("the confirmation names the destination in its question", "[mode_confirm]") {
+    CHECK(denso::ui::mode_confirm_body(TargetMode::BallLeveler)
+              .startsWith(QStringLiteral("Switch to Floating Ball Leveler?")));
+    CHECK(denso::ui::mode_confirm_body(TargetMode::DigitReader)
+              .startsWith(QStringLiteral("Switch to Digital Number Reader?")));
 }

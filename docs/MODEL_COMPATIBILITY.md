@@ -688,7 +688,10 @@ Stated explicitly, because the packaged Float artifacts make it easy to assume
 more exists than does:
 
 - **`ball_leveler` may be persisted.** `mode.target` accepts it and
-  `switch_and_reset` will commit it.
+  `switch_mode` will commit it (non-destructively — see **Operating modes** in
+  `docs/ARCHITECTURE.md`). Since schema v14 a Ball Leveler binding + calibration
+  also has a durable home, `ball_level_calibration`; the operator-facing setup
+  surface is still guarded.
 - **The repository policy may return Float models for that mode.**
   `selectable_models`, `attached_model_filenames` and `model_compatibility` will
   all authorize `float-small` / `float-big` under `ball_leveler` — the policy layer

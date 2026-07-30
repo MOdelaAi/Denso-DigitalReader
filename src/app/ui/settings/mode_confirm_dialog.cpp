@@ -10,10 +10,9 @@
 namespace denso::ui {
 
 ModeConfirmDialog::ModeConfirmDialog(mode::TargetMode target,
-                                     const mode::SwitchCounts& counts,
                                      QWidget* parent)
     : QDialog(parent) {
-    setWindowTitle(QStringLiteral("Switch and Reset Target Mode"));
+    setWindowTitle(QStringLiteral("Switch Target Mode"));
     setObjectName(QStringLiteral("dialogPanel"));
     setModal(true);
 
@@ -21,7 +20,7 @@ ModeConfirmDialog::ModeConfirmDialog(mode::TargetMode target,
     v->setContentsMargins(24, 24, 24, 24);
     v->setSpacing(16);
 
-    auto* body = new QLabel(mode_confirm_body(target, counts));
+    auto* body = new QLabel(mode_confirm_body(target));
     body->setObjectName(QStringLiteral("modeConfirmBody"));
     body->setWordWrap(true);
     body->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -30,16 +29,17 @@ ModeConfirmDialog::ModeConfirmDialog(mode::TargetMode target,
     auto* buttons = new QDialogButtonBox;
     auto* cancel =
         buttons->addButton(QStringLiteral("Cancel"), QDialogButtonBox::RejectRole);
-    auto* go = buttons->addButton(QStringLiteral("Switch and Reset"),
+    auto* go = buttons->addButton(QStringLiteral("Switch"),
                                   QDialogButtonBox::AcceptRole);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     v->addWidget(buttons);
 
-    // A3 / spec §7.1: the SAFE action is the default and holds initial focus, so
+    // The SAFE action is the default and holds initial focus, so
     // Enter cancels; closing the dialog (Esc / the window X) is already a reject.
     // Explicitly clear the accept button's auto-default so the button box cannot
-    // promote the destructive action to default.
+    // promote the switch to default. It is reversible now, but still not a
+    // keystroke an operator should trigger by accident.
     go->setAutoDefault(false);
     go->setDefault(false);
     cancel->setAutoDefault(true);

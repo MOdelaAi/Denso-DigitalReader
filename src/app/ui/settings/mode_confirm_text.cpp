@@ -1,6 +1,5 @@
 #include "ui/settings/mode_confirm_text.h"
 
-#include <QLocale>
 #include <QStringList>
 
 namespace denso::ui {
@@ -16,31 +15,9 @@ QString mode_display_name(mode::TargetMode m) {
     return QStringLiteral("Digital Number Reader");
 }
 
-// Group thousands deterministically with an EXPLICIT English (US) locale. The C
-// locale does not group (QLocale::c().toString(1284) == "1284"), so the spec's
-// "1,284" needs a real grouping locale — and an explicit one, not the ambient
-// system locale, so the rendering is deterministic across machines.
-QString grouped(int n) {
-    return QLocale(QLocale::English, QLocale::UnitedStates)
-        .toString(static_cast<qlonglong>(n));
-}
-
-// "N reported zones (z1, z2, …)" — or just "0 reported zones" when there are
-// none, so no empty "()" is rendered.
-QString zones_clause(const std::vector<int>& zones) {
-    if (zones.empty()) {
-        return QStringLiteral("0 reported zones");
-    }
-    QStringList nums;
-    nums.reserve(static_cast<int>(zones.size()));
-    for (int z : zones) nums << QString::number(z);
-    return QStringLiteral("%1 reported zones (%2)")
-        .arg(grouped(static_cast<int>(zones.size())), nums.join(QStringLiteral(", ")));
-}
-
 } // namespace
 
-QString mode_confirm_body(mode::TargetMode target, const mode::SwitchCounts& c) {
+QString mode_confirm_body(mode::TargetMode target) {
     // Exactly two modes exist, so the mode being LEFT is the opposite of `target`.
     const mode::TargetMode leaving =
         target == mode::TargetMode::BallLeveler ? mode::TargetMode::DigitReader
@@ -49,37 +26,49 @@ QString mode_confirm_body(mode::TargetMode target, const mode::SwitchCounts& c) 
     QStringList paras;
     paras << QStringLiteral("Switch to %1?").arg(mode_display_name(target));
 
-    // Retained connections FIRST — the dialog must never imply cameras are deleted.
+    // Connections first - this was true under the destructive switch too, and
+    // stays first because it is what an operator worries about most.
     paras << QStringLiteral(
-                 "%1 camera connections will be kept — sources, credentials, "
-                 "resolution and orientation are preserved.")
-                 .arg(grouped(c.cameras));
+        "Your camera connections are kept - sources, credentials, resolution "
+        "and orientation are all preserved.");
 
-    // The destroyed processing setup names the mode being LEFT, with real counts.
+    // The sentence that REPLACES the deletion warning. It names the mode being
+    // left explicitly, because "nothing is deleted" is easy to read as "nothing
+    // happens": the old mode's work is retained and will still be there on the
+    // way back.
     paras << QStringLiteral(
-                 "Their %1 setup will be deleted: %2 model bindings, "
-                 "%3 detection areas, %4, %5 stored readings, and %6 "
-                 "model-rollback receipts. Each camera will need processing "
-                 "setup again.")
-                 .arg(mode_display_name(leaving))
-                 .arg(grouped(c.model_bindings))
-                 .arg(grouped(c.areas))
-                 .arg(zones_clause(c.zones))
-                 .arg(grouped(c.readings))
-                 .arg(grouped(c.receipts));
+                 "Nothing is deleted. Your %1 setup - model bindings, detection "
+                 "areas, reported zones and stored readings - is kept exactly as "
+                 "it is, and will still be there if you switch back. Any %2 setup "
+                 "you have already done is kept too.")
+                 .arg(mode_display_name(leaving), mode_display_name(target));
+
+    // The one real cost of the switch, stated plainly so it is not a surprise.
+    // Only digit_reader actually RESUMES. Ball Leveler has no processor yet and
+    // lands on the guarded "not available" page, so promising that processing
+    // "starts again on its own" would be a straight falsehood for that target.
+    if (target == mode::TargetMode::DigitReader) {
+        paras << QStringLiteral(
+            "Processing pauses while %1 is prepared, then starts again on its "
+            "own.").arg(mode_display_name(target));
+    } else {
+        paras << QStringLiteral(
+            "Processing stops while %1 is prepared.")
+            .arg(mode_display_name(target));
+    }
 
     // The reporting guarantee (spec §6.6): disabled, address kept, manual re-enable.
     paras << QStringLiteral(
         "Server reporting will be turned off. The server address is kept; you "
         "must re-enable reporting yourself.");
 
-    // The destination's unavailability must appear BEFORE the operator commits.
+    // GUARD (Slice 1): the destination's unavailability must appear BEFORE the
+    // operator commits. Removing this line would advertise a wizard that
+    // apply_camera_button_gate() still refuses to open.
     if (target == mode::TargetMode::BallLeveler) {
         paras << QStringLiteral(
             "Floating Ball Leveler setup is not available in this release.");
     }
-
-    paras << QStringLiteral("This cannot be undone.");
 
     return paras.join(QStringLiteral("\n\n"));
 }

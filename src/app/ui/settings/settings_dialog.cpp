@@ -170,16 +170,17 @@ QWidget* SettingsDialog::build_mode() {
     v->addLayout(box);
 
     auto* note = common::dim_label(QStringLiteral(
-        "Switching resets each camera's processing setup and turns off server "
-        "reporting. Camera connections are kept. This cannot be undone."));
+        "Switching keeps your camera connections and both modes' setup, and "
+        "turns off server reporting. Processing stops while the new mode is "
+        "prepared."));
     note->setWordWrap(true);
     note->setProperty("faint", true);
     v->addWidget(note);
 
-    switch_mode_btn_ = new QPushButton(QStringLiteral("Switch and Reset"));
-    switch_mode_btn_->setObjectName(QStringLiteral("switchAndResetButton"));
-    // Intent ONLY (spec §5/§7). Slice 7 owns preview_counts + ModeConfirmDialog +
-    // the transaction. Enabled only when the selected mode differs from current,
+    switch_mode_btn_ = new QPushButton(QStringLiteral("Switch"));
+    switch_mode_btn_->setObjectName(QStringLiteral("switchModeButton"));
+    // Intent ONLY (spec §5/§7). MainWindow owns ModeConfirmDialog + the
+    // transaction. Enabled only when the selected mode differs from current,
     // so a click can never request a switch to the already-active mode.
     connect(switch_mode_btn_, &QPushButton::clicked, this, [this] {
         const mode::TargetMode sel =

@@ -864,12 +864,12 @@ TEST_CASE("existing integrity behaviour is unchanged by enforcement",
         CHECK(denso::health::exit_code_for(v.status) == 78);
     }
 
-    SECTION("the schema is still v13") {
+    SECTION("the schema is at v14 (Ball Leveler calibration)") {
         Fixture f;
-        CHECK(denso::db::supported_schema_version() == 13);
+        CHECK(denso::db::supported_schema_version() == 14);
         const auto ver = denso::db::read_user_version(f.h());
         REQUIRE(ver.has_value());
-        CHECK(*ver == 13);
+        CHECK(*ver == 14);
     }
 }
 

@@ -191,7 +191,7 @@ struct EventLog {
 // 1. Successful switch
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("a committed switch empties runtime, disables reporting, and gates the wizard",
+TEST_CASE("a committed switch keeps every row, disables reporting, and gates the wizard",
           "[mode_switch_flow]") {
     Harness h;
     h.enable_reporting();
@@ -210,22 +210,26 @@ TEST_CASE("a committed switch empties runtime, disables reporting, and gates the
     CHECK(win->current_mode() == TargetMode::BallLeveler);
     CHECK(denso::mode::load(h.handle()) == TargetMode::BallLeveler);
 
-    // The reset emptied runtime() by zeroing setup_complete — the camera ROW
-    // survives with its id (decision A1); it is simply no longer admissible.
-    CHECK(denso::camera::runtime(h.handle()).empty());
+    // NON-DESTRUCTIVE: the camera keeps its id, its name AND its setup_complete
+    // flag, so it stays admissible to runtime(). The destructive switch used to
+    // zero that flag; preserving it is the whole point of the supersession, and
+    // what makes switching back a no-op rather than a re-setup.
+    CHECK_FALSE(denso::camera::runtime(h.handle()).empty());
     const auto rows = denso::camera::all(h.handle());
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].id == *cam_id);
     CHECK(rows[0].name == "Line A");
-    CHECK_FALSE(rows[0].setup_complete);
+    CHECK(rows[0].setup_complete);
 
     // Reporting is disabled in configuration, and the address is kept (A2).
     const auto bcfg = denso::brazing::load(h.handle());
     CHECK_FALSE(bcfg.enabled);
     CHECK(bcfg.base_url == "http://127.0.0.1:9");
 
-    // status.json names the new mode with setup-required permanently true (§2.1),
-    // written by the CameraGrid idle writer — never by MainWindow.
+    // status.json names the new mode. setup_required is no longer HARDCODED true:
+    // it is now driven by real Ball calibration, and this fixture has none, so
+    // true is the correct ANSWER rather than a constant. Written by the
+    // CameraGrid idle writer — never by MainWindow.
     const QJsonObject st = read_status_json();
     CHECK(st.value(QStringLiteral("mode")).toString() == QStringLiteral("ball_leveler"));
     CHECK(st.value(QStringLiteral("mode_setup_required")).toBool() == true);
@@ -253,10 +257,17 @@ TEST_CASE("a rolled-back switch keeps the OLD mode in memory and in the DB",
     const auto cam_id = denso::camera::insert(
         h.handle(), model_less_cam("Line A", /*active*/ true, /*setup*/ true));
     REQUIRE(cam_id);
-    // Inject a failure INSIDE the reset transaction: the DELETE FROM reading step
-    // aborts, so switch_and_reset must roll everything back.
+    // Inject a failure INSIDE the switch transaction. switch_mode deletes nothing,
+    // so the only writes it makes are the two `settings` upserts — aborting one of
+    // those is now the only way to exercise the rollback path.
+    // Both triggers: the settings write is an upsert, so it INSERTs when the
+    // key is absent and UPDATEs when it is present. Arming only one would make
+    // the injection depend on fixture history rather than on the code.
     exec_sql(h.handle(), QStringLiteral(
-        "CREATE TRIGGER boom BEFORE DELETE ON reading BEGIN "
+        "CREATE TRIGGER boom_i BEFORE INSERT ON settings BEGIN "
+        "SELECT RAISE(ABORT,'injected'); END"));
+    exec_sql(h.handle(), QStringLiteral(
+        "CREATE TRIGGER boom_u BEFORE UPDATE ON settings BEGIN "
         "SELECT RAISE(ABORT,'injected'); END"));
     exec_sql(h.handle(), QStringLiteral(
         "INSERT INTO reading (camera_id,ts_ms,value,conf) VALUES (%1,1,'1',0.5)")
@@ -296,8 +307,14 @@ TEST_CASE("a rolled-back switch surfaces the verbatim SQL error", "[mode_switch_
     const auto cam_id = denso::camera::insert(
         h.handle(), model_less_cam("Line A", /*active*/ true, /*setup*/ true));
     REQUIRE(cam_id);
+    // Both triggers: the settings write is an upsert, so it INSERTs when the
+    // key is absent and UPDATEs when it is present. Arming only one would make
+    // the injection depend on fixture history rather than on the code.
     exec_sql(h.handle(), QStringLiteral(
-        "CREATE TRIGGER boom BEFORE DELETE ON reading BEGIN "
+        "CREATE TRIGGER boom_i BEFORE INSERT ON settings BEGIN "
+        "SELECT RAISE(ABORT,'injected-marker'); END"));
+    exec_sql(h.handle(), QStringLiteral(
+        "CREATE TRIGGER boom_u BEFORE UPDATE ON settings BEGIN "
         "SELECT RAISE(ABORT,'injected-marker'); END"));
     exec_sql(h.handle(), QStringLiteral(
         "INSERT INTO reading (camera_id,ts_ms,value,conf) VALUES (%1,1,'1',0.5)")
@@ -350,8 +367,14 @@ TEST_CASE("no CameraStream is constructed between teardown start and rollback",
     const auto cam_id = denso::camera::insert(
         h.handle(), model_less_cam("Line A", /*active*/ true, /*setup*/ true));
     REQUIRE(cam_id);
+    // Both triggers: the settings write is an upsert, so it INSERTs when the
+    // key is absent and UPDATEs when it is present. Arming only one would make
+    // the injection depend on fixture history rather than on the code.
     exec_sql(h.handle(), QStringLiteral(
-        "CREATE TRIGGER boom BEFORE DELETE ON reading BEGIN "
+        "CREATE TRIGGER boom_i BEFORE INSERT ON settings BEGIN "
+        "SELECT RAISE(ABORT,'injected'); END"));
+    exec_sql(h.handle(), QStringLiteral(
+        "CREATE TRIGGER boom_u BEFORE UPDATE ON settings BEGIN "
         "SELECT RAISE(ABORT,'injected'); END"));
     exec_sql(h.handle(), QStringLiteral(
         "INSERT INTO reading (camera_id,ts_ms,value,conf) VALUES (%1,1,'1',0.5)")
@@ -400,8 +423,14 @@ TEST_CASE("a rolled-back switch fires the lifecycle events in exact order",
     const auto cam_id = denso::camera::insert(
         h.handle(), model_less_cam("Line A", /*active*/ true, /*setup*/ true));
     REQUIRE(cam_id);
+    // Both triggers: the settings write is an upsert, so it INSERTs when the
+    // key is absent and UPDATEs when it is present. Arming only one would make
+    // the injection depend on fixture history rather than on the code.
     exec_sql(h.handle(), QStringLiteral(
-        "CREATE TRIGGER boom BEFORE DELETE ON reading BEGIN "
+        "CREATE TRIGGER boom_i BEFORE INSERT ON settings BEGIN "
+        "SELECT RAISE(ABORT,'injected'); END"));
+    exec_sql(h.handle(), QStringLiteral(
+        "CREATE TRIGGER boom_u BEFORE UPDATE ON settings BEGIN "
         "SELECT RAISE(ABORT,'injected'); END"));
     exec_sql(h.handle(), QStringLiteral(
         "INSERT INTO reading (camera_id,ts_ms,value,conf) VALUES (%1,1,'1',0.5)")
@@ -422,61 +451,6 @@ TEST_CASE("a rolled-back switch fires the lifecycle events in exact order",
 // 5. Preview-count failure aborts before confirmation AND before teardown
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("a count-query failure aborts with no confirmation and no teardown",
-          "[mode_switch_flow]") {
-    Harness h;
-    REQUIRE(denso::camera::insert(
-        h.handle(), model_less_cam("Line A", /*active*/ true, /*setup*/ true)));
-
-    auto win = h.make_window();
-    EventLog log;
-    log.install(*win);
-    const uint64_t streams_before = CameraStream::constructed_count();
-
-    // Break a count query. preview_counts() then returns nullopt, and A3 forbids
-    // confirming on fabricated zeros — the operator must never authorise deleting
-    // data they were told was empty.
-    exec_sql(h.handle(), QStringLiteral("DROP TABLE reading"));
-
-    // The UI handler runs its REAL decision logic. It aborts before ever
-    // constructing ModeConfirmDialog, which is why this does not block on a modal.
-    win->on_switch_mode(static_cast<int>(TargetMode::BallLeveler));
-
-    CHECK(log.order.empty());                   // no teardown, no transaction event
-    CHECK(CameraStream::constructed_count() == streams_before);  // pipeline untouched
-    CHECK(win->current_mode() == TargetMode::DigitReader);
-    CHECK(denso::mode::load(h.handle()) == TargetMode::DigitReader);
-    CHECK(win->camera_view_page_index() == 1);  // still the live grid
-    CHECK_FALSE(denso::camera::runtime(h.handle()).empty());
-    // The operator is told something went wrong, without a fabricated count.
-    CHECK_FALSE(win->last_switch_error().isEmpty());
-    CHECK_FALSE(win->last_switch_error().contains(QStringLiteral("0 ")));
-}
-
-TEST_CASE("the connection carries no statement error, which is why the preview message is generic",
-          "[mode_switch_flow]") {
-    // Pins the reason on_switch_mode's preview-failure message cannot name the
-    // failing statement, so the limitation is recorded as a fact about Qt rather
-    // than an unexplained gap in the copy.
-    //
-    // Qt keeps a STATEMENT error on the QSqlResult (QSqlQuery::lastError), and only
-    // driver-level errors (open/close/transaction) on the connection
-    // (QSqlDatabase::lastError). preview_counts() runs local QSqlQuery objects and
-    // discards them, so MainWindow cannot recover the text from the connection —
-    // reading it there would surface nothing, or a stale unrelated error. Carrying
-    // it properly requires mode::preview_counts() to return it (src/core/mode/reset.h).
-    Harness h;
-    exec_sql(h.handle(), QStringLiteral("DROP TABLE reading"));
-
-    QSqlQuery q(h.handle());
-    REQUIRE_FALSE(q.exec(QStringLiteral("SELECT COUNT(*) FROM reading")));
-    // The QUERY has the real text…
-    CHECK(q.lastError().text().contains(QStringLiteral("no such table"),
-                                        Qt::CaseInsensitive));
-    // …and the CONNECTION does not, so db_.lastError() is not a usable substitute.
-    CHECK_FALSE(h.handle().lastError().text().contains(QStringLiteral("no such table"),
-                                                       Qt::CaseInsensitive));
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. Same-mode request refusal
@@ -806,7 +780,40 @@ private:
 
 }  // namespace
 
-TEST_CASE("the confirmation shows real counts and Cancel changes nothing",
+TEST_CASE("a broken count query no longer blocks switching",
+          "[mode_switch_flow]") {
+    // The INVERSE of the behaviour this file used to pin. The destructive switch
+    // refused to proceed when it could not count what it was about to delete —
+    // correct then, because an operator must never authorise deleting data they
+    // were told was empty. A switch now deletes nothing, so a broken `reading`
+    // table is no longer any reason to deny a reversible action.
+    //
+    // MUTATION GUARD: reinstating a pre-dialog count/abort gate fails here.
+    Harness h;
+    REQUIRE(denso::camera::insert(
+        h.handle(), model_less_cam("Line A", /*active*/ true, /*setup*/ true)));
+
+    auto win = h.make_window();
+    EventLog log;
+    log.install(*win);
+
+    exec_sql(h.handle(), QStringLiteral("DROP TABLE reading"));
+
+    ModalClicker clicker{QStringLiteral("Switch")};
+    win->on_switch_mode(static_cast<int>(TargetMode::BallLeveler));
+
+    REQUIRE(clicker.clicked);          // the operator was ASKED, not refused
+    CHECK(log.order == std::vector<E>{E::TeardownStarted, E::TeardownCompleted,
+                                      E::TransactionStarted, E::TransactionCommitted,
+                                      E::ReloadStarted});
+    CHECK(win->current_mode() == TargetMode::BallLeveler);
+    CHECK(denso::mode::load(h.handle()) == TargetMode::BallLeveler);
+    CHECK(win->last_switch_error().isEmpty());   // nothing went wrong
+    // The dropped table is untouched collateral — the switch never referenced it.
+    CHECK(denso::camera::all(h.handle()).size() == 1);
+}
+
+TEST_CASE("the confirmation states what is preserved and Cancel changes nothing",
           "[mode_switch_flow]") {
     Harness h;
     h.enable_reporting();
@@ -833,14 +840,15 @@ TEST_CASE("the confirmation shows real counts and Cancel changes nothing",
     win->on_switch_mode(static_cast<int>(TargetMode::BallLeveler));
 
     REQUIRE(clicker.clicked);  // the real dialog was shown and really was dismissed
-    // It rendered REAL counts read from this DB — not zeros, not placeholders.
-    CHECK(clicker.body.contains(QStringLiteral("1 camera connection")));
-    CHECK(clicker.body.contains(QStringLiteral("4 detection areas")));
-    CHECK(clicker.body.contains(QStringLiteral("3, 4, 5, 7")));
+    // The copy states what is PRESERVED, and promises no deletion of any kind.
+    CHECK(clicker.body.contains(QStringLiteral("camera connections are kept")));
+    CHECK(clicker.body.contains(QStringLiteral("Nothing is deleted")));
+    CHECK(clicker.body.contains(QStringLiteral("Processing stops")));
     CHECK(clicker.body.contains(QStringLiteral("reporting will be turned off")));
     CHECK(clicker.body.contains(QStringLiteral("not available in this release")));
-    // …and it never claims the cameras themselves are deleted.
-    CHECK_FALSE(clicker.body.contains(QStringLiteral("cameras will be deleted")));
+    // MUTATION GUARD: the dialog must never again promise deletion or finality.
+    CHECK_FALSE(clicker.body.contains(QStringLiteral("cannot be undone")));
+    CHECK_FALSE(clicker.body.contains(QStringLiteral("will be deleted")));
 
     // Cancel performed NO lifecycle step and changed nothing at all.
     CHECK(log.order.empty());
@@ -866,7 +874,7 @@ TEST_CASE("confirming the dialog runs the full switch", "[mode_switch_flow]") {
     EventLog log;
     log.install(*win);
 
-    ModalClicker clicker{QStringLiteral("Switch and Reset")};
+    ModalClicker clicker{QStringLiteral("Switch")};
     win->on_switch_mode(static_cast<int>(TargetMode::BallLeveler));
 
     REQUIRE(clicker.clicked);
@@ -876,7 +884,7 @@ TEST_CASE("confirming the dialog runs the full switch", "[mode_switch_flow]") {
                                       E::ReloadStarted});
     CHECK(win->current_mode() == TargetMode::BallLeveler);
     CHECK(denso::mode::load(h.handle()) == TargetMode::BallLeveler);
-    CHECK(denso::camera::runtime(h.handle()).empty());
+    CHECK_FALSE(denso::camera::runtime(h.handle()).empty());  // nothing deleted
     CHECK_FALSE(denso::brazing::load(h.handle()).enabled);
     CHECK(denso::camera::all(h.handle()).size() == 1);  // camera KEPT, not deleted
     CHECK(win->camera_view_page_index() == 2);

@@ -20,27 +20,32 @@ version-gated migrations in `db::run_migrations` — never rewrite a shipped one
 
 ## Operating modes (`src/core/mode/`)
 
-The appliance does one job at a time, chosen by an explicit destructive action.
+The appliance does one job at a time, chosen by an explicit operator action.
 `mode.target` (`digit_reader` | `ball_leveler`) lives in the `settings` key/value
-table — **no migration; the schema stays v13.** Absent/unknown/corrupt ⇒
-`digit_reader`, never the newer mode, so existing installations upgrade
-unchanged.
+table. Absent/unknown/corrupt ⇒ `digit_reader`, never the newer mode, so existing
+installations upgrade unchanged.
 
-**`ball_leveler` is an unavailable destination in this release — there is no
-Floating Ball algorithm.** It persists the mode, retains every camera
-connection, and lands on an explicit "not available in this release" page:
-no stream, no processor, no reporter, no wizard, `mode_setup_required: true`
-permanently, and the top-bar Camera button disabled.
+**`ball_leveler` persistence exists; the operator surface is still guarded.**
+Ball Leveler model bindings and calibration have a durable home
+(`ball_level_calibration`, schema v14), but selecting the mode still lands on an
+explicit "not available in this release" page: no stream, no processor, no
+reporter, no wizard, and the top-bar Camera button disabled. Not yet
+implemented: the calibration UI, inference, percentage mapping, OpenCV level
+annotation and the EngineRegistry replacement.
 
-`switch_and_reset` is ONE transaction. It **preserves every `camera` row and all
-18 of its non-processing columns — `id`, `active`, and the 16 connection/capture
-fields** (the table has 20; only `setup_complete`/`areas_need_review` are reset)
-— and destroys the mode-owned workspace
-(`camera_area`, `camera_model`, `camera_model_class`, `reading`,
-`model_migration_receipt`). `brazing.enabled` is set false **inside** the
-transaction; `brazing.base_url` is kept. Since `runtime()` is
-`active AND setup_complete`, zeroing `setup_complete` makes it empty **in SQL** —
-never re-derive that with a local `if (active)`.
+`switch_mode` is ONE transaction and is **NON-DESTRUCTIVE — it deletes nothing.**
+Every `camera` row survives with all 20 of its columns, **including
+`setup_complete` and `areas_need_review`** (the superseded destructive switch
+reset those two). Both modes' configuration persists across a switch:
+`camera_area`, `camera_model`, `camera_model_class`, `reading` and
+`model_migration_receipt` are untouched, and so is `ball_level_calibration`, so
+switching back is a no-op rather than a re-setup. `mode.target` is written
+**inside** the transaction. `brazing.enabled` is set false **inside** the
+transaction; `brazing.base_url` is kept. `runtime()` is
+`active AND setup_complete` **in SQL** — never re-derive that with a local
+`if (active)`. Note that because a switch no longer clears `setup_complete`,
+`runtime()` is **NOT** empty after one; the pre-v14 assertion that it was is the
+single behavioural reversal of the non-destructive switch.
 
 Facts that will bite whoever touches this:
 - **Teardown must precede the transaction**, via `CameraGrid::teardown()` (the
@@ -323,13 +328,15 @@ Facts that will bite whoever touches this:
   sweepable); the pattern closed it. It also stopped a subtler bug: an unignored
   new model permanently dirties the tree, and `tools/build_package.sh` refuses to
   package a dirty tree — so dropping in `digitv3.onnx` silently blocked the build.
-- The DB migration chain is at **v13** (`model_migration_receipt` — the
+- The DB migration chain is at **v14** (`ball_level_calibration` — the sole
+  durable Ball Leveler model-binding + calibration authority, one row per camera
+  enforced by `camera_id PRIMARY KEY`; **v13** was `model_migration_receipt`, the
   rollback-complete receipt for a model-generation swap; **v12** was
-  `camera.setup_complete`; **v11** was
-  `camera.areas_need_review`, added for the
+  `camera.setup_complete`; **v11** was `camera.areas_need_review`, added for the
   editable-source / ROI-quarantine feature). Add a new migration — never edit a
-  shipped one. **Operating modes added NO migration** — `mode.target` rides the
-  existing `settings` key/value table, so v13 is still current.
+  shipped one. v14 is purely ADDITIVE: it creates one table and rewrites no
+  Digital Reader row. `mode.target` itself still rides the existing `settings`
+  key/value table and needed no migration of its own.
 - Logging is a bounded rotating file sink (`src/app/logging/`, ~25 MiB cap) meant
   for 24/7 runs; `qDebug/qWarning/qCritical` route through it. `DENSO_LOG_LEVEL`
   sets the floor.

@@ -1,5 +1,7 @@
 #include "mode/config.h"
 
+#include "level/repo.h"
+
 #include <QSqlQuery>
 #include <QString>
 #include <QVariant>
@@ -39,7 +41,18 @@ bool save(const QSqlDatabase& db, TargetMode m) {
 
 std::optional<bool> mode_setup_required(const QSqlDatabase& db, TargetMode mode) {
     if (mode == TargetMode::BallLeveler) {
-        return true;  // §2.1: permanently true this release (no Leveler setup ships)
+        // Driven by REAL configuration, not hardcoded. Setup is required until at
+        // least one camera carries a Ball Leveler calibration whose geometry still
+        // validates - "a row exists" is not enough, because a row can be
+        // hand-edited or restored from a backup.
+        //
+        // The REAL query is the one that must be checked. A preliminary `SELECT 1`
+        // probe is not a substitute: it can succeed while the actual read fails,
+        // and then an empty result would be reported as "setup required" — a
+        // GUESS, which the contract in mode/config.h forbids.
+        const auto cams = denso::level::try_cameras_with_valid_config(db);
+        if (!cams) return std::nullopt;  // undeterminable is never guessed
+        return cams->empty();
     }
     // digit_reader: independent of `active`; a query failure is UNDETERMINABLE and
     // must never be guessed as a boolean (the caller omits the field instead).
