@@ -26,7 +26,8 @@ bool write_status_file(const QString& path,
                        const std::set<int>& held_zones,
                        const std::set<int>& inhibited_zones,
                        const std::optional<QString>& mode,
-                       std::optional<bool> mode_setup_required) {
+                       std::optional<bool> mode_setup_required,
+                       const std::vector<ZoneInhibitRecord>& zone_inhibit_onsets) {
     QJsonObject root;
     root["status"] = status_text(verdict.status);
 
@@ -78,6 +79,26 @@ bool write_status_file(const QString& path,
     QJsonArray inhibited;
     for (const int z : inhibited_zones) inhibited.append(z);
     root["inhibited_zones"] = inhibited;
+
+    // Zone inhibit ONSETS — the escalations drained since the last write. ADDITIVE
+    // and omitted entirely when empty, so a document from a run that raised no
+    // alarm is byte-for-byte what it has always been (the rule policy_reason above
+    // already follows). Distinct from inhibited_zones: that array is the standing
+    // condition, this one is what just changed and carries the camera identity a
+    // bare zone number cannot.
+    if (!zone_inhibit_onsets.empty()) {
+        QJsonArray onsets;
+        for (const auto& o : zone_inhibit_onsets) {
+            QJsonObject j;
+            // Id as a STRING for the same reason as issues above: QJsonValue is a
+            // double, so an id beyond 2^53 would lose precision.
+            j["camera_id"] = QString::number(o.camera_id);
+            j["zone_no"]   = o.zone_no;
+            j["reason"]    = o.reason;   // stable string code, never an ordinal
+            onsets.append(j);
+        }
+        root["zone_inhibit_onsets"] = onsets;
+    }
 
     // QSaveFile is write-to-temp + atomic rename on commit, and removes its temp
     // on failure — so no partial file is ever observable at `path`.

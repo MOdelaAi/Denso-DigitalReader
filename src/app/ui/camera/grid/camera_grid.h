@@ -11,6 +11,9 @@
 #include "detection/detection.h"   // CameraDetection
 #include "detection/engine_registry.h"
 #include "health/integrity.h"     // IntegrityVerdict
+#include "health/status_file.h"   // ZoneInhibitRecord
+#include "ui/camera/grid/zone_status_publication.h"
+#include "brazing/zone_runtime.h"  // ZoneRuntimeEntry
 #include "health/zone_health.h"   // ZoneHealth, ZoneCause
 #include "mode/mode.h"            // TargetMode
 #include "models/model_identity.h"  // ManifestView, PlatformInfo
@@ -23,7 +26,9 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 class QGridLayout;
@@ -84,6 +89,9 @@ protected:
 
 private:
     void clear();             // stop + delete all streams and tiles
+    /// Poll the ONE runtime projection, route it per camera, and repaint only the
+    /// tiles whose rows actually changed. GUI thread only.
+    void poll_zone_runtime();
     void relayout_letterbox();  // centre the tile block as one 16:9-per-tile wall
     // Build the processor + stream and start. `det` is the camera's ALREADY-RESOLVED
     // detection config, passed in rather than re-queried: resolving it runs the
@@ -95,7 +103,17 @@ private:
     void on_model_ready(const QString& filename);
     void on_warmup_finished();
     void refresh_tile_inhibit(int64_t camera_id);  // push a camera's causes to its tile
-    void refresh_status_file();                    // rewrite status.json (verdict + causes)
+    /// Rewrite status.json: boot verdict + runtime camera causes + the current
+    /// held/inhibited zone picture + any owed inhibit onsets. Reports the write's
+    /// OUTCOME to `zone_status_`, so a failed write stays owed and is retried.
+    void refresh_status_file();
+    /// Drain the aggregator's inhibit escalations, log each exactly once, and
+    /// hand them to `zone_status_` to be published. The ONE consume path —
+    /// called from the 5 Hz poll and again at teardown, so both behave
+    /// identically.
+    void consume_zone_onsets();
+    /// {held, inhibited} zone numbers from the runtime projection. GUI thread.
+    std::pair<std::set<int>, std::set<int>> zone_status_projection() const;
     // Re-read the committed mode, the production manifest view and the measured
     // platform. Called ONCE per build path, so every camera in one grid generation
     // is judged against the SAME facts — the readiness verdict, the runtime
@@ -132,6 +150,17 @@ private:
     std::optional<denso::models::ManifestView> view_;
     denso::models::PlatformInfo platform_;
     std::map<int64_t, CameraTile*> tiles_by_cam_;        // camera id -> its tile
+    // Zone overlay polling. The projection is PULLED on the GUI thread at a fixed
+    // low rate rather than pushed from the inference worker: pushing would marshal
+    // once per inference frame per camera, and the overlay only needs to be
+    // readable, not frame-accurate. `last_zone_view_` is the last set delivered to
+    // each tile, so an unchanged camera is not repainted.
+    QTimer* zone_timer_ = nullptr;
+    std::map<int64_t, std::vector<ZoneRuntimeEntry>> last_zone_view_;
+    // What has actually reached status.json, and what is still owed. Owns both
+    // the 5 Hz write throttle and the buffer of drained-but-unpublished onsets;
+    // neither advances on a write that failed.
+    ZoneStatusPublication zone_status_;
     uint64_t last_applied_seq_ = 0;   // drop-stale guard on the snapshot sequence
     uint64_t generation_ = 0;         // bumped by clear(); guards stale worker callbacks
     uint64_t reload_invocations_ = 0; // test observable: reload() build-path entries

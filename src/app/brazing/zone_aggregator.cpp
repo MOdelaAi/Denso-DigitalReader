@@ -28,6 +28,8 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
         // zone long before the 30s hold timeout could run (spec §5.3).
         d.last_seen_ms = now_ms;
 
+        d.last_reading_complete = (z.kind == ReadingKind::Complete);
+
         if (z.kind != ReadingKind::Complete) {
             // Soft hold: break the stable run so frames either side of the gap cannot
             // combine into five "consecutive" observations. Leave stable/has_stable
@@ -200,6 +202,35 @@ std::optional<std::map<int, int>> ZoneAggregator::build_snapshot(
         }
     }
     return snapshot;
+}
+
+std::vector<ZoneRuntime> ZoneAggregator::runtime_view() const {
+    std::vector<ZoneRuntime> out;
+    out.reserve(zones_.size());
+    for (const auto& [zone_no, d] : zones_) {
+        ZoneRuntime r;
+        r.zone_no = zone_no;
+        if (zone_inhibit_.count(zone_no) > 0) {
+            // Publication is suppressed, so there is no value the operator may
+            // act on. Deliberately no number — a stale one would read as live.
+            r.state = ZoneRuntimeState::Inhibited;
+        } else if (d.has_stable && d.last_reading_complete &&
+                   d.count >= stable_frames_) {
+            // Reading cleanly AND the current run has earned acceptance.
+            r.state = ZoneRuntimeState::Healthy;
+            r.value = d.stable;
+        } else if (d.has_last_valid) {
+            // Either the digits dropped out, or a new candidate is still
+            // debouncing. Both hold the last ACCEPTED value — never the
+            // candidate, which has not yet earned the right to be shown.
+            r.state = ZoneRuntimeState::HoldingLastValid;
+            r.value = d.last_valid;
+        } else {
+            r.state = ZoneRuntimeState::Acquiring;  // nothing trustworthy yet
+        }
+        out.push_back(r);
+    }
+    return out;
 }
 
 std::set<int> ZoneAggregator::take_newly_inhibited() {

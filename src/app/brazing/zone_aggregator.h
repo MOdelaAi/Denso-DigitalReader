@@ -8,6 +8,7 @@
 #pragma once
 
 #include "brazing/zone_reading.h"
+#include "brazing/zone_runtime.h"
 
 #include <cstdint>
 #include <map>
@@ -43,6 +44,13 @@ public:
     /// is destructive so a caller raises each alarm exactly once.
     std::set<int> take_newly_inhibited();
 
+    /// Read-only projection of every tracked zone, for the grid overlay. Returns
+    /// COPIES: the caller holds no reference into aggregator state, so it stays
+    /// valid once the wrapping lock is released. Exposes no debounce counters,
+    /// no last-sent payload and no delivery state — a projection, not a second
+    /// authority. Zone-keyed only; the camera join happens in ZoneReporter.
+    std::vector<ZoneRuntime> runtime_view() const;
+
 private:
     struct Debounce {
         int     candidate = 0;
@@ -58,6 +66,13 @@ private:
                                          // valid timestamp, so it can't be its own sentinel)
         int64_t first_seen_ms = 0;     // cold-start timeout base (spec §5.3.1)
         bool    needs_reannounce = false;
+        // Whether the MOST RECENT reading was Complete. Recorded explicitly
+        // because it cannot be derived from the timestamps: after an incomplete
+        // frame the next complete one refreshes last_complete_ms while still
+        // sitting below the debounce bar, and a Complete/Incomplete pair inside
+        // one millisecond leaves last_complete_ms == last_seen_ms. This is the
+        // aggregator recording its own observation phase — not a second policy.
+        bool    last_reading_complete = false;
     };
 
     // Build the full snapshot of every zone holding a stable value and commit it.

@@ -115,6 +115,7 @@ add_library(denso_app OBJECT
     ui/camera/grid/camera_grid.cpp
     ui/camera/grid/camera_tile.cpp
     ui/camera/grid/grid_layout.cpp
+    ui/camera/grid/zone_status_publication.cpp
     # brazing/reporting: the Qt-Network transport only (pure logic —
     # payload/retry_policy/aggregator/zone_reporter — is in the denso_brazing lib)
     brazing/brazing_client.cpp

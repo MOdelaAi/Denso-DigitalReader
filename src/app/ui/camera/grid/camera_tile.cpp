@@ -6,13 +6,16 @@
 
 #include <QColor>
 #include <QFont>
+#include <QFontMetrics>
 #include <QPainter>
 #include <QPen>
 #include <QPointF>
 #include <QPolygonF>
 #include <QRectF>
 
+#include <algorithm>
 #include <utility>
+#include <vector>
 
 namespace denso::ui {
 
@@ -21,6 +24,11 @@ const QColor kBg(20, 20, 20);
 const QColor kName(229, 231, 235);
 const QColor kFaint(148, 148, 148);
 const QColor kRoi(250, 204, 21);  // gold — matches the ROI drawing canvas
+// Zone-overlay palette. HOLD must read as visibly different from both a healthy
+// value and a stopped one — a hold is not an inhibit.
+const QColor kZoneOk(134, 239, 172);      // green  — accepted value
+const QColor kZoneHold(250, 204, 21);     // amber  — holding the last valid
+const QColor kZoneStopped(248, 113, 113); // red    — inhibited / paused / conflict
 
 struct StatusLook {
     QColor dot;
@@ -100,6 +108,19 @@ void CameraTile::set_areas(std::vector<camera::CameraArea> areas) {
     update();
 }
 
+void CameraTile::set_zone_runtime_view(std::vector<ZoneRuntimeEntry> zones) {
+    zones_ = std::move(zones);
+    update();
+}
+
+void CameraTile::clear_zone_runtime_view() {
+    if (zones_.empty()) {
+        return;  // already clear — don't schedule a needless repaint
+    }
+    zones_.clear();
+    update();
+}
+
 void CameraTile::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::SmoothPixmapTransform, true);
@@ -128,6 +149,10 @@ void CameraTile::paintEvent(QPaintEvent*) {
         p.setFont(gf);
         p.drawText(rect(), Qt::AlignCenter, QStringLiteral("📷"));
     }
+
+    // Zone runtime overlay — drawn after the frame/ROIs so it stays legible, but
+    // before the banner so the banner always wins the bottom strip.
+    draw_zone_panel(p);
 
     // Inhibit banner across the bottom — persistent while this camera's zones are
     // suppressed (areas quarantined, camera offline, detection stopped, …).
@@ -168,6 +193,98 @@ void CameraTile::paintEvent(QPaintEvent*) {
         p.drawText(rect().adjusted(0, 8 + p.fontMetrics().lineSpacing(), -10, 0),
                    Qt::AlignTop | Qt::AlignRight, fps_text);
     }
+}
+
+// Compact zone panel, bottom-left, sitting ABOVE the inhibit banner. Deliberately
+// small and semi-transparent: this is a verification aid over the very display
+// the operator is inspecting, so it must never become the thing in the way.
+// Renders only what the projection says — no state is inferred here.
+namespace {
+
+// The state's label and colour. Split from the text so the row CONTENT stays a
+// pure, directly-assertable function while the palette stays here with the rest
+// of the painting.
+QString zone_state_label(ZoneDisplayState s) {
+    switch (s) {
+        case ZoneDisplayState::Healthy:          return QStringLiteral("OK");
+        case ZoneDisplayState::HoldingLastValid: return QStringLiteral("HOLD");
+        case ZoneDisplayState::Acquiring:        return QStringLiteral("ACQUIRING");
+        case ZoneDisplayState::Inhibited:        return QStringLiteral("INHIBITED");
+        case ZoneDisplayState::Paused:           return QStringLiteral("PAUSED");
+        case ZoneDisplayState::Conflict:         return QStringLiteral("CONFLICT");
+    }
+    return QStringLiteral("ACQUIRING");
+}
+
+QColor zone_state_colour(ZoneDisplayState s) {
+    switch (s) {
+        case ZoneDisplayState::Healthy:          return kZoneOk;
+        case ZoneDisplayState::HoldingLastValid: return kZoneHold;
+        case ZoneDisplayState::Acquiring:        return kFaint;
+        // A hold is NOT an inhibit: HOLD keeps its own colour above so an
+        // operator can tell "still reading, value retained" from "stopped".
+        case ZoneDisplayState::Inhibited:
+        case ZoneDisplayState::Paused:
+        case ZoneDisplayState::Conflict:         return kZoneStopped;
+    }
+    return kFaint;
+}
+
+} // namespace
+
+QString zone_row_text(const ZoneRuntimeEntry& z) {
+    // A number is shown ONLY where the projection carries one — Acquiring,
+    // Inhibited, Paused and Conflict all render "--" by construction, because
+    // `value` is nullopt for every one of them.
+    const QString num = z.value ? QString::number(*z.value) : QStringLiteral("--");
+    return QStringLiteral("Z%1 %2 %3")
+        .arg(z.zone_no)
+        .arg(num, 5)      // right-aligned so digits line up
+        .arg(zone_state_label(z.state));
+}
+
+void CameraTile::draw_zone_panel(QPainter& p) const {
+    if (zones_.empty()) {
+        return;
+    }
+    struct Row { QString text; QColor colour; };
+    std::vector<Row> rows;
+    rows.reserve(zones_.size());
+    for (const ZoneRuntimeEntry& z : zones_) {
+        rows.push_back({zone_row_text(z), zone_state_colour(z.state)});
+    }
+
+    p.save();
+    QFont f = p.font();
+    f.setPointSize(9);
+    f.setFamily(QStringLiteral("monospace"));  // stable column alignment
+    p.setFont(f);
+    const QFontMetrics fm(f);
+
+    const int line_h = fm.lineSpacing();
+    int text_w = 0;
+    for (const Row& r : rows) {
+        text_w = std::max(text_w, fm.horizontalAdvance(r.text));
+    }
+    const int pad = 6;
+    const int panel_h = static_cast<int>(rows.size()) * line_h + pad * 2;
+    const int panel_w = text_w + pad * 2;
+    // Sit above the inhibit banner when one is showing, so the two never overlap.
+    const int banner_h = inhibit_banner(causes_).isEmpty() ? 0 : 26;
+    const int top = height() - banner_h - panel_h - 8;
+    const QRectF panel(8, top, panel_w, panel_h);
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0, 0, 0, 130));  // translucent, not an opaque block
+    p.drawRoundedRect(panel, 4, 4);
+
+    int y = top + pad + fm.ascent();
+    for (const Row& r : rows) {
+        p.setPen(r.colour);
+        p.drawText(QPointF(8 + pad, y), r.text);
+        y += line_h;
+    }
+    p.restore();
 }
 
 void CameraTile::draw_areas(QPainter& p, const QRectF& image_rect) const {

@@ -28,17 +28,20 @@
 #include <QPaintEvent>
 #include <QResizeEvent>
 #include <QString>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 
 namespace denso::ui {
 
 namespace {
 constexpr int kMaxTiles = 4;
+constexpr int kZonePollMs = 200;  // ~5 Hz — readable, not frame-accurate
 constexpr double kTileAspect = 16.0 / 9.0;  // each cell is 16:9 (camera native)
 }
 
@@ -57,12 +60,131 @@ CameraGrid::CameraGrid(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
 
 CameraGrid::~CameraGrid() { clear(); }
 
+void CameraGrid::poll_zone_runtime() {
+    if (!reporter_) {
+        return;  // torn down between the last tick and this one
+    }
+    // ONE call, then group. The projection is already a value copy, so nothing
+    // below holds the reporter's lock.
+    std::map<int64_t, std::vector<ZoneRuntimeEntry>> by_camera;
+    for (const ZoneRuntimeEntry& e : reporter_->runtime_view()) {
+        by_camera[e.camera_id].push_back(e);
+    }
+    // Stable ordering so a tile's rows never jump around between ticks.
+    for (auto& [camera_id, rows] : by_camera) {
+        (void)camera_id;
+        std::sort(rows.begin(), rows.end(),
+                  [](const ZoneRuntimeEntry& a, const ZoneRuntimeEntry& b) {
+                      return a.zone_no < b.zone_no;
+                  });
+    }
+
+    for (const auto& [camera_id, tile] : tiles_by_cam_) {
+        const auto it = by_camera.find(camera_id);
+        const std::vector<ZoneRuntimeEntry> rows =
+            (it == by_camera.end()) ? std::vector<ZoneRuntimeEntry>{} : it->second;
+
+        // Repaint ONLY on change: at 5 Hz across four tiles an unconditional
+        // update() would burn the compositor redrawing identical text.
+        auto& last = last_zone_view_[camera_id];
+        if (last == rows) {
+            continue;
+        }
+        last = rows;
+        if (rows.empty()) {
+            tile->clear_zone_runtime_view();   // camera lost its zones
+        } else {
+            tile->set_zone_runtime_view(rows);
+        }
+    }
+
+    // Forget cameras that no longer have a tile, so a rebuilt grid cannot
+    // inherit a stale "unchanged" verdict and skip the first real update.
+    for (auto it = last_zone_view_.begin(); it != last_zone_view_.end();) {
+        it = (tiles_by_cam_.count(it->first) == 0) ? last_zone_view_.erase(it)
+                                                   : std::next(it);
+    }
+
+    // ── The ALARM channel, distinct from the rendering above ──────────────────
+    // Drain the escalations the aggregator raised since the last tick. The drain
+    // is destructive, so a standing inhibit is announced once and this timer
+    // cannot re-announce it however often it fires.
+    consume_zone_onsets();
+
+    // ── The STATE channel ────────────────────────────────────────────────────
+    // status.json carries the held/inhibited picture, rewritten only when it
+    // actually moves — at 5 Hz an unconditional write would be pointless disk
+    // churn on a box that runs for months. An owed alarm forces the write
+    // through regardless, and a write that FAILED stays owed, so the throttle
+    // can never leave the file silently stale.
+    if (health_ && zone_status_.needs_write(zone_status_projection())) {
+        refresh_status_file();
+    }
+}
+
+std::pair<std::set<int>, std::set<int>> CameraGrid::zone_status_projection() const {
+    std::pair<std::set<int>, std::set<int>> out;   // {held, inhibited}
+    if (!reporter_) {
+        return out;
+    }
+    for (const ZoneRuntimeEntry& e : reporter_->runtime_view()) {
+        if (e.state == ZoneDisplayState::HoldingLastValid) {
+            out.first.insert(e.zone_no);
+        } else if (e.state == ZoneDisplayState::Inhibited) {
+            out.second.insert(e.zone_no);
+        }
+    }
+    return out;
+}
+
+void CameraGrid::consume_zone_onsets() {
+    if (!reporter_) {
+        return;
+    }
+    // ONE consumption. Everything downstream is driven by what this returns, so
+    // "logged once" and "published once" cannot drift apart.
+    const std::vector<ZoneInhibitOnset> drained = reporter_->take_newly_inhibited();
+    if (drained.empty()) {
+        return;   // nothing to say — leave status.json untouched
+    }
+    std::vector<health::ZoneInhibitRecord> onsets;
+    onsets.reserve(drained.size());
+    for (const ZoneInhibitOnset& o : drained) {
+        // LOG FIRST, and unconditionally: the log is the durable record of the
+        // alarm, so it is written before publication is even attempted. Two
+        // integers and a fixed sentence — no URL, no credential, nothing that
+        // needs redacting. This is the appliance's own reading having stopped;
+        // it says nothing about any backend.
+        qCritical().noquote()
+            << "[zone] camera" << o.camera_id << "zone" << o.zone_no
+            << "inhibited - no complete reading within the hold timeout";
+        onsets.push_back(health::ZoneInhibitRecord{
+            o.camera_id, o.zone_no, QStringLiteral("hold_timeout")});
+    }
+    // Hand them to the publication tracker rather than writing here. The drain
+    // was destructive, so from now on that buffer is the only holder of these
+    // alarms — it releases them only once a write has actually committed.
+    zone_status_.enqueue(onsets);
+}
+
 void CameraGrid::clear() {
     // Advance the generation FIRST — before any stop/delete — so every callback
     // the workers we are about to tear down captured belongs to the now-stale
     // epoch. A queued WorkerFailedFn / status_changed that Qt still delivers to
     // this retained grid after the rebuild is then dropped by callback_is_current.
     ++generation_;
+    // Stop the overlay poll FIRST: it reads reporter_ and writes to tiles, both
+    // of which are destroyed below. Stopping here (not merely at destruction)
+    // means no queued timeout can fire against a half-torn-down grid.
+    if (zone_timer_) {
+        zone_timer_->stop();
+    }
+    last_zone_view_.clear();
+    // Drop the cached zone picture too: a rebuilt grid must not inherit an
+    // "unchanged" verdict and skip publishing its first real zone state. Owed
+    // alarms are deliberately NOT dropped — they have been logged but not yet
+    // published, and a rebuild is not a reason to lose one.
+    zone_status_.reset_published();
     // Drop any deferred-start bookkeeping; the tiles it references are deleted
     // just below, so the dangling pointers must not outlive this call.
     pending_ = PendingStart{};
@@ -85,6 +207,24 @@ void CameraGrid::clear() {
     // — the thread that actually calls on_zones (capture threads never do). That
     // join, not the capture-thread stop, is what guarantees no worker can still
     // reach the reporter. Tear down the reporter, then the client it posts to.
+    //
+    // FINAL DRAIN, immediately before that teardown. The joins above mean no new
+    // escalation can appear, and the reporter still exists, so an alarm raised
+    // since the last timer tick is still reachable — after reporter_.reset() it
+    // would be gone with no one having heard it. The same destructive drain the
+    // poll uses, so nothing is reported twice; and it writes nothing when the
+    // batch is empty, leaving an ordinary shutdown byte-for-byte as before.
+    consume_zone_onsets();
+    // Publish only when something is actually owed, so an ordinary shutdown
+    // leaves status.json byte-for-byte as it was. If this write fails the alarms
+    // stay owed: a reload republishes them, and the ball_leveler switch path
+    // carries them in publish_idle_status(). At FINAL process destruction there
+    // is no later moment to retry — the ceiling there is the rotating log, which
+    // received every alarm first and unconditionally, before publication was even
+    // attempted. That is the durable record; status.json is the convenience copy.
+    if (health_ && !zone_status_.pending().empty()) {
+        refresh_status_file();
+    }
     reporter_.reset();
     brazing_reporter_.reset();
     // health_ last: its callback references reporter_. No worker can fire it now
@@ -120,11 +260,24 @@ void CameraGrid::publish_idle_status() {
     verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir(), mode_,
                                           *view_, platform_);
     const auto m = denso::mode::load(db_);
-    health::write_status_file(
+    // Owed alarms ride along. This is the LAST writer on the ball_leveler switch
+    // path — clear() has already drained and torn the reporter down, so if this
+    // document went out without them, an escalation that was logged moments
+    // earlier would be silently absent from status output. It also reports its
+    // outcome, so a failed idle write leaves the alarms owed rather than eaten.
+    const bool ok = health::write_status_file(
         denso::paths::status_file(),
         verdict_, {}, {}, {},
         QString::fromLatin1(denso::mode::to_string(m)),
-        denso::mode::mode_setup_required(db_, m));
+        denso::mode::mode_setup_required(db_, m),
+        zone_status_.pending());
+    // Idle means nothing streams, so the published picture is empty by definition.
+    zone_status_.on_write(ok, ZoneStatusPublication::Projection{});
+    if (!ok) {
+        qWarning().noquote()
+            << "[zone] idle status.json write failed;"
+            << zone_status_.pending().size() << "alarm(s) still owed";
+    }
 }
 
 void CameraGrid::refresh_compatibility_inputs() {
@@ -178,11 +331,18 @@ void CameraGrid::reload() {
     // change. The reporter is called from capture threads; its callback hops to
     // the GUI thread (post_to_gui) where the BrazingReporter lives.
     const brazing::BrazingConfig bcfg = brazing::load(db_);
+    // DELIVERY is optional; AGGREGATION is not. The ZoneReporter is always built
+    // below, so zone values are computed, debounced, held and inhibited even with
+    // no backend configured — the grid overlay is a LOCAL check and must not
+    // depend on the server it exists to cross-check. Only the sender and this
+    // callback are gated on configuration; an empty callback is a supported state
+    // (ZoneReporter guards every publish with `if (snapshot && on_snapshot_)`).
+    std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot;
     if (bcfg.enabled && !bcfg.base_url.empty()) {
         brazing_reporter_ = std::make_unique<BrazingReporter>(
             std::make_unique<BrazingClient>(bcfg.base_url));
         BrazingReporter* reporter = brazing_reporter_.get();
-        reporter_ = std::make_unique<ZoneReporter>(
+        on_snapshot =
             [this, reporter](const std::map<int, int>& snap, uint64_t seq) {
                 // Marshal to `reporter` (not `this`) so Qt drops the queued call if
                 // the BrazingReporter is torn down; `reporter` is owned by this
@@ -196,8 +356,21 @@ void CameraGrid::reload() {
                     last_applied_seq_ = seq;
                     reporter->submit(snap);
                 });
-            });
+            };
     }
+    // ALWAYS constructed — see above. With no backend configured this holds an
+    // empty callback and simply publishes nowhere.
+    reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot));
+
+    // Overlay polling. Parented to `this`, so it dies with the grid even if a
+    // teardown path ever forgets it; clear() stops it explicitly BEFORE the
+    // reporter is destroyed, so no tick can outlive what it reads.
+    if (!zone_timer_) {
+        zone_timer_ = new QTimer(this);
+        zone_timer_->setInterval(kZonePollMs);
+        connect(zone_timer_, &QTimer::timeout, this, &CameraGrid::poll_zone_runtime);
+    }
+    zone_timer_->start();
 
     const GridDims dims = grid_dims(static_cast<int>(cams.size()));
     for (int i = 0; i < static_cast<int>(cams.size()); ++i) {
@@ -206,6 +379,19 @@ void CameraGrid::reload() {
         auto* tile = new CameraTile(QString::fromStdString(cam.name));
         std::vector<camera::CameraArea> areas = camera::areas_for(db_, cam.id);
         tile->set_areas(areas);  // ROI overlay (if any)
+
+        // Display ownership comes from CONFIGURATION, not from observations: a
+        // camera inhibited before any frame arrives (the quarantine case) never
+        // reaches the reporter's observation-derived map, so its zones could
+        // otherwise never render as Paused. This map routes the overlay only —
+        // eviction still keys off what was actually published (spec §3.3b).
+        std::set<int> configured_zones;
+        for (const camera::CameraArea& a : areas) {
+            if (a.zone && *a.zone != 0) {  // 0 / unset == ROI-only, never reported
+                configured_zones.insert(*a.zone);
+            }
+        }
+        reporter_->set_configured_zones(cam.id, std::move(configured_zones));
 
         grid_->addWidget(tile, i / dims.cols, i % dims.cols);
         tiles_.push_back(tile);
@@ -415,17 +601,31 @@ void CameraGrid::refresh_tile_inhibit(int64_t camera_id) {
 
 void CameraGrid::refresh_status_file() {
     if (!health_) return;
-    // Reuse the boot verdict (per-zone issues do not change at runtime); only the
-    // runtime camera causes move. held/inhibited zone lists are not surfaced yet
-    // (no producer this slice), so they stay empty. The DB is open here, so the
-    // real mode + setup-required flag ride along (nullopt-omitted on query fail,
-    // always true for ball_leveler).
+    // Reuse the boot verdict (per-zone INTEGRITY issues do not change at
+    // runtime); the runtime camera causes and the zone picture do move. The
+    // held/inhibited lists finally have their producer: they are derived from the
+    // ONE authority's projection, so they are idempotent and any number of
+    // rewrites is safe. `verdict_` is not touched — a runtime alarm is reported
+    // as its own record and never rewrites the installation's readiness. The DB
+    // is open here, so the real mode + setup-required flag ride along
+    // (nullopt-omitted on query fail, always true for ball_leveler).
+    const auto zones = zone_status_projection();
     const auto m = denso::mode::load(db_);
-    health::write_status_file(
+    const bool ok = health::write_status_file(
         denso::paths::status_file(),
-        verdict_, health_->all(), {}, {},
+        verdict_, health_->all(), zones.first, zones.second,
         QString::fromLatin1(denso::mode::to_string(m)),
-        denso::mode::mode_setup_required(db_, m));
+        denso::mode::mode_setup_required(db_, m),
+        zone_status_.pending());
+    // The write can fail (unopenable path, full disk) and QSaveFile leaves the
+    // previous file intact when it does. Report the OUTCOME, never the intent:
+    // only a committed write may advance the throttle or release an owed alarm.
+    zone_status_.on_write(ok, zones);
+    if (!ok) {
+        qWarning().noquote()
+            << "[zone] status.json write failed; retrying on the next tick ("
+            << zone_status_.pending().size() << "alarm(s) still owed)";
+    }
 }
 
 void CameraGrid::release_streams() {

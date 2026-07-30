@@ -77,6 +77,8 @@ add_executable(denso_tests
     test_status_file.cpp
     test_zone_health.cpp
     test_zone_reporter.cpp
+    test_zone_runtime_view.cpp
+    test_zone_status_publication.cpp
     test_boot_schema.cpp
     test_callback_generation.cpp
     test_mode.cpp
@@ -90,6 +92,7 @@ add_executable(denso_tests
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/shared/roi_geometry.cpp  # UI geometry
     ${CMAKE_SOURCE_DIR}/src/app/cli/migrate_coordinator.cpp        # headless migrate coordinator
     ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/grid_layout.cpp     # grid layout algo
+    ${CMAKE_SOURCE_DIR}/src/app/ui/camera/grid/zone_status_publication.cpp  # status publication bookkeeping
     ${CMAKE_SOURCE_DIR}/src/app/ui/settings/mode_confirm_text.cpp  # pure confirm-copy builder
     ${CMAKE_SOURCE_DIR}/src/app/ui/startup_mode.cpp                # cold-start probe
     ${CMAKE_SOURCE_DIR}/src/app/logging/log_rotation.cpp
@@ -121,6 +124,13 @@ add_executable(denso_integration_tests
     test_settings_mode.cpp
     test_camera_view_states.cpp
     test_brazing_discard.cpp
+    # Zone Runtime Overlay: structural guards that aggregation is not gated on
+    # backend config and that CameraTile stays rendering-only.
+    test_zone_runtime_wiring.cpp
+    # Zone Runtime Overlay: rendered row content (pure zone_row_text) plus
+    # offscreen tile geometry at real tile sizes. Needs the real CameraTile, so
+    # it belongs here with the app objects. No device, model or socket is touched.
+    test_zone_overlay_render.cpp
     test_mode_switch_flow.cpp
     # Slice 7 warm-up firewall: constructs EngineRegistry (backend-coupled), so it
     # belongs here with the app objects, not in the backend-free denso_tests. The
