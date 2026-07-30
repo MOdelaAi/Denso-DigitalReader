@@ -152,12 +152,20 @@ Every read/write below is mode-blind today (verified line by line):
 | `models_for` | `core/detection/repo.cpp:149-150` | wizard shows the other mode's attachments |
 | `set_camera_models` | `core/detection/repo.cpp:264-271, 280` | saving one wizard **deletes the other mode's binding** |
 | `detection_for` | `core/detection/repo.cpp:311-313` | one preserved wrong-mode row inhibits the camera |
-| `try_attached_model_filenames` | `core/detection/repo.cpp:98` | wrong-mode rows enter the warm-up required set |
+
+**Not affected — corrected 2026-07-30.** An earlier revision of this table listed
+`try_attached_model_filenames` (`core/detection/repo.cpp:89-117`) as letting
+wrong-mode rows into the warm-up required set. **That was wrong.** Its SQL is
+mode-blind, but line 112 keeps a row only when
+`models::model_compatibility(mode, md).allowed()` succeeds, so the set
+`startup.cpp:202-203` receives is already mode-filtered. This call site is safe
+and needs no change; no reasoning in this document depends on the retracted
+claim.
 | `evaluate_integrity` | `core/health/integrity.cpp:197-199` | dormant rows judged against the active mode → `--check` exits **10** |
 | `load_old_attachment` | `core/detection/migrate.cpp:33-35` | migration matches by `(camera_id, filename)`, no mode |
 
 **Decision — do NOT add `mode` to `camera_model`.** Codex's argument holds and the
-table above is the evidence: scoping that column correctly means touching seven
+table above is the evidence: scoping that column correctly means touching six
 call sites including the `--check` exit-code contract and the rollback-receipt
 machinery, for no gain. Instead:
 
