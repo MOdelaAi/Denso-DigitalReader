@@ -1,13 +1,21 @@
 // Owns the Camera wizard's flow: the add/edit state, the threaded snapshot
-// capture, and every DB write (camera insert/update, model attach, ROI replace).
-// Extracted from CameraDialog so the dialog is a thin view over the page stack.
-// The controller never touches the QStackedWidget or the stepper directly — it
-// asks the view to switch pages through the injected show_page callback and
-// signals request_show_list() for transitions that return to the list.
+// capture, and every DB write (camera insert/update, model attach, ROI replace,
+// level calibration). Extracted from CameraDialog so the dialog is a thin view
+// over the page stack. The controller never touches the QStackedWidget or the
+// stepper directly — it asks the view to switch pages through the injected
+// show_page callback and signals request_show_list() for transitions that return
+// to the list.
+//
+// The wizard's fourth step depends on the COMMITTED operating mode: ROI areas for
+// the digit reader, level calibration for the ball leveler. That branch is a FLOW
+// decision, not an authorization one — which models may be offered is still asked
+// of the one central compatibility policy, through detection::evaluated_models.
 #pragma once
 
 #include "camera/camera.h"
 #include "camera/preview_gate.h"
+#include "level/calibration.h"
+#include "level/repo.h"  // LevelBinding
 
 #include <QImage>
 #include <QObject>
@@ -25,18 +33,21 @@ class CameraAddPage;
 class CameraConfigurePage;
 class ModelsPage;
 class CameraAreasPage;
+class LevelCalibrationPage;
 
 class CameraWizardController : public QObject {
     Q_OBJECT
 
 public:
-    // The three interactive wizard pages the controller drives. Owned by the
-    // dialog; the controller only reads/populates them.
+    // The interactive wizard pages the controller drives. Owned by the dialog;
+    // the controller only reads/populates them. `level` may be null for a host
+    // that does not build the ball-leveler step.
     struct Pages {
         CameraAddPage* add = nullptr;
         CameraConfigurePage* configure = nullptr;
         ModelsPage* models = nullptr;
         CameraAreasPage* areas = nullptr;
+        LevelCalibrationPage* level = nullptr;
     };
 
     CameraWizardController(QSqlDatabase db, Pages pages,
@@ -59,7 +70,7 @@ public slots:
     void configure_back();         // Configure Back → Source step
 
     // Models flow.
-    void save_models();            // "Next: Detection areas" — persist, advance
+    void save_models();            // step 3 → step 4 (Areas or Level calibration)
     void finish_whole_frame();     // terminal: no ROIs = whole-frame detection
 
     // Areas flow.
@@ -67,12 +78,25 @@ public slots:
     void save_areas(const std::vector<camera::CameraArea>& areas);  // persist + list
     void areas_back();             // Areas Back: direct→list, wizard→Models step
 
+    // Level-calibration flow (ball leveler).
+    /// Persist the camera's complete Ball Leveler configuration — the model
+    /// binding chosen at step 3 AND this geometry — through the ONE Ball write
+    /// chokepoint, then finish setup.
+    void save_level_calibration(const denso::level::LevelCalibration& calibration);
+    void level_back();             // Level Back → Models step
+
 private:
     void push_used_sources();      // tag scan results already owned by other cams
     void open_configure(const QString& preview_text);  // seed Configure from draft_
     void enter_models();           // load catalog + attachments → Models page
     void enter_areas(bool direct); // load areas + frame → Areas page
+    void enter_level();            // load calibration + frame → Level page
+    /// True when the COMMITTED mode is the ball leveler, i.e. step 4 is level
+    /// calibration and the binding belongs to the level repository.
+    bool ball_mode() const;
+    QImage oriented_frame() const;  // last_frame_ with the draft's orientation
     void update_areas_background(); // push the oriented frame to the Areas canvas
+    void update_level_background(); // …and to the Level canvas
     /// True only when a live frame exists AND it still matches draft_'s aspect —
     /// the two conditions for confirming quarantined ROIs against the view.
     bool preview_verifies_draft() const;
@@ -85,6 +109,9 @@ private:
     /// succeeded. The single owner of that sequence — call it after a terminal
     /// action's own write has succeeded.
     void finish_and_leave(QWidget* parent);
+    /// Forget any per-run wizard state. Called by every entry point so a second
+    /// camera can never inherit the first one's in-progress choices.
+    void reset_run_state();
 
     QSqlDatabase db_;
     Pages pages_;
@@ -104,6 +131,17 @@ private:
     // predicate rather than re-deriving aspect comparison here.
     camera::Camera captured_;
     bool entered_areas_directly_ = false;  // true: per-row Areas (Back → list)
+
+    // The model binding chosen at step 3, held in memory until the calibration is
+    // saved. Deliberately NOT written when it is chosen: the Ball chokepoint takes
+    // the binding and the geometry together in one transaction, so persisting the
+    // model early would create a second, partial authority and could leave a
+    // camera bound to a model it has no calibration for.
+    std::optional<denso::level::LevelBinding> ball_binding_;
+    // The stored calibration is read into the page ONCE per wizard run. Re-reading
+    // it on every visit would silently discard an in-progress calibration the
+    // moment the operator stepped back to change the model.
+    bool level_loaded_ = false;
 };
 
 } // namespace denso::ui

@@ -28,6 +28,7 @@ class CameraAddPage;
 class CameraConfigurePage;
 class ModelsPage;
 class CameraAreasPage;
+class LevelCalibrationPage;
 class CameraWizardController;
 
 class CameraDialog : public QDialog {
@@ -51,8 +52,8 @@ private:
     void show_list();            // refresh rows + switch to the list page
     void show_add();             // reset the form + switch to the add page
 
-    void expand_for_areas();  // grow the modal for drawing room
-    void restore_size();      // shrink back after the Areas step
+    void expand_for_canvas();  // grow the modal for drawing room
+    void restore_size();       // shrink back after a drawing step
 
     QSqlDatabase db_;
     WizardStepper* stepper_ = nullptr;
@@ -63,12 +64,15 @@ private:
     CameraConfigurePage* configure_page_ = nullptr;  // stack index 2
     ModelsPage* models_page_ = nullptr;              // stack index 3
     CameraAreasPage* areas_page_ = nullptr;          // stack index 4
+    LevelCalibrationPage* level_page_ = nullptr;     // stack index 5
 
     CameraWizardController* controller_ = nullptr;  // owns flow-state + persistence
 
-    // Areas-step sizing (view-owned: only the dialog resizes).
-    bool areas_expanded_ = false;  // modal currently grown for drawing
-    QRect pre_areas_geometry_;     // geometry to restore when leaving Areas
+    // Drawing-step sizing (view-owned: only the dialog resizes). Shared by the
+    // Areas and Level-calibration steps — both draw over the camera snapshot and
+    // both need the room.
+    bool canvas_expanded_ = false;  // modal currently grown for drawing
+    QRect pre_canvas_geometry_;     // geometry to restore when leaving it
 };
 
 } // namespace denso::ui

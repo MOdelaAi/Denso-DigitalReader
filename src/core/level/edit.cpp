@@ -2,11 +2,42 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace denso::level {
 namespace {
 
 double clamp01(double v) { return std::max(0.0, std::min(1.0, v)); }
+
+// Separating the two reference lines has to leave a span the VALIDATOR accepts,
+// and the validator MEASURES the span as `y_0 - y_100`. Plain arithmetic does not
+// guarantee that: 0.15 - 0.02 == 0.13, but 0.15 - 0.13 == 0.0199999999999999969,
+// which is below kMinSpanNorm. The wizard's Save button is gated on that
+// measurement, so the gap between "computed far enough apart" and "measures far
+// enough apart" is an ordinary legal drag that leaves Save greyed out, blaming the
+// operator for lines they placed correctly.
+//
+// So the two helpers below VERIFY rather than assume, stepping by the smallest
+// representable amount until the measurement agrees. Each terminates after one or
+// two steps — the shortfall is always within a couple of ULPs.
+
+/// The smallest `y_0` whose measured span from `y_100` is at least kMinSpanNorm.
+double lowest_y0_for(double y_100) {
+    double y0 = y_100 + kMinSpanNorm;
+    while (y0 - y_100 < kMinSpanNorm) {
+        y0 = std::nextafter(y0, std::numeric_limits<double>::infinity());
+    }
+    return y0;
+}
+
+/// The largest `y_100` whose measured span to `y_0` is at least kMinSpanNorm.
+double highest_y100_for(double y_0) {
+    double y100 = y_0 - kMinSpanNorm;
+    while (y_0 - y100 < kMinSpanNorm) {
+        y100 = std::nextafter(y100, -std::numeric_limits<double>::infinity());
+    }
+    return y100;
+}
 
 }  // namespace
 
@@ -84,10 +115,14 @@ void CalibrationDraft::reseat_lines() {
             c_.y_0 = bottom;
             return;
         }
-        c_.y_0 = c_.y_100 + kMinSpanNorm;
+        c_.y_0 = lowest_y0_for(c_.y_100);
         if (c_.y_0 > bottom) {
             c_.y_0 = bottom;
-            c_.y_100 = bottom - kMinSpanNorm;
+            c_.y_100 = highest_y100_for(bottom);
+            // The band is within an ULP of the minimum: pinning to its extremes
+            // is then both legal and the only fit, because `bottom - top` was
+            // measured above to be at least kMinSpanNorm.
+            if (c_.y_100 < top) c_.y_100 = top;
         }
     }
 }
@@ -97,14 +132,14 @@ void CalibrationDraft::set_y_100(double y) {
     c_.y_100 = y;
     // Push the partner line rather than refusing the drag, so the handle always
     // follows the pointer.
-    if (c_.y_0 - c_.y_100 < kMinSpanNorm) c_.y_0 = c_.y_100 + kMinSpanNorm;
+    if (c_.y_0 - c_.y_100 < kMinSpanNorm) c_.y_0 = lowest_y0_for(c_.y_100);
     reseat_lines();
 }
 
 void CalibrationDraft::set_y_0(double y) {
     if (!std::isfinite(y) || !has_rect_) return;
     c_.y_0 = y;
-    if (c_.y_0 - c_.y_100 < kMinSpanNorm) c_.y_100 = c_.y_0 - kMinSpanNorm;
+    if (c_.y_0 - c_.y_100 < kMinSpanNorm) c_.y_100 = highest_y100_for(c_.y_0);
     reseat_lines();
 }
 

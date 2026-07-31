@@ -2,6 +2,7 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayoutItem>
 
 namespace denso::ui {
 
@@ -20,8 +21,24 @@ WizardStepper::WizardStepper(const QStringList& steps, QWidget* parent)
     auto* row = new QHBoxLayout(this);
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(10);
+    rebuild(steps);
+    set_current(0);
+}
 
-    for (int i = 0; i < steps.size(); ++i) {
+void WizardStepper::rebuild(const QStringList& steps) {
+    steps_ = steps;
+    labels_.clear();
+    auto* row = qobject_cast<QHBoxLayout*>(layout());
+    if (row == nullptr) {
+        return;
+    }
+    QLayoutItem* it = nullptr;
+    while ((it = row->takeAt(0)) != nullptr) {
+        delete it->widget();  // null for the trailing stretch — delete(nullptr) is ok
+        delete it;
+    }
+
+    for (int i = 0; i < steps_.size(); ++i) {
         if (i > 0) {
             auto* sep = new QLabel(QStringLiteral("—"));
             sep->setStyleSheet(QStringLiteral("color:#4b5563;"));
@@ -29,15 +46,25 @@ WizardStepper::WizardStepper(const QStringList& steps, QWidget* parent)
         }
         const QString num = i < kCircledCount ? QString::fromUtf8(kCircled[i])
                                               : QString::number(i + 1);
-        auto* l = new QLabel(QStringLiteral("%1  %2").arg(num, steps[i]));
+        auto* l = new QLabel(QStringLiteral("%1  %2").arg(num, steps_[i]));
         labels_.append(l);
         row->addWidget(l, 0);
     }
     row->addStretch(1);
-    set_current(0);
+}
+
+void WizardStepper::set_steps(const QStringList& steps) {
+    // Cheap and idempotent, so the dialog can call this on every page switch
+    // without rebuilding widgets or losing the emphasized step.
+    if (steps == steps_) {
+        return;
+    }
+    rebuild(steps);
+    set_current(current_);
 }
 
 void WizardStepper::set_current(int index) {
+    current_ = index;
     for (int i = 0; i < labels_.size(); ++i) {
         const char* css =
             i == index ? kCurrentCss : (i < index ? kDoneCss : kUpcomingCss);

@@ -179,3 +179,64 @@ TEST_CASE("the draft's verdict is the SAME validator the write chokepoint uses",
     d.set_conf(0.4);
     CHECK(d.ready());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The pushed line must leave a span the VALIDATOR accepts, not merely a span the
+// arithmetic looks like it left.
+//
+// `y_0 - kMinSpanNorm` does not reliably satisfy `y_0 - y_100 >= kMinSpanNorm` in
+// binary floating point: 0.15 - 0.02 == 0.13, but 0.15 - 0.13 == 0.019999999…,
+// which is BELOW kMinSpanNorm. check() measures the span exactly that way and the
+// wizard's Save button is gated on check(), so the difference is an ordinary,
+// legal drag that silently leaves Save greyed out with the reason "the lines are
+// too close" — when the operator just put them exactly far enough apart.
+//
+// Swept rather than spot-checked: which values misbehave depends on where the
+// operands fall in the binary grid, so a single example proves almost nothing.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("a pushed 0% line leaves a span the validator accepts", "[level][edit]") {
+    CalibrationDraft d;
+    d.set_rect(0.2, 0.0, 0.6, 1.0);   // a full-height band, so only the push acts
+    for (int i = 1; i <= 199; ++i) {
+        const double y = static_cast<double>(i) / 200.0;
+        d.set_y_100(0.999);           // force the push on every iteration
+        d.set_y_0(y);
+        INFO("y_0 = " << y << " y_100 = " << d.draft().y_100
+                      << " span = " << (d.draft().y_0 - d.draft().y_100));
+        CHECK(d.draft().y_0 - d.draft().y_100 >= kMinSpanNorm);
+        CHECK(d.check().ok);
+    }
+}
+
+TEST_CASE("a pushed 100% line leaves a span the validator accepts", "[level][edit]") {
+    CalibrationDraft d;
+    d.set_rect(0.2, 0.0, 0.6, 1.0);
+    for (int i = 1; i <= 199; ++i) {
+        const double y = static_cast<double>(i) / 200.0;
+        d.set_y_0(0.001);             // force the push on every iteration
+        d.set_y_100(y);
+        INFO("y_100 = " << y << " y_0 = " << d.draft().y_0
+                        << " span = " << (d.draft().y_0 - d.draft().y_100));
+        CHECK(d.draft().y_0 - d.draft().y_100 >= kMinSpanNorm);
+        CHECK(d.check().ok);
+    }
+}
+
+TEST_CASE("re-seating after a rectangle move leaves an acceptable span",
+          "[level][edit]") {
+    // The third site that separates the lines: a rectangle whose new band is too
+    // short for the lines' previous relative positions.
+    for (int i = 1; i <= 90; ++i) {
+        CalibrationDraft d;
+        d.set_rect(0.1, 0.0, 0.8, 1.0);
+        d.set_y_100(0.40);
+        d.set_y_0(0.42);
+        const double top = static_cast<double>(i) / 100.0;
+        d.set_rect(0.1, top, 0.8, 0.05);   // a short band the lines must fit into
+        INFO("top = " << top << " span = " << (d.draft().y_0 - d.draft().y_100));
+        CHECK(d.draft().y_0 - d.draft().y_100 >= kMinSpanNorm);
+        CHECK(d.draft().y_100 >= d.draft().rect_y);
+        CHECK(d.draft().y_0 <= d.draft().rect_y + d.draft().rect_h);
+        CHECK(d.check().ok);
+    }
+}

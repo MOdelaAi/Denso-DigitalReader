@@ -3,9 +3,11 @@
 #include "camera/repo.h"
 #include "camera/source_change.h"
 #include "detection/repo.h"
+#include "level/repo.h"
 #include "ui/camera/dialog/add_page.h"
 #include "ui/camera/dialog/areas_page.h"
 #include "ui/camera/dialog/configure_page.h"
+#include "ui/camera/dialog/level_calibration_page.h"
 #include "ui/camera/dialog/models_page.h"
 #include "camera/rtsp_templates.h"  // with_credentials
 #include "camera/snapshot.h"        // grab_snapshot, apply_orientation
@@ -47,7 +49,24 @@ void CameraWizardController::push_used_sources() {
     pages_.add->set_used_sources(std::move(ips), std::move(usb));
 }
 
+void CameraWizardController::reset_run_state() {
+    // Both of these belong to ONE pass through the wizard. Carrying either into
+    // the next camera would bind the wrong model, or reload the wrong geometry,
+    // with nothing on screen to say so.
+    ball_binding_ = std::nullopt;
+    level_loaded_ = false;
+}
+
+bool CameraWizardController::ball_mode() const {
+    // The COMMITTED mode, read from the database — never a settings selector's
+    // unconfirmed value. It decides which fourth step the wizard has and which
+    // repository owns the binding; it decides NO authorization question, which
+    // stays with models::model_compatibility via detection::evaluated_models.
+    return denso::mode::load(db_) == denso::mode::TargetMode::BallLeveler;
+}
+
 void CameraWizardController::begin_add() {
+    reset_run_state();
     editing_id_ = std::nullopt;
     original_ = camera::Camera{};
     draft_ = camera::Camera{};
@@ -57,6 +76,7 @@ void CameraWizardController::begin_add() {
 }
 
 void CameraWizardController::begin_edit(const camera::Camera& cam) {
+    reset_run_state();
     editing_id_ = cam.id;
     original_ = cam;
     draft_ = cam;
@@ -147,6 +167,7 @@ void CameraWizardController::capture_snapshot() {
             captured_.height = res.height();
             pages_.configure->set_frame(last_frame_);
             update_areas_background();  // refresh the ROI canvas if it's showing
+            update_level_background();  // …and the level canvas
         });
     });
 }
@@ -228,9 +249,31 @@ void CameraWizardController::enter_models() {
     // the same shared loader and provider — so what the page OFFERS and what
     // set_camera_models ACCEPTS are two readings of one rule, and a model can never
     // be offered here and then refused on Finish.
-    pages_.models->load_for(editing_id_.value_or(0), denso::mode::load(db_),
+    const denso::mode::TargetMode mode = denso::mode::load(db_);
+    const bool ball = mode == denso::mode::TargetMode::BallLeveler;
+    // Ball Leveler binds exactly ONE model and ONE class; the digit reader binds
+    // an ensemble. That is the binding CARDINALITY each domain's own write
+    // chokepoint already enforces — rendering it here just means an invalid
+    // binding cannot be built and then refused.
+    pages_.models->set_selection_mode(ball ? ModelsPage::SelectionMode::Single
+                                           : ModelsPage::SelectionMode::Ensemble);
+    pages_.models->load_for(editing_id_.value_or(0), mode,
                             denso::models::load_manifest_view(denso::paths::models_dir()),
                             denso::platform::measured_platform_info());
+    if (ball) {
+        // Seed the current choice. The IN-SESSION one wins over the stored one:
+        // the operator may have picked a different model and stepped back, and
+        // re-reading the database would silently undo that.
+        std::optional<denso::level::LevelBinding> seed = ball_binding_;
+        if (!seed.has_value() && editing_id_.has_value()) {
+            if (const auto cfg = denso::level::level_config_for(db_, *editing_id_)) {
+                seed = denso::level::LevelBinding{cfg->model_id, {cfg->class_id}};
+            }
+        }
+        if (seed.has_value() && seed->class_ids.size() == 1) {
+            pages_.models->select_single(seed->model_id, seed->class_ids.front());
+        }
+    }
     show_page_(3);
 }
 
@@ -347,6 +390,24 @@ bool CameraWizardController::save_models_only() {
 }
 
 void CameraWizardController::save_models() {
+    if (ball_mode()) {
+        // NOTHING is written here. The Ball chokepoint takes the binding and the
+        // geometry together in one transaction, so a model persisted at this step
+        // would be a second, partial authority — and an operator who stopped here
+        // would leave a camera bound to a model it has no calibration for.
+        const auto sel = pages_.models->selections(editing_id_.value_or(0));
+        if (sel.size() != 1 || sel.front().classes.size() != 1) {
+            QMessageBox::warning(
+                pages_.models, QStringLiteral("Choose a model"),
+                QStringLiteral("Select the measurement model and the ball class "
+                               "this camera uses before continuing."));
+            return;
+        }
+        ball_binding_ = denso::level::LevelBinding{
+            sel.front().model_id, {sel.front().classes.front().class_id}};
+        enter_level();
+        return;
+    }
     // "Next: Detection areas" — persist, then advance. NOT a finish: the camera
     // stays unfinished until Areas is saved or whole-frame is chosen.
     if (!save_models_only()) {
@@ -364,6 +425,7 @@ void CameraWizardController::begin_areas_direct(const camera::Camera& cam) {
         begin_edit(cam);  // resume the wizard from the start instead
         return;
     }
+    reset_run_state();
     editing_id_ = cam.id;
     draft_ = cam;
     last_frame_ = QImage();
@@ -405,13 +467,88 @@ bool CameraWizardController::preview_verifies_draft() const {
     return preview_.has_live_frame() && !camera::aspect_changed(captured_, draft_);
 }
 
-void CameraWizardController::update_areas_background() {
+QImage CameraWizardController::oriented_frame() const {
     if (last_frame_.isNull()) {
-        pages_.areas->set_background(QImage());
+        return QImage();
+    }
+    return apply_orientation(last_frame_, static_cast<int>(draft_.rotation),
+                             draft_.pitch, draft_.roll);
+}
+
+void CameraWizardController::update_areas_background() {
+    pages_.areas->set_background(oriented_frame());
+}
+
+void CameraWizardController::update_level_background() {
+    // The level canvas is optional: a host may build the wizard without the
+    // ball-leveler step at all.
+    if (pages_.level != nullptr) {
+        pages_.level->set_background(oriented_frame());
+    }
+}
+
+void CameraWizardController::enter_level() {
+    if (pages_.level == nullptr) {
         return;
     }
-    pages_.areas->set_background(apply_orientation(
-        last_frame_, static_cast<int>(draft_.rotation), draft_.pitch, draft_.roll));
+    if (!level_loaded_) {
+        std::optional<denso::level::LevelCalibration> saved;
+        if (editing_id_.has_value()) {
+            if (const auto cfg = denso::level::level_config_for(db_, *editing_id_)) {
+                saved = cfg->calibration;
+            }
+        }
+        pages_.level->load(saved);
+        level_loaded_ = true;
+    }
+    update_level_background();
+    show_page_(5);
+}
+
+void CameraWizardController::save_level_calibration(
+    const denso::level::LevelCalibration& calibration) {
+    if (pages_.level == nullptr) {
+        return;
+    }
+    // Both halves are required by construction. Reaching here without them means
+    // a caller skipped the model step, and writing a partial configuration is
+    // exactly what the single chokepoint exists to make impossible.
+    if (!editing_id_.has_value() || !ball_binding_.has_value()) {
+        pages_.level->show_save_error();
+        return;
+    }
+    // THE one Ball write. It re-asks the central policy for BallLeveler, enforces
+    // one model and one class, re-validates the geometry with the same validator
+    // the page gated Save on, and writes one row in one transaction. The geometry
+    // is fingerprinted against the view it was drawn on, so a later
+    // source/rotation/aspect edit can be detected rather than silently measured
+    // against.
+    denso::level::SaveRefusal refusal;
+    if (!denso::level::save_level_configuration(
+            db_, *editing_id_, {*ball_binding_}, calibration,
+            denso::camera::view_revision(draft_),
+            denso::models::load_manifest_view(denso::paths::models_dir()),
+            denso::platform::measured_platform_info(), &refusal)) {
+        // A refusal is a decision with a stable reason code; a bare failure is a
+        // write fault. Reporting one as the other would send the operator to fix
+        // the wrong thing.
+        if (refusal.reason_code.empty()) {
+            pages_.level->show_save_error();
+        } else {
+            pages_.level->show_refusal(QString::fromStdString(refusal.reason_code));
+        }
+        return;
+    }
+    // Only now — the calibration landed, so the setup this finishes is real.
+    finish_and_leave(pages_.level);
+}
+
+void CameraWizardController::level_back() {
+    // RE-ENTER, never just show_page_(3), for the same reason areas_back() does:
+    // the Models page is created once and reused for the application's lifetime,
+    // so raising it without reloading renders whatever the last load_for() left.
+    // The in-session binding survives — enter_models() seeds from it.
+    enter_models();
 }
 
 void CameraWizardController::save_areas(const std::vector<camera::CameraArea>& areas) {
@@ -467,6 +604,13 @@ bool CameraWizardController::finish_setup(QWidget* parent) {
 }
 
 void CameraWizardController::finish_whole_frame() {
+    // Offered in the ensemble shape only, and refused here too: "detect on the
+    // whole frame" would finish a ball-leveler camera that has no calibration —
+    // a camera the runtime could never measure through. The button being hidden
+    // is the affordance; this is the invariant.
+    if (ball_mode()) {
+        return;
+    }
     // The Models step's terminal action. ROI areas are optional — none means
     // detect on the whole frame — so this is a real finish, not an "exit".
     if (!save_models_only()) {

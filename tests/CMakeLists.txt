@@ -158,6 +158,11 @@ add_executable(denso_integration_tests
     # denso_app. Also reads the ModelsPage source (DENSO_SOURCE_DIR, defined below)
     # to prove the page holds no compatibility rule of its own.
     test_models_page_filtering.cpp
+    # Phase A Ball Leveler wizard UI: drives the REAL ModelsPage, level canvas and
+    # calibration page against a real DB + on-disk manifest, so it needs denso_app.
+    # Artifacts are tiny text files and no camera is contacted, so no engine is
+    # ever deserialized.
+    test_ball_wizard.cpp
 )
 target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
 # The platform-provider static test reads the two production call sites to assert

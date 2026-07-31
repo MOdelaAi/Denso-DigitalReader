@@ -5,6 +5,8 @@
 
 #include "camera/camera.h"
 
+#include <string>
+
 namespace denso::camera {
 
 /// True if the width/height RATIO differs (cross-multiplied — no float division,
@@ -30,5 +32,27 @@ bool view_geometry_changed(const Camera& a, const Camera& b);
 /// for re-verification — either the effective source or the view geometry
 /// changed. Credential/name-only edits return false.
 bool requires_area_review(const Camera& before, const Camera& after);
+
+/// An opaque fingerprint of exactly the fields the predicates above call
+/// view-significant: two cameras share a revision precisely when
+/// `requires_area_review` between them is false. That agreement IS the contract —
+/// the digest itself is an implementation detail and nothing may parse it.
+///
+/// It exists because Ball Leveler calibration geometry is expressed in
+/// oriented-frame coordinates (`ball_level_calibration.view_revision`), so a
+/// change to the source, rotation, pitch, roll or aspect makes a stored
+/// calibration refer to a DIFFERENT physical view. Storing the fingerprint lets
+/// that be detected later without re-deriving "what makes a view different" in a
+/// second place — the same reason the ROI quarantine reuses these predicates.
+///
+/// Hashed rather than composed in the clear, deliberately: `rtsp` is an
+/// operator-editable column and an operator may paste a credential-bearing URL
+/// into it. A fixed-width digest cannot carry one into the database, a backup or
+/// a diagnostic. Credentials are excluded from the input regardless (they do not
+/// change the view), which is belt AND braces.
+///
+/// Stable across processes and runs: composed only from persisted field values,
+/// never from a clock, a pointer or an iteration order.
+std::string view_revision(const Camera& c);
 
 } // namespace denso::camera

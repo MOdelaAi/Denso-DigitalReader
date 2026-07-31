@@ -25,13 +25,17 @@ The appliance does one job at a time, chosen by an explicit operator action.
 table. Absent/unknown/corrupt ⇒ `digit_reader`, never the newer mode, so existing
 installations upgrade unchanged.
 
-**`ball_leveler` persistence exists; the operator surface is still guarded.**
+**`ball_leveler` configuration exists; the operator surface is still guarded.**
 Ball Leveler model bindings and calibration have a durable home
-(`ball_level_calibration`, schema v14), but selecting the mode still lands on an
-explicit "not available in this release" page: no stream, no processor, no
-reporter, no wizard, and the top-bar Camera button disabled. Not yet
-implemented: the calibration UI, inference, percentage mapping, OpenCV level
-annotation and the EngineRegistry replacement.
+(`ball_level_calibration`, schema v14), the measurement core is complete
+(`src/core/level/`), and the Camera Wizard now has a Ball branch — a
+single-model step plus a Level-calibration page driving `CalibrationDraft` and
+saving through the one `save_level_configuration` chokepoint. **None of it is
+reachable**: selecting the mode still lands on an explicit "not available in this
+release" page, no stream, processor or reporter is constructed, and the top-bar
+Camera button stays disabled, so the wizard branch can only be driven by tests.
+Still not implemented: inference, the OpenCV level annotation, the runtime
+`CameraGrid` branch and the EngineRegistry replacement — Phase B.
 
 `switch_mode` is ONE transaction and is **NON-DESTRUCTIVE — it deletes nothing.**
 Every `camera` row survives with all 20 of its columns, **including
@@ -119,11 +123,13 @@ will be rejected in review.
 - **Use `192.168.1.15` for all Jetson validation** — builds, `ctest`,
   `tests/packaging/run.sh`, `tests/manual/repro_build.sh`, package inspection.
   Anything needing `sm_87`, real TensorRT or NVDEC can only be proven there.
-- **Do not unlock Ball Leveler without a new approved plan.** No Leveler wizard,
+- **Do not unlock Ball Leveler outside Phase B of the approved plan.** The
+  wizard branch and the measurement core now EXIST; the three guards
+  (`mode_confirm_text.cpp`, `camera_view.cpp`, `apply_camera_button_gate()`) plus
+  the fail-closed `mode_setup_required` are what keep them unreachable, and they
+  come down together, last, only once the complete runtime path is green. No
   production `CameraStream`, `DetectionProcessor`, `ZoneHealth` wiring or
-  reporter, and no ball position / percentage / calibration / level-result
-  algorithm. The mode persisting and the policy authorizing Float models is
-  **not** permission to build the feature.
+  reporter for the mode. Code existing is **not** permission to expose it.
 - **Never expose credentials or credential-bearing URLs** in logs, `status.json`,
   diagnostics, evidence files, specs or commits. Reuse
   `logging/redact.cpp::sanitize_url`; for catalog filenames reaching a diagnostic,

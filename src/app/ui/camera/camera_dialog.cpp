@@ -4,17 +4,20 @@
 #include "ui/camera/dialog/add_page.h"
 #include "ui/camera/dialog/areas_page.h"
 #include "ui/camera/dialog/configure_page.h"
+#include "ui/camera/dialog/level_calibration_page.h"
 #include "ui/camera/dialog/list_page.h"
 #include "ui/camera/dialog/models_page.h"
 #include "ui/camera/dialog/wizard_stepper.h"
 #include "ui/camera/wizard_controller.h"
 #include "ui/common/dialog_chrome.h"
+#include "mode/config.h"   // the COMMITTED mode names the fourth step
 
 #include <QPoint>
 #include <QRect>
 #include <QScreen>
 #include <QShowEvent>
 #include <QStackedWidget>
+#include <QStringList>
 #include <QVBoxLayout>
 
 #include <optional>
@@ -32,8 +35,8 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     outer->setSpacing(22);
     outer->addLayout(common::dialog_header(this, QStringLiteral("Camera")));
 
-    // Wizard step indicator — shown only during the add/edit flow (pages 1–3),
-    // hidden on the list; driven by show_page().
+    // Wizard step indicator — shown only during the add/edit flow, hidden on the
+    // list; driven by show_page(), which also names the fourth step.
     stepper_ = new WizardStepper(
         {QStringLiteral("Source"), QStringLiteral("Configure"),
          QStringLiteral("Models"), QStringLiteral("Areas")});
@@ -47,12 +50,14 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     configure_page_ = new CameraConfigurePage;       // index 2
     models_page_ = new ModelsPage;                   // index 3
     areas_page_ = new CameraAreasPage;               // index 4
+    level_page_ = new LevelCalibrationPage;          // index 5
     models_page_->set_db(db_);
     stack_->addWidget(list_page_);
     stack_->addWidget(add_page_);
     stack_->addWidget(configure_page_);
     stack_->addWidget(models_page_);
     stack_->addWidget(areas_page_);
+    stack_->addWidget(level_page_);
     outer->addWidget(stack_, 1);
 
     // The controller owns flow-state + persistence; the dialog owns widgets +
@@ -60,7 +65,7 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     controller_ = new CameraWizardController(
         db_,
         CameraWizardController::Pages{add_page_, configure_page_, models_page_,
-                                      areas_page_},
+                                      areas_page_, level_page_},
         [this](int index) { show_page(index); }, this);
     connect(controller_, &CameraWizardController::cameras_changed, this,
             &CameraDialog::cameras_changed);
@@ -104,6 +109,12 @@ CameraDialog::CameraDialog(QSqlDatabase db, QWidget* parent)
     connect(areas_page_, &CameraAreasPage::save_requested, controller_,
             &CameraWizardController::save_areas);
 
+    // ── Level-calibration page signals ────────────────────────────────────
+    connect(level_page_, &LevelCalibrationPage::back_requested, controller_,
+            &CameraWizardController::level_back);
+    connect(level_page_, &LevelCalibrationPage::save_requested, controller_,
+            &CameraWizardController::save_level_calibration);
+
     list_page_->reload();
 }
 
@@ -125,26 +136,37 @@ void CameraDialog::reject() {
 }
 
 void CameraDialog::show_page(int index) {
-    // The stepper belongs to the add/edit flow (pages 1–3), not the list.
+    // The stepper belongs to the add/edit flow, not the list.
     stepper_->setVisible(index >= 1);
     if (index >= 1) {
-        stepper_->set_current(index - 1);  // page 1→step 0, 2→1, 3→2
+        // The fourth step differs by job: ROI areas for the digit reader, level
+        // calibration for the ball leveler. Re-read on every switch rather than
+        // once at construction — the dialog outlives a mode change, and a stale
+        // label would name a step the wizard is not running.
+        stepper_->set_steps(
+            mode::load(db_) == mode::TargetMode::BallLeveler
+                ? QStringList{QStringLiteral("Source"), QStringLiteral("Configure"),
+                              QStringLiteral("Model"), QStringLiteral("Level")}
+                : QStringList{QStringLiteral("Source"), QStringLiteral("Configure"),
+                              QStringLiteral("Models"), QStringLiteral("Areas")});
+        // Pages 4 and 5 are both the FOURTH step — they are its two shapes.
+        stepper_->set_current(index >= 5 ? 3 : index - 1);
     }
-    // Near-fullscreen only while drawing areas; restore the compact size else.
-    if (index == 4) {
-        expand_for_areas();
+    // Near-fullscreen only while drawing over the snapshot; compact otherwise.
+    if (index == 4 || index == 5) {
+        expand_for_canvas();
     } else {
         restore_size();
     }
     stack_->setCurrentIndex(index);
 }
 
-void CameraDialog::expand_for_areas() {
-    if (areas_expanded_) {
+void CameraDialog::expand_for_canvas() {
+    if (canvas_expanded_) {
         return;
     }
-    pre_areas_geometry_ = geometry();
-    areas_expanded_ = true;
+    pre_canvas_geometry_ = geometry();
+    canvas_expanded_ = true;
     if (QScreen* s = screen()) {
         const QRect avail = s->availableGeometry();
         const int w = static_cast<int>(avail.width() * 0.92);
@@ -155,11 +177,11 @@ void CameraDialog::expand_for_areas() {
 }
 
 void CameraDialog::restore_size() {
-    if (!areas_expanded_) {
+    if (!canvas_expanded_) {
         return;
     }
-    areas_expanded_ = false;
-    setGeometry(pre_areas_geometry_);
+    canvas_expanded_ = false;
+    setGeometry(pre_canvas_geometry_);
 }
 
 void CameraDialog::show_list() {

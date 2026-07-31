@@ -2,10 +2,13 @@
 
 #include "camera/source_change.h"
 
+#include <string>
+
 using denso::camera::Camera;
 using denso::camera::requires_area_review;
 using denso::camera::same_effective_source;
 using denso::camera::view_geometry_changed;
+using denso::camera::view_revision;
 
 namespace {
 Camera usb_cam() {
@@ -122,4 +125,83 @@ TEST_CASE("aspect-ratio change needs review", "[source_change]") {
     after.height = 1080;
     CHECK(view_geometry_changed(before, after));
     CHECK(requires_area_review(before, after));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// view_revision — the fingerprint the Ball Leveler calibration is stored against.
+//
+// It exists so `ball_level_calibration.view_revision` can be produced from ONE
+// place. Its contract is defined ENTIRELY in terms of the predicates above: two
+// cameras share a revision exactly when neither the effective source nor the view
+// geometry changed. Testing it against `requires_area_review` rather than against
+// a literal digest is deliberate — the digest is an implementation detail, the
+// agreement is the rule.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("view_revision agrees with requires_area_review", "[source_change]") {
+    const Camera before = ip_cam();
+
+    SECTION("a view-significant change alters the revision") {
+        Camera after = ip_cam();
+        after.rotation = 90;
+        REQUIRE(requires_area_review(before, after));
+        CHECK(view_revision(before) != view_revision(after));
+    }
+    SECTION("a credential/name-only edit keeps it") {
+        Camera after = ip_cam();
+        after.name = "Renamed";
+        after.username = "admin";
+        after.password = "secret";
+        REQUIRE_FALSE(requires_area_review(before, after));
+        CHECK(view_revision(before) == view_revision(after));
+    }
+    SECTION("a same-aspect resolution change keeps it") {
+        Camera after = ip_cam();
+        after.width = 1280;
+        after.height = 720;
+        REQUIRE_FALSE(requires_area_review(before, after));
+        CHECK(view_revision(before) == view_revision(after));
+    }
+    SECTION("an aspect change alters it") {
+        Camera after = ip_cam();
+        after.width = 1440;
+        after.height = 1080;
+        REQUIRE(requires_area_review(before, after));
+        CHECK(view_revision(before) != view_revision(after));
+    }
+    SECTION("a USB camera and an IP camera never share one") {
+        CHECK(view_revision(usb_cam()) != view_revision(ip_cam()));
+    }
+}
+
+TEST_CASE("view_revision is stable and carries no credential", "[source_change]") {
+    Camera c = ip_cam();
+    c.username = "admin";
+    c.password = "hunter2";
+    const std::string rev = view_revision(c);
+
+    // Opaque and fixed-width: it is stored in the database and may reach a
+    // diagnostic, so it must never be able to carry a credential-bearing URL.
+    CHECK(rev.size() == 64);
+    CHECK(rev.find("hunter2") == std::string::npos);
+    CHECK(rev.find("admin") == std::string::npos);
+    CHECK(rev.find("192.168.1.50") == std::string::npos);
+    // Deterministic across calls — a fresh fingerprint on every save would
+    // invalidate every stored calibration.
+    CHECK(view_revision(c) == rev);
+    // …and across an identical, separately constructed camera.
+    Camera same = ip_cam();
+    same.username = "admin";
+    same.password = "hunter2";
+    CHECK(view_revision(same) == rev);
+}
+
+TEST_CASE("view_revision distinguishes rotation, pitch and roll", "[source_change]") {
+    const Camera base = ip_cam();
+    Camera rot = ip_cam(); rot.rotation = 180;
+    Camera pitch = ip_cam(); pitch.pitch = 3.5f;
+    Camera roll = ip_cam(); roll.roll = -2.0f;
+    CHECK(view_revision(base) != view_revision(rot));
+    CHECK(view_revision(base) != view_revision(pitch));
+    CHECK(view_revision(base) != view_revision(roll));
+    CHECK(view_revision(rot) != view_revision(pitch));
 }
