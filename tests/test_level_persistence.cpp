@@ -51,6 +51,7 @@ using denso::detection::DetectionModel;
 using denso::health::Readiness;
 using denso::level::LevelBinding;
 using denso::level::LevelCalibration;
+using denso::level::LevelZone;
 using denso::level::SaveRefusal;
 using denso::mode::TargetMode;
 using denso::models::Manifest;
@@ -222,10 +223,17 @@ int row_count(const QSqlDatabase& db, const QString& table) {
     return q.value(0).toInt();
 }
 
+/// Wrap ONE calibration as the single-zone set the multi-zone chokepoint takes.
+/// Most of these cases are about the MODEL binding, not the zone set, so they
+/// state the zone set once here rather than restating it at every call.
+std::vector<LevelZone> one_zone(const LevelCalibration& c, int zone_no = 1) {
+    return {LevelZone{zone_no, c}};
+}
+
 bool save_float(const Fixture& fx, int64_t camera_id,
                 const LevelCalibration& cal, SaveRefusal* refusal = nullptr) {
     return denso::level::save_level_configuration(
-        fx.h(), camera_id, {LevelBinding{fx.float_model_id, {0}}}, cal, "rev-1",
+        fx.h(), camera_id, {LevelBinding{fx.float_model_id, {0}}}, one_zone(cal), "rev-1",
         *fx.view, kPlatform, refusal);
 }
 
@@ -233,11 +241,11 @@ bool save_float(const Fixture& fx, int64_t camera_id,
 
 // ─── 1-2. migration v13 -> v14 is additive and preserves every digit row ──────
 
-TEST_CASE("schema version is 14", "[level][schema]") {
-    CHECK(denso::db::supported_schema_version() == 14);
+TEST_CASE("schema version is 15", "[level][schema]") {
+    CHECK(denso::db::supported_schema_version() == 15);
 }
 
-TEST_CASE("v13 -> v14 migrates a populated database and preserves every Digital "
+TEST_CASE("v13 -> v15 migrates a populated database and preserves every Digital "
           "Reader row",
           "[level][schema][migration]") {
     QTemporaryDir dir;
@@ -294,13 +302,13 @@ TEST_CASE("v13 -> v14 migrates a populated database and preserves every Digital 
         REQUIRE(QSqlQuery(db->handle()).exec(QStringLiteral("PRAGMA user_version = 13")));
     }
 
-    // Reopen and migrate: v13 -> v14.
+    // Reopen and migrate: v13 -> v15.
     {
         auto db = denso::db::Db::open(path);
         REQUIRE(db.has_value());
         REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 13);
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 14);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
 
         // MUTATION GUARD: every digit row survives, with its values intact.
         CHECK(row_count(db->handle(), "camera") == 1);
@@ -359,7 +367,54 @@ TEST_CASE("ball_level_calibration accepts only one row per camera",
     };
     CHECK(insert_raw(0.80));
     CHECK_FALSE(insert_raw(0.70));      // PRIMARY KEY conflict
+    // The LEGACY v14 table, deliberately retained and untouched by v15 — this
+    // still pins its one-row-per-camera shape, because the v15 backfill reads it.
     CHECK(row_count(fx.h(), "ball_level_calibration") == 1);
+}
+
+// ─── 3b. one MODEL per camera, many zones, enforced by the schema ─────────────
+
+TEST_CASE("ball_level_binding is one row per camera and ball_level_zone is keyed "
+          "by (camera_id, zone_no)",
+          "[level][schema][one-per-camera]") {
+    Fixture fx;
+    const auto cid = denso::camera::insert(fx.h(), ip_camera("Tank 1"));
+    REQUIRE(cid.has_value());
+
+    // MUTATION GUARD: a second MODEL for one camera must be impossible at the SQL
+    // layer. "One camera, one Float model" is then true by CONSTRUCTION, not by a
+    // rule a caller can forget — which is exactly why the model lives in its own
+    // table instead of being repeated in every zone row.
+    const auto bind_raw = [&](int64_t model_id) {
+        QSqlQuery q(fx.h());
+        q.prepare(QStringLiteral(
+            "INSERT INTO ball_level_binding (camera_id, model_id, class_id, "
+            "view_revision) VALUES (?, ?, 0, 'rev-1')"));
+        q.addBindValue(static_cast<qlonglong>(*cid));
+        q.addBindValue(static_cast<qlonglong>(model_id));
+        return q.exec();
+    };
+    CHECK(bind_raw(fx.float_model_id));
+    CHECK_FALSE(bind_raw(fx.digit_model_id));   // PRIMARY KEY conflict
+    CHECK(row_count(fx.h(), "ball_level_binding") == 1);
+
+    const auto zone_raw = [&](int zone_no) {
+        QSqlQuery q(fx.h());
+        q.prepare(QStringLiteral(
+            "INSERT INTO ball_level_zone (camera_id, zone_no, conf, rect_x, "
+            "rect_y, rect_w, rect_h, y_100, y_0, hold_ms) "
+            "VALUES (?, ?, 0.5, 0.3, 0.1, 0.4, 0.8, 0.2, 0.8, 2000)"));
+        q.addBindValue(static_cast<qlonglong>(*cid));
+        q.addBindValue(zone_no);
+        return q.exec();
+    };
+    // Several zones for ONE camera are the point of v15...
+    CHECK(zone_raw(1));
+    CHECK(zone_raw(2));
+    CHECK(zone_raw(3));
+    // ...but the same zone number twice on one camera is not.
+    CHECK_FALSE(zone_raw(2));
+    CHECK(row_count(fx.h(), "ball_level_zone") == 3);
 }
 
 TEST_CASE("the calibration table is keyed by camera, not by a surrogate id",
@@ -412,7 +467,7 @@ TEST_CASE("a saved Ball Leveler configuration survives a restart",
         REQUIRE(mid.has_value());
         model_id = *mid;
         REQUIRE(denso::level::save_level_configuration(
-            db->handle(), cam_id, {LevelBinding{model_id, {0}}}, good_calibration(),
+            db->handle(), cam_id, {LevelBinding{model_id, {0}}}, one_zone(good_calibration()),
             "rev-7", view, kPlatform, nullptr));
     }
     {
@@ -426,11 +481,11 @@ TEST_CASE("a saved Ball Leveler configuration survives a restart",
         CHECK(got->model_id == model_id);
         CHECK(got->class_id == 0);
         CHECK(got->view_revision == "rev-7");
-        CHECK(got->calibration.y_100 == good_calibration().y_100);
-        CHECK(got->calibration.y_0 == good_calibration().y_0);
-        CHECK(got->calibration.rect_w == good_calibration().rect_w);
-        CHECK(got->calibration.conf == good_calibration().conf);
-        CHECK(got->calibration.hold_ms == good_calibration().hold_ms);
+        CHECK(got->zones.at(0).calibration.y_100 == good_calibration().y_100);
+        CHECK(got->zones.at(0).calibration.y_0 == good_calibration().y_0);
+        CHECK(got->zones.at(0).calibration.rect_w == good_calibration().rect_w);
+        CHECK(got->zones.at(0).calibration.conf == good_calibration().conf);
+        CHECK(got->zones.at(0).calibration.hold_ms == good_calibration().hold_ms);
     }
 }
 
@@ -443,7 +498,7 @@ TEST_CASE("save_level_configuration accepts one compatible Float model with one 
     const auto cid = denso::camera::insert(fx.h(), ip_camera("Tank 1"));
     REQUIRE(cid.has_value());
     CHECK(save_float(fx, *cid, good_calibration()));
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 1);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 1);
     // The binding lives ONLY here — never in camera_model.
     CHECK(row_count(fx.h(), "camera_model") == 0);
 }
@@ -456,11 +511,11 @@ TEST_CASE("save_level_configuration rejects digitv3 in ball_leveler",
     SaveRefusal refusal;
     // MUTATION GUARD: the digit model must be refused by the CENTRAL policy.
     CHECK_FALSE(denso::level::save_level_configuration(
-        fx.h(), *cid, {LevelBinding{fx.digit_model_id, {0}}}, good_calibration(),
+        fx.h(), *cid, {LevelBinding{fx.digit_model_id, {0}}}, one_zone(good_calibration()),
         "rev-1", *fx.view, kPlatform, &refusal));
     CHECK(refusal.reason_code == "model_mode_incompatible");
     CHECK(refusal.canonical_id == "digitv3");
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 0);
 }
 
 TEST_CASE("save_level_configuration rejects an undeclared or unknown model",
@@ -475,18 +530,18 @@ TEST_CASE("save_level_configuration rejects an undeclared or unknown model",
         REQUIRE(mid.has_value());
         SaveRefusal refusal;
         CHECK_FALSE(denso::level::save_level_configuration(
-            fx.h(), *cid, {LevelBinding{*mid, {0}}}, good_calibration(), "rev-1",
+            fx.h(), *cid, {LevelBinding{*mid, {0}}}, one_zone(good_calibration()), "rev-1",
             *fx.view, kPlatform, &refusal));
         CHECK(refusal.reason_code == "model_undeclared");
     }
     SECTION("a model_id with no catalog row at all") {
         SaveRefusal refusal;
         CHECK_FALSE(denso::level::save_level_configuration(
-            fx.h(), *cid, {LevelBinding{999999, {0}}}, good_calibration(), "rev-1",
+            fx.h(), *cid, {LevelBinding{999999, {0}}}, one_zone(good_calibration()), "rev-1",
             *fx.view, kPlatform, &refusal));
         CHECK(refusal.reason_code == "model_undeclared");
     }
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 0);
 }
 
 TEST_CASE("save_level_configuration rejects a provenance-failed model",
@@ -506,7 +561,7 @@ TEST_CASE("save_level_configuration rejects a provenance-failed model",
     SaveRefusal refusal;
     CHECK_FALSE(save_float(fx, *cid, good_calibration(), &refusal));
     CHECK(refusal.reason_code == "model_provenance_failed");
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 0);
 }
 
 TEST_CASE("save_level_configuration requires exactly one model",
@@ -518,7 +573,7 @@ TEST_CASE("save_level_configuration requires exactly one model",
     SECTION("zero models") {
         SaveRefusal refusal;
         CHECK_FALSE(denso::level::save_level_configuration(
-            fx.h(), *cid, {}, good_calibration(), "rev-1",
+            fx.h(), *cid, {}, one_zone(good_calibration()), "rev-1",
             *fx.view, kPlatform, &refusal));
         CHECK(refusal.reason_code == "level_model_count");
     }
@@ -528,11 +583,11 @@ TEST_CASE("save_level_configuration requires exactly one model",
         CHECK_FALSE(denso::level::save_level_configuration(
             fx.h(), *cid,
             {LevelBinding{fx.float_model_id, {0}}, LevelBinding{fx.float_model_id, {0}}},
-            good_calibration(), "rev-1", *fx.view,
+            one_zone(good_calibration()), "rev-1", *fx.view,
             kPlatform, &refusal));
         CHECK(refusal.reason_code == "level_model_count");
     }
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 0);
 }
 
 TEST_CASE("save_level_configuration requires exactly one class",
@@ -544,7 +599,7 @@ TEST_CASE("save_level_configuration requires exactly one class",
     SECTION("zero classes") {
         SaveRefusal refusal;
         CHECK_FALSE(denso::level::save_level_configuration(
-            fx.h(), *cid, {LevelBinding{fx.float_model_id, {}}}, good_calibration(),
+            fx.h(), *cid, {LevelBinding{fx.float_model_id, {}}}, one_zone(good_calibration()),
             "rev-1", *fx.view, kPlatform, &refusal));
         CHECK(refusal.reason_code == "level_class_count");
     }
@@ -552,11 +607,11 @@ TEST_CASE("save_level_configuration requires exactly one class",
         SaveRefusal refusal;
         CHECK_FALSE(denso::level::save_level_configuration(
             fx.h(), *cid, {LevelBinding{fx.float_model_id, {0, 1}}},
-            good_calibration(), "rev-1", *fx.view,
+            one_zone(good_calibration()), "rev-1", *fx.view,
             kPlatform, &refusal));
         CHECK(refusal.reason_code == "level_class_count");
     }
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 0);
 }
 
 TEST_CASE("save_level_configuration rejects invalid calibration geometry",
@@ -624,7 +679,7 @@ TEST_CASE("save_level_configuration rejects invalid calibration geometry",
         SaveRefusal refusal;
         CHECK_FALSE(save_float(fx, *cid, b.cal, &refusal));
         CHECK(refusal.reason_code == std::string(b.reason));
-        CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+        CHECK(row_count(fx.h(), "ball_level_zone") == 0);
     }
 }
 
@@ -645,9 +700,9 @@ TEST_CASE("a rejected save performs no partial write and leaves an existing "
 
     const auto got = denso::level::level_config_for(fx.h(), *cid);
     REQUIRE(got.has_value());
-    CHECK(got->calibration.y_100 == good_calibration().y_100);
-    CHECK(got->calibration.y_0 == good_calibration().y_0);
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 1);
+    CHECK(got->zones.at(0).calibration.y_100 == good_calibration().y_100);
+    CHECK(got->zones.at(0).calibration.y_0 == good_calibration().y_0);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 1);
 }
 
 // ─── 14-17. non-destructive switch_mode ──────────────────────────────────────
@@ -706,7 +761,7 @@ TEST_CASE("switch_mode preserves Digital Reader configuration, Ball Leveler "
     CHECK(row_count(fx.h(), "camera_model_class") == 1);
     CHECK(row_count(fx.h(), "camera_area") == 1);
     CHECK(row_count(fx.h(), "reading") == 1);
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 1);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 1);
 
     // Camera connection columns and setup flags survive untouched.
     const auto cams = denso::camera::all(fx.h());
@@ -725,12 +780,12 @@ TEST_CASE("switch_mode preserves Digital Reader configuration, Ball Leveler "
     const auto r2 = denso::mode::switch_mode(fx.h(), TargetMode::DigitReader);
     REQUIRE(r2.ok);
     CHECK(denso::mode::load(fx.h()) == TargetMode::DigitReader);
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 1);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 1);
     CHECK(row_count(fx.h(), "camera_model") == 1);
     CHECK(row_count(fx.h(), "camera_area") == 1);
     const auto still = denso::level::level_config_for(fx.h(), *cid);
     REQUIRE(still.has_value());
-    CHECK(still->calibration.y_0 == good_calibration().y_0);
+    CHECK(still->zones.at(0).calibration.y_0 == good_calibration().y_0);
 }
 
 TEST_CASE("a failed mode-switch transaction leaves the previous mode unchanged",
@@ -868,7 +923,7 @@ TEST_CASE("try_level_config_for distinguishes no-row, a row, and query failure",
     // a broken table (as the pre-fix build did) makes (a) and (c) identical and
     // reports a corrupt database as an uncalibrated camera.
     REQUIRE(QSqlQuery(fx.h()).exec(
-        QStringLiteral("DROP TABLE ball_level_calibration")));
+        QStringLiteral("DROP TABLE ball_level_binding")));
     CHECK_FALSE(denso::level::try_level_config_for(fx.h(), *cid).has_value());
 }
 
@@ -888,7 +943,7 @@ TEST_CASE("a broken ball_level_calibration is Blocked/78, not Degraded/10",
 
     // MUTATION GUARD: a missing table is INFRASTRUCTURE, not a per-camera gap.
     REQUIRE(QSqlQuery(fx.h()).exec(
-        QStringLiteral("DROP TABLE ball_level_calibration")));
+        QStringLiteral("DROP TABLE ball_level_binding")));
     const auto v = denso::health::evaluate_integrity(
         fx.h(), fx.dir.path(), TargetMode::BallLeveler, *fx.view, kPlatform);
     CHECK(v.status == Readiness::Blocked);
@@ -901,7 +956,7 @@ TEST_CASE("an EMPTY fleet cannot hide a broken ball_level_calibration",
     Fixture fx;   // deliberately NO camera at all
     REQUIRE(denso::mode::save(fx.h(), TargetMode::BallLeveler));
     REQUIRE(QSqlQuery(fx.h()).exec(
-        QStringLiteral("DROP TABLE ball_level_calibration")));
+        QStringLiteral("DROP TABLE ball_level_binding")));
 
     // MUTATION GUARD: querying the table only inside the per-camera loop means an
     // appliance with no active camera never touches it and reports READY on a
@@ -950,7 +1005,7 @@ TEST_CASE("try_cameras_with_valid_config reports query failure as nullopt",
     // MUTATION GUARD: swallowing the failure as `{}` makes a broken table look
     // exactly like a fresh install.
     REQUIRE(QSqlQuery(fx.h()).exec(
-        QStringLiteral("DROP TABLE ball_level_calibration")));
+        QStringLiteral("DROP TABLE ball_level_binding")));
     CHECK_FALSE(denso::level::try_cameras_with_valid_config(fx.h()).has_value());
 }
 
@@ -970,7 +1025,7 @@ TEST_CASE("mode_setup_required propagates undeterminable rather than guessing",
     // a substitute - the answer must come from the query actually used, and a
     // failure must be nullopt, never `true`.
     REQUIRE(QSqlQuery(fx.h()).exec(
-        QStringLiteral("DROP TABLE ball_level_calibration")));
+        QStringLiteral("DROP TABLE ball_level_binding")));
     const auto broken =
         denso::mode::mode_setup_required(fx.h(), TargetMode::BallLeveler);
     CHECK_FALSE(broken.has_value());
@@ -991,26 +1046,26 @@ TEST_CASE("save_level_configuration rejects a class the model does not declare",
         // persist as a durable binding no runtime can ever resolve.
         CHECK_FALSE(denso::level::save_level_configuration(
             fx.h(), *cid, {LevelBinding{fx.float_model_id, {999}}},
-            good_calibration(), "rev-1", *fx.view, kPlatform, &refusal));
+            one_zone(good_calibration()), "rev-1", *fx.view, kPlatform, &refusal));
         CHECK(refusal.reason_code == "level_class_unknown");
         CHECK(refusal.canonical_id == "float-small");
-        CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+        CHECK(row_count(fx.h(), "ball_level_zone") == 0);
     }
 
     SECTION("a negative id") {
         SaveRefusal refusal;
         CHECK_FALSE(denso::level::save_level_configuration(
             fx.h(), *cid, {LevelBinding{fx.float_model_id, {-1}}},
-            good_calibration(), "rev-1", *fx.view, kPlatform, &refusal));
+            one_zone(good_calibration()), "rev-1", *fx.view, kPlatform, &refusal));
         CHECK(refusal.reason_code == "level_class_unknown");
-        CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+        CHECK(row_count(fx.h(), "ball_level_zone") == 0);
     }
 
     SECTION("the one declared id is accepted") {
         CHECK(denso::level::save_level_configuration(
             fx.h(), *cid, {LevelBinding{fx.float_model_id, {0}}},
-            good_calibration(), "rev-1", *fx.view, kPlatform, nullptr));
-        CHECK(row_count(fx.h(), "ball_level_calibration") == 1);
+            one_zone(good_calibration()), "rev-1", *fx.view, kPlatform, nullptr));
+        CHECK(row_count(fx.h(), "ball_level_zone") == 1);
     }
 }
 
@@ -1022,12 +1077,12 @@ TEST_CASE("an unknown class performs NO partial write and spares the good row",
     REQUIRE(save_float(fx, *cid, good_calibration()));   // a good row exists
 
     CHECK_FALSE(denso::level::save_level_configuration(
-        fx.h(), *cid, {LevelBinding{fx.float_model_id, {42}}}, good_calibration(),
+        fx.h(), *cid, {LevelBinding{fx.float_model_id, {42}}}, one_zone(good_calibration()),
         "rev-CLOBBER", *fx.view, kPlatform, nullptr));
 
     // MUTATION GUARD: the rejection must roll back whole - the operator's stored
     // configuration is not collateral damage for a bad request.
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 1);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 1);
     const auto still = denso::level::level_config_for(fx.h(), *cid);
     REQUIRE(still.has_value());
     CHECK(still->class_id == 0);
@@ -1052,22 +1107,22 @@ TEST_CASE("Ball persistence always authorises as BallLeveler, whatever a caller 
         std::is_invocable_r_v<
             bool, decltype(denso::level::save_level_configuration)&,
             const QSqlDatabase&, int64_t, const std::vector<LevelBinding>&,
-            const LevelCalibration&, const std::string&, const ManifestView&,
+            const std::vector<LevelZone>&, const std::string&, const ManifestView&,
             const PlatformInfo&, SaveRefusal*>,
         "save_level_configuration must take NO caller-supplied mode");
 
     SaveRefusal refusal;
     // digitv3 is refused unconditionally: the only mode ever asked is BallLeveler.
     CHECK_FALSE(denso::level::save_level_configuration(
-        fx.h(), *cid, {LevelBinding{fx.digit_model_id, {0}}}, good_calibration(),
+        fx.h(), *cid, {LevelBinding{fx.digit_model_id, {0}}}, one_zone(good_calibration()),
         "rev-1", *fx.view, kPlatform, &refusal));
     CHECK(refusal.reason_code == "model_mode_incompatible");
     CHECK(refusal.canonical_id == "digitv3");
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 0);
 
     // ...and the Float model IS evaluated as a Ball Leveler model.
     CHECK(save_float(fx, *cid, good_calibration()));
-    CHECK(row_count(fx.h(), "ball_level_calibration") == 1);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 1);
 }
 
 

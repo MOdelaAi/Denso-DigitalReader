@@ -20,7 +20,7 @@ constexpr float kPitchPerHeight = 0.70f;
 constexpr float kGapFactor      = 1.60f;
 
 struct ZoneAssembly {
-    ReadingKind kind  = ReadingKind::NoDigits;
+    ReadingKind kind  = ReadingKind::NoValue;
     int         value = 0;   // meaningful ONLY when kind == Complete
 };
 
@@ -34,7 +34,7 @@ ZoneAssembly assemble_zone_value(const std::vector<NamedDetection>& digits_in_zo
 
 /// For each area with a zone number, collect the kept digits whose box center
 /// (normalized by frame_w/frame_h) lies inside the area polygon, assemble, and
-/// emit a ZoneReading for EVERY such area (including NoDigits — the aggregator
+/// emit a ZoneReading for EVERY such area (including NoValue — the aggregator
 /// needs the liveness signal). `conf` is the min digit confidence in the zone
 /// (0 when there were none).
 std::vector<ZoneReading> group_into_zones(const std::vector<NamedDetection>& kept,

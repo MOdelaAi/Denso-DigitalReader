@@ -129,13 +129,13 @@ TEST_CASE("hold: incomplete readings keep the zone alive past the expiry window"
     }
 }
 
-TEST_CASE("hold: NoDigits also keeps the zone alive", "[zone_aggregator]") {
+TEST_CASE("hold: NoValue also keeps the zone alive", "[zone_aggregator]") {
     ZoneAggregator a(5, 10000);
     int64_t t = 0;
     feed(a, 1, 42, 5, t);
     for (int i = 0; i < 150; ++i) {
         t += 100;
-        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoValue)}, t).has_value());
     }
 }
 
@@ -160,10 +160,10 @@ TEST_CASE("hold: frames either side of a gap do not combine into one stable run"
     REQUIRE(feed(a, 1, 42, 2, t).has_value());              // 5 consecutive completes
 }
 
-TEST_CASE("REGRESSION: many consecutive Incomplete/NoDigits readings never "
+TEST_CASE("REGRESSION: many consecutive Incomplete/NoValue readings never "
           "stabilise to a phantom value 0",
           "[zone_aggregator]") {
-    // Guards the severe review finding: Incomplete/NoDigits carry value==0 in the
+    // Guards the severe review finding: Incomplete/NoValue carry value==0 in the
     // ZoneReading struct, but that 0 must never be treated as a candidate the
     // debounce counter can accumulate toward a stable, emitted snapshot. A zone
     // that has NEVER produced a Complete reading must never appear in any emitted
@@ -177,7 +177,7 @@ TEST_CASE("REGRESSION: many consecutive Incomplete/NoDigits readings never "
     }
     for (int i = 0; i < 200; ++i) {
         t += 100;
-        const auto snap = a.observe({rd(2, 0, ReadingKind::NoDigits)}, t);
+        const auto snap = a.observe({rd(2, 0, ReadingKind::NoValue)}, t);
         REQUIRE_FALSE(snap.has_value());
     }
 }
@@ -384,7 +384,7 @@ TEST_CASE("cold start: repeated incompletes publish NOTHING", "[zone_aggregator]
     int64_t t = 0;
     for (int i = 0; i < 100; ++i) {
         t += 100;
-        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoValue)}, t).has_value());
     }
 }
 
@@ -392,7 +392,7 @@ TEST_CASE("cold start: first valid value before the timeout publishes normally",
           "[zone_aggregator]") {
     ZoneAggregator a(5, 10000);
     int64_t t = 0;
-    for (int i = 0; i < 50; ++i) { t += 100; a.observe({rd(1, 0, ReadingKind::NoDigits)}, t); }
+    for (int i = 0; i < 50; ++i) { t += 100; a.observe({rd(1, 0, ReadingKind::NoValue)}, t); }
     const auto snap = feed(a, 1, 77, 5, t);
     REQUIRE(snap.has_value());
     REQUIRE((*snap).at(1) == 77);
@@ -404,7 +404,7 @@ TEST_CASE("cold start: timeout with no previous valid value inhibits and emits n
     int64_t t = 0;
     for (int i = 0; i < 400; ++i) {   // 40s, never a complete reading
         t += 100;
-        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoValue)}, t).has_value());
     }
     REQUIRE(a.take_newly_inhibited().count(1) == 1);
 }
@@ -419,10 +419,10 @@ TEST_CASE("DEFECT1: timeout fires with a baseline at t==0 (cold start)",
     // it went un-completed.
     ZoneAggregator a(5, 10000);
     int64_t t = 0;
-    REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());  // first_seen_ms = 0
+    REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoValue)}, t).has_value());  // first_seen_ms = 0
     for (int i = 0; i < 400; ++i) {   // 40s, never a complete reading
         t += 100;
-        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoDigits)}, t).has_value());
+        REQUIRE_FALSE(a.observe({rd(1, 0, ReadingKind::NoValue)}, t).has_value());
     }
     REQUIRE(a.take_newly_inhibited().count(1) == 1);
 }

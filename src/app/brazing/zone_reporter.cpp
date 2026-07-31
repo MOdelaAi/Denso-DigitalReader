@@ -8,9 +8,9 @@ namespace denso::ui {
 
 ZoneReporter::ZoneReporter(
     std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot,
-    int stable_frames, std::function<int64_t()> clock)
+    int stable_frames, std::function<int64_t()> clock, int64_t hold_timeout_ms)
     : on_snapshot_(std::move(on_snapshot)), clock_(std::move(clock)),
-      aggregator_(stable_frames) {}
+      aggregator_(stable_frames, kZoneExpiryMs, hold_timeout_ms) {}
 
 int64_t ZoneReporter::now_ms() const {
     if (clock_) {

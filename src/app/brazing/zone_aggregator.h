@@ -24,8 +24,25 @@ constexpr int64_t kHoldTimeoutMs = 30000; // hold -> Inhibited escalation (spec 
 
 class ZoneAggregator {
 public:
+    /// `hold_timeout_ms` is the window a zone may keep republishing its last
+    /// accepted value while its readings are non-Complete, before escalating to
+    /// Inhibited. It is a PARAMETER, exactly as `stable_frames` already is,
+    /// because the two modes need different values of the same policy — not two
+    /// policies (amendment §10.4):
+    ///
+    ///   digit_reader: kHoldTimeoutMs (30 s) — an OCR gap is transient and the
+    ///                 last read number is still the best available truth.
+    ///   ball_leveler: 0 — a level measurement that stopped is not evidence of
+    ///                 the current level, and the mode's invariant is that no old
+    ///                 percentage is ever annotated or reported as live. Zero
+    ///                 makes the hold window empty, so the first non-Complete
+    ///                 reading escalates immediately and the value is evicted.
+    ///
+    /// A second aggregator for Ball would be a second debounce, expiry, hold and
+    /// inhibit authority. This is one authority, configured.
     explicit ZoneAggregator(int stable_frames = kStableFrames,
-                            int64_t expiry_ms = kZoneExpiryMs);
+                            int64_t expiry_ms = kZoneExpiryMs,
+                            int64_t hold_timeout_ms = kHoldTimeoutMs);
 
     /// Feed one camera's assembled zones, stamped with a monotonic time in ms.
     /// Returns the full snapshot to send when any zone's stable value changed vs
@@ -88,7 +105,7 @@ private:
 
     int stable_frames_;
     int64_t expiry_ms_;
-    int64_t hold_timeout_ms_ = kHoldTimeoutMs;
+    int64_t hold_timeout_ms_;
     std::map<int, Debounce> zones_;   // zone_no -> debounce state
     std::map<int, int> last_sent_;    // zone_no -> value in the last snapshot
     std::set<int> zone_inhibit_;      // publication suppressed; debounce continues

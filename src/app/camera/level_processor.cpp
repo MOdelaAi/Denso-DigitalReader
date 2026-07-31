@@ -7,6 +7,7 @@
 #include <QDebug>
 
 #include <chrono>
+#include <map>
 #include <utility>
 
 namespace denso::ui {
@@ -34,35 +35,39 @@ QImage LevelStateProcessor::process(const QImage& frame) {
     if (bgr.empty()) {
         return oriented;
     }
-    level::LevelRuntimeEntry entry;
-    entry.camera_id = camera_id_;
-    entry.state = state_;
-    entry.ts_ms = now_ms();
-    // No calibration and no ball: nothing is being measured, so nothing is
-    // outlined. Only the state text is drawn.
-    draw_level_overlay(bgr, std::nullopt, entry, std::nullopt);
+    // No configuration and no zones: nothing is being measured, so nothing is
+    // outlined. Only the camera-level state word is drawn, through the same
+    // burn-in boundary the measuring path uses.
+    draw_level_camera_state(bgr, std::string(level::level_state_label(state_)));
     return mat_to_qimage(bgr);
 }
 
 // ── BallLevelProcessor ──────────────────────────────────────────────────────
 
 std::atomic<uint64_t> BallLevelProcessor::s_constructed_{0};
+std::atomic<uint64_t> BallLevelProcessor::s_inferences_{0};
 
 uint64_t BallLevelProcessor::constructed_count() {
     return s_constructed_.load(std::memory_order_relaxed);
 }
 
+uint64_t BallLevelProcessor::inference_count() {
+    return s_inferences_.load(std::memory_order_relaxed);
+}
+
 BallLevelProcessor::BallLevelProcessor(int degrees, double pitch, double roll,
                                        InferenceEngine* engine, int class_id,
-                                       level::LevelCalibration calibration,
-                                       int64_t camera_id,
-                                       WorkerFailedFn on_worker_failed)
+                                       std::vector<level::LevelZone> zones,
+                                       int64_t camera_id, ZoneSink* zone_sink,
+                                       WorkerFailedFn on_worker_failed,
+                                       ZoneViewFn zone_view)
     : degrees_(degrees), pitch_(pitch), roll_(roll), engine_(engine),
-      class_id_(class_id), calibration_(calibration), camera_id_(camera_id),
-      on_worker_failed_(std::move(on_worker_failed)) {
+      class_id_(class_id), zones_(std::move(zones)), camera_id_(camera_id),
+      zone_sink_(zone_sink), on_worker_failed_(std::move(on_worker_failed)),
+      zone_view_(std::move(zone_view)) {
     s_constructed_.fetch_add(1, std::memory_order_relaxed);
     // Start the worker LAST, once every member is initialized — it reads
-    // engine_, class_id_, calibration_ and on_worker_failed_ every frame.
+    // engine_, class_id_, zones_, zone_sink_ and on_worker_failed_ every frame.
     worker_ = std::thread([this] { infer_loop(); });
 }
 
@@ -80,8 +85,10 @@ BallLevelProcessor::~BallLevelProcessor() {
 void BallLevelProcessor::invalidate_measurement() {
     // Caller holds out_mtx_.
     have_measurement_ = false;
-    percent_.reset();
-    ball_.reset();
+    // Clearing the WHOLE vector, not just the percentages: a retained ball box
+    // would outline a detection from before the interruption on a frame captured
+    // after it.
+    results_.clear();
     // Drop the measurement's timestamp too, so an Acquiring/Unavailable entry
     // cannot be dated to a measurement that has been discarded.
     measured_ts_ms_ = 0;
@@ -94,8 +101,8 @@ void BallLevelProcessor::set_unavailable(std::optional<std::string> reason) {
     const bool engaging = reason.has_value();
     unavailable_ = std::move(reason);
     if (engaging) {
-        // The measurement dies with the interruption. Clearing the cause must
-        // never resurrect a number measured before it: the picture the operator
+        // The measurements die with the interruption. Clearing the cause must
+        // never resurrect numbers measured before it: the picture the operator
         // sees after a camera returns has to come from a frame taken after it
         // returned.
         invalidate_measurement();
@@ -106,9 +113,7 @@ level::LevelRuntimeEntry BallLevelProcessor::build_entry() const {
     // Caller holds out_mtx_.
     const int64_t ts = measured_ts_ms_ != 0 ? measured_ts_ms_ : now_ms();
     // Either cause WINS over any measurement, however recent. This is the rule
-    // that stops a stale number being presented as live: the entry it builds
-    // carries no percentage at all, so there is nothing for a draw site to
-    // accidentally render.
+    // that stops a stale number being presented as live.
     //
     // The camera cause is reported first when both are engaged: an offline
     // camera is the more proximate fault and the one the operator acts on, and a
@@ -120,18 +125,25 @@ level::LevelRuntimeEntry BallLevelProcessor::build_entry() const {
         return level::LevelRuntimeEntry::unavailable(
             camera_id_, level::kReasonInferenceError, ts);
     }
-    // A completed frame that selected no ball is NOT a measurement. Reporting
-    // Acquiring is the honest answer — the alternatives are inventing a number
-    // or keeping the previous one, and both are forbidden.
-    if (!have_measurement_ || !percent_) {
+    if (!have_measurement_) {
         return level::LevelRuntimeEntry::acquiring(camera_id_, ts);
     }
-    return level::LevelRuntimeEntry::healthy(camera_id_, *percent_, ts);
+    // A camera is Healthy as soon as it is measuring; whether an INDIVIDUAL zone
+    // has a value is the zone's own business and travels through the shared zone
+    // projection. Collapsing "some zone has no ball" into a camera fault is
+    // exactly the sibling coupling the amendment forbids: one zone without a
+    // detection must not erase a healthy sibling.
+    return level::LevelRuntimeEntry::healthy(camera_id_, 0.0, ts);
 }
 
-level::LevelRuntimeEntry BallLevelProcessor::snapshot() const {
+level::LevelRuntimeEntry BallLevelProcessor::camera_snapshot() const {
     std::lock_guard<std::mutex> lk(out_mtx_);
     return build_entry();
+}
+
+std::vector<LevelZoneResult> BallLevelProcessor::snapshot() const {
+    std::lock_guard<std::mutex> lk(out_mtx_);
+    return results_;
 }
 
 QImage BallLevelProcessor::process(const QImage& frame) {
@@ -163,21 +175,55 @@ QImage BallLevelProcessor::process(const QImage& frame) {
     }
     slot_cv_.notify_one();
 
-    level::LevelRuntimeEntry entry;
-    std::optional<level::BallBox> ball;
-    {
-        std::lock_guard<std::mutex> lk(out_mtx_);
-        entry = build_entry();
-        // Draw the box only when it belongs to the picture being reported. An
-        // Unavailable camera showing a ball outline would contradict its own
-        // "not measuring" caption.
-        if (entry.state == level::LevelState::Healthy) {
-            ball = ball_;
+    // The zone states the REPORTER decided, keyed by zone number. Reading them
+    // here rather than deriving them locally is what keeps one authority: the
+    // aggregator owns Acquiring/Healthy/Inhibited and the camera-level Paused,
+    // and this overlay renders that decision instead of forming a second one.
+    std::map<int, ZoneDisplayState> published;
+    if (zone_view_) {
+        for (const ZoneRuntimeEntry& e : zone_view_()) {
+            published[e.zone_no] = e.state;
         }
     }
-    // Drawn on the display-only Mat, immediately before the conversion — this is
-    // the boundary the zone overlay already proves.
-    draw_level_overlay(bgr, calibration_, entry, ball);
+
+    std::vector<LevelZoneResult> results;
+    bool measuring = false;
+    {
+        std::lock_guard<std::mutex> lk(out_mtx_);
+        const level::LevelRuntimeEntry entry = build_entry();
+        measuring = entry.state == level::LevelState::Healthy;
+        if (measuring) {
+            results = results_;
+        }
+    }
+
+    // Build one draw row per CONFIGURED zone, in configured order — never per
+    // RESULT. A zone that produced nothing must still appear, outlined and
+    // captioned, or the operator loses sight of where it was configured.
+    std::vector<LevelZoneDraw> draws;
+    draws.reserve(zones_.size());
+    for (size_t i = 0; i < zones_.size(); ++i) {
+        LevelZoneDraw d;
+        d.zone_no = zones_[i].zone_no;
+        d.calib = zones_[i].calibration;
+        const auto it = published.find(d.zone_no);
+        d.state = it != published.end() ? it->second : ZoneDisplayState::Acquiring;
+        // A number is drawn only where BOTH authorities agree there is one: the
+        // reporter says the zone is Healthy, and this frame's own measurement
+        // carries a percentage. Either alone would be a stale-value path — the
+        // reporter's Healthy survives a moment longer than the measurement, and
+        // the measurement outlives a camera-level pause.
+        if (measuring && d.state == ZoneDisplayState::Healthy &&
+            i < results.size() && results[i].percent) {
+            d.percent = results[i].percent;
+            d.ball = results[i].ball;
+        }
+        draws.push_back(std::move(d));
+    }
+
+    // Drawn on the display-only Mat, immediately before the conversion — the
+    // same composition boundary the digit zone panel uses.
+    draw_level_overlay(bgr, draws);
     return mat_to_qimage(bgr);
 }
 
@@ -205,9 +251,15 @@ void BallLevelProcessor::infer_loop() {
         // / sync failure, and this is a bare std::thread body, so an escaping
         // exception would std::terminate the whole app — the appliance would die
         // on a transient GPU hiccup. Skip the frame and stay alive.
+        //
+        // ONE call, for the whole camera, however many zones it has. The zone
+        // loop is below and downstream of this — it cannot reach the engine.
         std::vector<Detection> raw;
         try {
-            raw = engine_ ? engine_->infer(frame) : std::vector<Detection>{};
+            if (engine_) {
+                s_inferences_.fetch_add(1, std::memory_order_relaxed);
+                raw = engine_->infer(frame);
+            }
         } catch (const std::exception& e) {
             if (infer_fail_streak_++ % kInferFailLogEvery == 0) {
                 qWarning().noquote()
@@ -228,7 +280,7 @@ void BallLevelProcessor::infer_loop() {
                     on_worker_failed_(camera_id_, true);
                 }
             }
-            continue;   // publish NOTHING — a failed frame must not move the value
+            continue;   // publish NOTHING — a failed frame must not move any value
         }
         if (escalated_) {
             escalated_ = false;
@@ -243,8 +295,9 @@ void BallLevelProcessor::infer_loop() {
         infer_fail_streak_ = 0;
 
         // Backend detections into the pure core's normalized BallBox. Only the
-        // ONE bound class survives: the durable configuration names exactly one,
-        // and a Float engine could in principle declare more.
+        // ONE bound class survives: the durable configuration names exactly one
+        // for the whole CAMERA, and a Float engine could in principle declare
+        // more. Converted ONCE and shared by every zone.
         const double w = static_cast<double>(frame.cols);
         const double h = static_cast<double>(frame.rows);
         std::vector<level::BallBox> candidates;
@@ -260,26 +313,12 @@ void BallLevelProcessor::infer_loop() {
             candidates.push_back(b);
         }
 
-        // Selection and mapping belong to the PURE core: containment in the
-        // measurement rectangle, the calibration's confidence threshold, the
-        // highest-confidence winner, and the bbox vertical centre mapped through
-        // the reference lines. No rule of either is restated here.
-        const std::optional<level::BallChoice> choice =
-            level::select_ball(candidates, calibration_);
-        std::optional<double> pct;
-        std::optional<level::BallBox> chosen;
-        if (choice) {
-            chosen = choice->box;
-            pct = level::level_percent(calibration_, choice->box.centre_y());
-            // level_percent returns nullopt on a calibration that does not
-            // validate or a non-finite centre. Keep the box for the overlay only
-            // if it produced a number — a drawn box with no reading would say
-            // "measured" while the caption reported Acquiring.
-            if (!pct) {
-                chosen.reset();
-            }
-        }
+        // Selection and mapping belong to the PURE core, applied per zone over
+        // the SAME candidate set. No rule of either is restated here.
+        const std::vector<LevelZoneResult> results =
+            evaluate_level_zones(candidates, zones_);
 
+        bool publish = false;
         {
             std::lock_guard<std::mutex> lk(out_mtx_);
             // A cause engaged while this frame was in flight, so this result
@@ -288,10 +327,27 @@ void BallLevelProcessor::infer_loop() {
             // prevent — the next frame measures the world as it is now.
             if (avail_gen_ == submitted_gen) {
                 have_measurement_ = true;
-                percent_ = pct;
-                ball_ = chosen;
+                results_ = results;
                 measured_ts_ms_ = now_ms();
+                publish = true;
             }
+        }
+
+        // The ZoneSink hand-off, OUTSIDE out_mtx_: ZoneReporter takes its own
+        // mutex and invokes the snapshot callback, and holding two locks across
+        // that boundary is how a deadlock gets built. Emitted only for a frame
+        // that survived the epoch check — a discarded measurement must not reach
+        // the backend either.
+        //
+        // EVERY configured zone is emitted, including those that selected
+        // nothing: the aggregator uses continued presence as a zone's liveness
+        // signal, and a zone that simply stopped appearing would take the slow
+        // expiry path instead of being recognised as present-but-not-reading.
+        // With the Ball aggregator's hold_timeout_ms = 0 a NoValue reading
+        // evicts the zone's value immediately, which is what makes "no stale
+        // percentage is ever reported" true through the shared reporter.
+        if (publish && zone_sink_) {
+            zone_sink_->on_zones(camera_id_, level_zone_readings(results));
         }
     }
 }

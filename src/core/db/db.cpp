@@ -1,12 +1,16 @@
 #include "db/db.h"
 
+#include "camera/camera.h"   // camera::kMaxZone — the ONE zone-number range
+
 #include <QDebug>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QVariant>
 
 #include <atomic>
+#include <set>
 #include <utility>
+#include <vector>
 
 namespace denso::db {
 
@@ -14,13 +18,141 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 14;
+constexpr int SCHEMA_VERSION = 15;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
 QString next_connection_name() {
     static std::atomic<unsigned long long> counter{0};
     return QStringLiteral("denso_%1").arg(counter.fetch_add(1));
+}
+
+/// v14 -> v15 backfill: every stored single-tank Ball calibration becomes a
+/// camera-level binding plus ONE zone row.
+///
+/// The zone number cannot simply be 1 for everyone. Zone numbers are unique
+/// MACHINE-WIDE — across cameras and across BOTH modes — because the brazing
+/// payload keys by zone number alone. Assigning 1 to every migrated camera would
+/// manufacture the exact collision the uniqueness rule exists to prevent, and it
+/// would do so silently, at boot, on the operator's live data. So each camera
+/// takes the LOWEST number not already claimed by a digit ROI or by a
+/// previously-migrated Ball camera; the first camera on a Ball-only machine gets
+/// Zone 1, which is the documented case.
+///
+/// A camera for which no number is free is SKIPPED, not failed: its v14 row
+/// stays exactly where it is (this migration drops nothing), so the operator can
+/// free a number and reconfigure. Failing the migration instead would refuse to
+/// boot the appliance over a configuration problem.
+bool migrate_ball_calibration_to_zones(const QSqlDatabase& db) {
+    // Every zone number already spoken for by the digit reader.
+    std::set<int> taken;
+    {
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral("SELECT zone FROM camera_area "
+                                   "WHERE zone IS NOT NULL AND zone != 0"))) {
+            qWarning().noquote() << "v15: read claimed zones failed:"
+                                 << q.lastError().text();
+            return false;
+        }
+        while (q.next()) taken.insert(q.value(0).toInt());
+        if (q.lastError().isValid()) return false;
+    }
+
+    struct Legacy {
+        qlonglong camera_id = 0;
+        qlonglong model_id = 0;
+        int class_id = 0;
+        double conf = 0, rect_x = 0, rect_y = 0, rect_w = 0, rect_h = 0;
+        double y_100 = 0, y_0 = 0;
+        int hold_ms = 0;
+        QString view_revision;
+    };
+    std::vector<Legacy> rows;
+    {
+        // Read the whole set BEFORE writing: QSQLITE holds a read lock for the
+        // life of the cursor, and inserting into another table while iterating
+        // this one is the kind of thing that works until it doesn't.
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral(
+                "SELECT camera_id, model_id, class_id, conf, rect_x, rect_y, "
+                "rect_w, rect_h, y_100, y_0, hold_ms, view_revision "
+                "FROM ball_level_calibration ORDER BY camera_id"))) {
+            qWarning().noquote() << "v15: read ball_level_calibration failed:"
+                                 << q.lastError().text();
+            return false;
+        }
+        while (q.next()) {
+            Legacy r;
+            r.camera_id = q.value(0).toLongLong();
+            r.model_id = q.value(1).toLongLong();
+            r.class_id = q.value(2).toInt();
+            r.conf = q.value(3).toDouble();
+            r.rect_x = q.value(4).toDouble();
+            r.rect_y = q.value(5).toDouble();
+            r.rect_w = q.value(6).toDouble();
+            r.rect_h = q.value(7).toDouble();
+            r.y_100 = q.value(8).toDouble();
+            r.y_0 = q.value(9).toDouble();
+            r.hold_ms = q.value(10).toInt();
+            r.view_revision = q.value(11).toString();
+            rows.push_back(std::move(r));
+        }
+        // A fetch error mid-scan would migrate a SHORT list and then stamp the
+        // new user_version over it, silently losing the rest of the operator's
+        // calibrations with no way to notice.
+        if (q.lastError().isValid()) {
+            qWarning().noquote() << "v15: ball_level_calibration fetch error";
+            return false;
+        }
+    }
+
+    for (const Legacy& r : rows) {
+        int zone_no = 0;
+        for (int z = 1; z <= denso::camera::kMaxZone; ++z) {
+            if (!taken.count(z)) { zone_no = z; break; }
+        }
+        if (zone_no == 0) {
+            qWarning().noquote()
+                << "v15: no free zone number for camera" << r.camera_id
+                << "- its v14 calibration is retained but not migrated";
+            continue;
+        }
+        taken.insert(zone_no);
+
+        QSqlQuery b(db);
+        b.prepare(QStringLiteral(
+            "INSERT OR IGNORE INTO ball_level_binding "
+            "(camera_id, model_id, class_id, view_revision) VALUES (?, ?, ?, ?)"));
+        b.addBindValue(r.camera_id);
+        b.addBindValue(r.model_id);
+        b.addBindValue(r.class_id);
+        b.addBindValue(r.view_revision);
+        if (!b.exec()) {
+            qWarning().noquote() << "v15: binding insert failed:" << b.lastError().text();
+            return false;
+        }
+
+        QSqlQuery z(db);
+        z.prepare(QStringLiteral(
+            "INSERT OR IGNORE INTO ball_level_zone "
+            "(camera_id, zone_no, conf, rect_x, rect_y, rect_w, rect_h, "
+            " y_100, y_0, hold_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        z.addBindValue(r.camera_id);
+        z.addBindValue(zone_no);
+        z.addBindValue(r.conf);
+        z.addBindValue(r.rect_x);
+        z.addBindValue(r.rect_y);
+        z.addBindValue(r.rect_w);
+        z.addBindValue(r.rect_h);
+        z.addBindValue(r.y_100);
+        z.addBindValue(r.y_0);
+        z.addBindValue(r.hold_ms);
+        if (!z.exec()) {
+            qWarning().noquote() << "v15: zone insert failed:" << z.lastError().text();
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -481,6 +613,55 @@ bool run_migrations(const QSqlDatabase& db) {
                  "    hold_ms       INTEGER NOT NULL,"
                  "    view_revision TEXT    NOT NULL"
                  ")")) {
+            return false;
+        }
+    }
+
+    if (version < 15) {
+        // Ball Leveler MULTI-ZONE (amendment §10.5). v14 held one model binding
+        // AND one geometry in a single `camera_id PRIMARY KEY` row. A camera now
+        // owns 1..4 zones sharing ONE model, so the two are split: the binding
+        // stays one-per-camera (which is what makes "one model per camera" true
+        // by CONSTRUCTION, not by a rule a caller can forget), and the geometry
+        // becomes one row per (camera_id, zone_no).
+        //
+        // ADDITIVE ONLY, like every block above. `ball_level_calibration` is
+        // deliberately LEFT IN PLACE and untouched: it is the operator's v14
+        // work, the backfill below reads it, and dropping it would make this
+        // migration lossy in exactly the way the amendment forbids.
+        if (!run("CREATE TABLE IF NOT EXISTS ball_level_binding ("
+                 "    camera_id     INTEGER PRIMARY KEY REFERENCES camera(id),"
+                 "    model_id      INTEGER NOT NULL REFERENCES model(id),"
+                 "    class_id      INTEGER NOT NULL,"
+                 // The view the WHOLE camera's geometry was drawn against. Held
+                 // once per camera rather than per zone: every zone of a camera
+                 // is drawn on the same frame, so a per-zone copy could only
+                 // ever disagree with itself.
+                 "    view_revision TEXT    NOT NULL"
+                 ")")) {
+            return false;
+        }
+        // `zone_no` carries no CHECK on the 1..4 count: a CHECK constrains one
+        // ROW and the cap is a property of the SET. The count and the
+        // machine-wide uniqueness both belong to level::save_level_configuration,
+        // which sees the whole set inside one transaction. A range CHECK is
+        // still worth having — it is a per-row fact.
+        if (!run("CREATE TABLE IF NOT EXISTS ball_level_zone ("
+                 "    camera_id     INTEGER NOT NULL REFERENCES camera(id),"
+                 "    zone_no       INTEGER NOT NULL CHECK (zone_no >= 1),"
+                 "    conf          REAL    NOT NULL,"
+                 "    rect_x        REAL    NOT NULL,"
+                 "    rect_y        REAL    NOT NULL,"
+                 "    rect_w        REAL    NOT NULL,"
+                 "    rect_h        REAL    NOT NULL,"
+                 "    y_100         REAL    NOT NULL,"
+                 "    y_0           REAL    NOT NULL,"
+                 "    hold_ms       INTEGER NOT NULL,"
+                 "    PRIMARY KEY (camera_id, zone_no)"
+                 ")")) {
+            return false;
+        }
+        if (!migrate_ball_calibration_to_zones(db)) {
             return false;
         }
     }

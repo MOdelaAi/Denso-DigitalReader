@@ -4,8 +4,15 @@
 
 namespace denso::ui {
 
-ZoneAggregator::ZoneAggregator(int stable_frames, int64_t expiry_ms)
-    : stable_frames_(std::max(1, stable_frames)), expiry_ms_(expiry_ms) {}
+ZoneAggregator::ZoneAggregator(int stable_frames, int64_t expiry_ms,
+                               int64_t hold_timeout_ms)
+    : stable_frames_(std::max(1, stable_frames)), expiry_ms_(expiry_ms),
+      // Clamped at 0, not at 1: zero is the Ball Leveler's configured value and
+      // means "no hold window at all", which the sweep below expresses exactly
+      // (`now - base > 0` is false only while the last complete reading is this
+      // same millisecond). A negative value would be meaningless, so it folds
+      // into zero rather than inventing behaviour.
+      hold_timeout_ms_(std::max<int64_t>(0, hold_timeout_ms)) {}
 
 std::optional<std::map<int, int>> ZoneAggregator::observe(
     const std::vector<ZoneReading>& zones, int64_t now_ms) {

@@ -26,6 +26,20 @@ inline constexpr double kMinSpanNorm = 0.02;
 inline constexpr double kDefaultConf = 0.5;
 inline constexpr int kDefaultHoldMs = 2000;
 
+/// How many measurement zones ONE Ball Leveler camera may own.
+///
+/// This is a BALL rule, not a machine rule, and the distinction matters. The
+/// zone-number NAMESPACE is machine-wide and shared with the digit reader
+/// (camera::kMaxZone); this is a per-camera COUNT. It is deliberately not pushed
+/// into camera::area_validation, which the digit reader shares and which has no
+/// such cap — a digit camera may own as many zones as there are numbers.
+///
+/// Enforced in level::save_level_configuration, the one Ball write chokepoint,
+/// because a count is a property of the whole SET and only the chokepoint sees
+/// the whole set inside one transaction. A per-row database CHECK cannot state
+/// it.
+inline constexpr int kMaxBallZones = 4;
+
 /// One camera's measurement geometry. `rect_*` is the axis-aligned measurement
 /// rectangle; `y_100` / `y_0` are the horizontal reference lines that define the
 /// mapping. Both lines must lie inside the rectangle, and `y_100 < y_0`.
@@ -43,6 +57,19 @@ struct LevelCalibration {
     double y_0 = 0.0;     ///< 0% reference line
     double conf = kDefaultConf;
     int hold_ms = kDefaultHoldMs;
+};
+
+/// One measurement zone: its machine-wide reporting number and its geometry.
+///
+/// The zone carries NO model. That is the point of the v15 two-table split — the
+/// model is a camera-level fact, and a zone that could name one would be a zone
+/// that could disagree with its siblings.
+///
+/// It lives in this PURE header, not in level/repo.h, so the per-zone evaluation
+/// step and the overlay can take a zone set without dragging QtSql in behind it.
+struct LevelZone {
+    int zone_no = 0;
+    LevelCalibration calibration;
 };
 
 /// The verdict on a calibration. `reason_code` is a stable STRING code and a FILE

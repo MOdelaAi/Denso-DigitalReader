@@ -356,15 +356,22 @@ struct Fixture {
         REQUIRE(cam.has_value());
         return denso::camera::view_revision(*cam);
     }
-    /// Save through the ONE Ball write chokepoint.
+    /// Save through the ONE Ball write chokepoint, as a single zone.
     void calibrate(int64_t camera_id, int64_t model_id, int class_id,
-                   const LevelCalibration& c) {
+                   const LevelCalibration& c, int zone_no = 1) {
+        calibrate_zones(camera_id, model_id, class_id,
+                        {denso::level::LevelZone{zone_no, c}});
+    }
+    /// The multi-zone form. One model for the CAMERA, N zones sharing it.
+    void calibrate_zones(int64_t camera_id, int64_t model_id, int class_id,
+                         const std::vector<denso::level::LevelZone>& zones) {
         const ManifestView view = denso::models::load_manifest_view(models());
         denso::level::SaveRefusal refusal;
         const bool ok = denso::level::save_level_configuration(
-            h(), camera_id, {{model_id, {class_id}}}, c, revision_of(camera_id),
+            h(), camera_id, {{model_id, {class_id}}}, zones, revision_of(camera_id),
             view, kPlatform, &refusal);
-        INFO("refusal reason: " << refusal.reason_code);
+        INFO("refusal reason: " << refusal.reason_code
+             << " zone: " << refusal.zone_no);
         REQUIRE(ok);
     }
 };

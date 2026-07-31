@@ -602,3 +602,117 @@ Implementation obligations that follow, all of them testable:
    transaction, so persisted mode and running mode cannot disagree.
 5. The operator can always switch back (§7.5): a degraded destination mode
    leaves the mode control live.
+
+---
+
+## 10. Amendment — Multi-zone Ball Leveler (operator-approved 2026-07-31)
+
+Supersedes the one-tank-per-camera assumption throughout §1–§9. Ball Leveler
+becomes another PRODUCER of per-zone numeric values on the Digital Number zone
+infrastructure; only the zone-processing logic differs.
+
+    Digit zone processor: detections -> digit assembly     -> numeric zone value
+    Ball  zone processor: detections -> ball selection
+                                     -> percentage mapping -> numeric zone value
+
+### 10.1 Model ownership
+
+One camera binds exactly ONE Float model, shared by every Ball zone on that
+camera. There is no per-zone model selection and no per-zone inference. Per
+camera frame: one model, one inference execution, one detection set, evaluated
+independently for each configured zone.
+
+### 10.2 Zone numbering — the EXISTING machine-wide authority, unchanged
+
+Zone numbers stay machine-wide unique across all cameras AND both modes, over
+the range `camera_area.zone` already supports. The reason is unchanged and
+structural: `build_brazing_payload` keys by zone number alone and carries no
+camera identity, so two claimants of one number are two writers of one backend
+field. Ball reuses `camera::find_zone_conflict` and the picker; the ONE
+ownership query (`zones_owned_by_other_cameras`) is widened to see BOTH the
+digit `camera_area` rows and the Ball zone rows, so it remains the single
+authority rather than gaining a Ball-specific twin.
+
+A Ball camera owns 1..4 zones. That cap is BALL-SPECIFIC and lives in the Ball
+validation path — it is deliberately NOT pushed into `camera::area_validation`,
+which the digit reader shares and which has no such limit.
+
+Storage identity is `(camera_id, zone_no)`. Numbering does NOT restart per
+camera: e.g. Camera 1 -> 1,2,3,4; Camera 2 -> 5,6; Camera 3 -> 7,8,9,10.
+
+### 10.3 Percentage representation
+
+Ball arithmetic stays `double` end to end. The overlay may show one decimal
+(`LEVEL 24.5%`). At the `ZoneReading` seam the value is clamped to [0,100] and
+quantized to the NEAREST INTEGER, because the whole delivery stack — `ZoneReading::value`,
+the aggregator snapshot, `build_brazing_payload` — is integer-valued and the
+backend contract is `{"zoneN": <int>}`. Widening that stack to `double` is a
+backend-contract change, not a reuse adaptation, and is out of scope for this
+release. Operator-approved: the backend zone fields carry the Ball percentage as
+an integer 0..100.
+
+### 10.4 Aggregator policy — parameterized, not duplicated
+
+Ball reuses `ZoneSink -> ZoneReporter -> ZoneAggregator -> BrazingReporter`
+whole. `ZoneAggregator`'s hold timeout becomes a constructor parameter exactly
+as `stable_frames` already is. Ball Leveler Lean V1 constructs it with:
+
+  * `hold_timeout_ms = 0` — an incomplete or unavailable zone never keeps an old
+    percentage alive. This is what preserves §10.6's no-stale invariant through
+    an aggregator that was written to hold digit readings for 30 s.
+  * `stable_frames  = 1`  — a continuous quantized measurement will not reliably
+    produce five consecutive identical integers.
+
+Both are PARAMETERS of the one aggregator. A second aggregator, a second
+reporter, a second retry policy or a second payload builder is forbidden.
+
+NO median filter, deadband or smoothing subsystem ships in the first cut.
+Integer quantization plus `stable_frames = 1` is the initial behaviour; noise
+filtering is considered only if live-camera acceptance proves it necessary.
+
+### 10.5 Persistence — v15
+
+`ball_level_calibration` (v14) held one binding AND one geometry in one
+`camera_id PRIMARY KEY` row. v15 splits the two so the camera-level model is not
+duplicated per zone:
+
+  * `ball_level_binding(camera_id PK, model_id, class_id)`
+  * `ball_level_zone(camera_id, zone_no, rect_*, y_100, y_0, conf, hold_ms,
+     view_revision, PRIMARY KEY(camera_id, zone_no))`
+
+The v14 row migrates forward to a binding plus **Zone 1** — or, where zone 1 is
+already claimed, the lowest free zone number, since numbering is machine-wide.
+v14 data is NOT discarded: the old table is left in place untouched, additively,
+per the migration idiom already in `db.cpp`.
+
+`save_level_configuration` remains the ONE Ball write chokepoint. It now takes
+the binding plus the COMPLETE 1..4 zone set, validates every zone before writing
+anything, and commits once — one invalid zone rolls the whole camera save back.
+There is deliberately no per-zone save entry point.
+
+### 10.6 What is folded, what stays separate
+
+Folded into the Digital Number zone infrastructure (the duplicate subsystems the
+one-zone design introduced):
+
+  * `level::LevelRuntimeEntry` / `LevelState` -> the shared zone runtime
+    projection. `level/runtime.h`'s "there is no zone concept in this mode"
+    premise is now obsolete.
+  * `LevelStateProcessor` -> the shared tile/zone status path.
+  * `level_overlay` orchestration -> the existing zone annotation composition
+    boundary; only the Ball GEOMETRY drawing survives.
+  * `CameraGrid::reload_ball()`'s bypass of the zone/reporting subsystem -> it
+    now builds the SAME `ZoneReporter` / `BrazingReporter` the digit path builds.
+
+Stays Ball-specific: `BallLevelProcessor`, `level::select_ball` /
+`level::level_percent`, `LevelCalibration` validation and editing, and
+`LevelCanvas`.
+
+### 10.7 Invariants this amendment must not break
+
+  * A zone with no detection must not erase a healthy sibling zone.
+  * A camera failure may make all ITS zones unavailable and must not stop other
+    cameras.
+  * No old percentage is ever annotated or reported as a current live value.
+  * Digital Number area editing, annotation and backend reporting do not change.
+  * Switching modes preserves BOTH modes' saved zone configurations.

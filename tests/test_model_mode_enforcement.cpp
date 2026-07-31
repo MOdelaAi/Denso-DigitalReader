@@ -866,10 +866,10 @@ TEST_CASE("existing integrity behaviour is unchanged by enforcement",
 
     SECTION("the schema is at v14 (Ball Leveler calibration)") {
         Fixture f;
-        CHECK(denso::db::supported_schema_version() == 14);
+        CHECK(denso::db::supported_schema_version() == 15);
         const auto ver = denso::db::read_user_version(f.h());
         REQUIRE(ver.has_value());
-        CHECK(*ver == 14);
+        CHECK(*ver == 15);
     }
 }
 

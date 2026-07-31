@@ -501,13 +501,19 @@ void CameraWizardController::enter_level(bool direct) {
         return;
     }
     if (!level_loaded_) {
-        std::optional<denso::level::LevelCalibration> saved;
+        std::vector<denso::level::LevelZone> saved;
+        std::map<int, std::string> taken;
         if (editing_id_.has_value()) {
             if (const auto cfg = denso::level::level_config_for(db_, *editing_id_)) {
-                saved = cfg->calibration;
+                saved = cfg->zones;
             }
+            // The SAME machine-wide ownership query the Areas step uses, so the
+            // two pickers cannot disagree about which numbers are free — and a
+            // number held by a DIGIT area is just as unavailable here, because
+            // the payload key is the same either way.
+            taken = denso::level::zones_owned_elsewhere(db_, *editing_id_);
         }
-        pages_.level->load(saved);
+        pages_.level->load(std::move(saved), std::move(taken));
         level_loaded_ = true;
     }
     update_level_background();
@@ -515,7 +521,7 @@ void CameraWizardController::enter_level(bool direct) {
 }
 
 void CameraWizardController::save_level_calibration(
-    const denso::level::LevelCalibration& calibration) {
+    const std::vector<denso::level::LevelZone>& zones) {
     if (pages_.level == nullptr) {
         return;
     }
@@ -527,24 +533,28 @@ void CameraWizardController::save_level_calibration(
         return;
     }
     // THE one Ball write. It re-asks the central policy for BallLeveler, enforces
-    // one model and one class, re-validates the geometry with the same validator
-    // the page gated Save on, and writes one row in one transaction. The geometry
-    // is fingerprinted against the view it was drawn on, so a later
-    // source/rotation/aspect edit can be detected rather than silently measured
-    // against.
+    // ONE model and ONE class for the whole CAMERA, enforces 1..4 uniquely
+    // numbered zones against the machine-wide namespace, re-validates EVERY
+    // zone's geometry with the same validator the page gated Save on, and writes
+    // the binding plus every zone row in ONE transaction. One invalid zone rolls
+    // the whole camera save back. The geometry is fingerprinted against the view
+    // it was drawn on, so a later source/rotation/aspect edit can be detected
+    // rather than silently measured against.
     denso::level::SaveRefusal refusal;
     if (!denso::level::save_level_configuration(
-            db_, *editing_id_, {*ball_binding_}, calibration,
+            db_, *editing_id_, {*ball_binding_}, zones,
             denso::camera::view_revision(draft_),
             denso::models::load_manifest_view(denso::paths::models_dir()),
             denso::platform::measured_platform_info(), &refusal)) {
         // A refusal is a decision with a stable reason code; a bare failure is a
         // write fault. Reporting one as the other would send the operator to fix
-        // the wrong thing.
+        // the wrong thing. The zone number travels with it so a four-zone save
+        // says WHICH zone was refused.
         if (refusal.reason_code.empty()) {
             pages_.level->show_save_error();
         } else {
-            pages_.level->show_refusal(QString::fromStdString(refusal.reason_code));
+            pages_.level->show_refusal(QString::fromStdString(refusal.reason_code),
+                                       refusal.zone_no);
         }
         return;
     }

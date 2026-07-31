@@ -275,9 +275,21 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
             if (!zones_this_camera.insert(*a.zone).second) {
                 return rollback();  // duplicated within this same save
             }
+            // Both modes draw from ONE zone-number namespace, so the check spans
+            // both tables. `switch_mode` is non-destructive: a machine can hold a
+            // digit configuration and a Ball configuration simultaneously, and
+            // whichever mode is running writes the same `zoneN` payload keys.
+            // Checking only camera_area here would let a digit area silently take
+            // a number a Ball zone already reports, and the collision would not
+            // appear until the operator switched modes.
             QSqlQuery chk(db);
             chk.prepare(QStringLiteral(
-                "SELECT 1 FROM camera_area WHERE zone = ? AND camera_id != ? LIMIT 1"));
+                "SELECT 1 FROM camera_area WHERE zone = ? AND camera_id != ? "
+                "UNION ALL "
+                "SELECT 1 FROM ball_level_zone WHERE zone_no = ? AND camera_id != ? "
+                "LIMIT 1"));
+            chk.addBindValue(*a.zone);
+            chk.addBindValue(static_cast<qlonglong>(camera_id));
             chk.addBindValue(*a.zone);
             chk.addBindValue(static_cast<qlonglong>(camera_id));
             if (!chk.exec()) {
@@ -318,10 +330,20 @@ std::map<int, std::string> zones_owned_by_other_cameras(const QSqlDatabase& db,
                                                         int64_t camera_id) {
     std::map<int, std::string> owned;
     QSqlQuery q(db);
+    // ONE ownership query over BOTH modes' zone tables — this function is the
+    // single authority the pickers and validators consult, and a Ball-specific
+    // twin of it would be a second zone-numbering authority. A number claimed by
+    // the OTHER mode is just as unavailable as one claimed by another camera in
+    // this mode, because the payload key is the same either way.
     q.prepare(QStringLiteral(
         "SELECT a.zone, c.name FROM camera_area a JOIN camera c "
         "ON c.id = a.camera_id "
-        "WHERE a.camera_id != ? AND a.zone IS NOT NULL AND a.zone != 0"));
+        "WHERE a.camera_id != ? AND a.zone IS NOT NULL AND a.zone != 0 "
+        "UNION "
+        "SELECT z.zone_no, c.name FROM ball_level_zone z JOIN camera c "
+        "ON c.id = z.camera_id "
+        "WHERE z.camera_id != ?"));
+    q.addBindValue(static_cast<qlonglong>(camera_id));
     q.addBindValue(static_cast<qlonglong>(camera_id));
     if (!q.exec()) {
         return owned;  // read error → report nothing taken; the repo still gates the save

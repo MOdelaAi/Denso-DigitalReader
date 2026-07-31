@@ -488,7 +488,7 @@ struct PageFixture {
     PageFixture() {
         page.resize(kW + 320, kH + 160);   // room for the side controls
         page.set_background(test_frame());
-        page.load(std::nullopt);
+        page.load({}, {});
         REQUIRE(page.canvas() != nullptr);
         page.canvas()->resize(kW, kH);
     }
@@ -609,7 +609,7 @@ TEST_CASE("Save is unavailable until a measurable rectangle exists",
 
     int emitted = 0;
     QObject::connect(&f.page, &LevelCalibrationPage::save_requested,
-                     [&emitted](const LevelCalibration&) { ++emitted; });
+                     [&emitted](const std::vector<denso::level::LevelZone>&) { ++emitted; });
     save->click();          // a disabled button must not be a way through
     CHECK(emitted == 0);
 
@@ -663,7 +663,7 @@ TEST_CASE("a saved calibration reloads into the editor without drift",
     LevelCalibrationPage page;
     page.resize(kW + 320, kH + 160);
     page.set_background(test_frame());
-    page.load(saved);
+    page.load({denso::level::LevelZone{1, saved}}, {});
 
     const LevelCalibration& d = page.draft().draft();
     CHECK(d.rect_x == saved.rect_x);      // exact, not approx: opening the page
@@ -678,7 +678,7 @@ TEST_CASE("a saved calibration reloads into the editor without drift",
     // …and re-saving without touching anything emits exactly what was loaded.
     std::optional<LevelCalibration> emitted;
     QObject::connect(&page, &LevelCalibrationPage::save_requested,
-                     [&emitted](const LevelCalibration& c) { emitted = c; });
+                     [&emitted](const std::vector<denso::level::LevelZone>& z) { emitted = z.at(0).calibration; });
     QAbstractButton* save = find_button(page, QStringLiteral("levelSave"));
     REQUIRE(save != nullptr);
     REQUIRE(save->isEnabled());
@@ -820,14 +820,14 @@ TEST_CASE("the Ball wizard saves through the level chokepoint and nowhere else",
     CHECK(stored->camera_id == cam);
     CHECK(stored->model_id == h.id["float-small"]);
     CHECK(stored->class_id == 0);
-    CHECK(stored->calibration.rect_x == drawn.rect_x);
-    CHECK(stored->calibration.rect_y == drawn.rect_y);
-    CHECK(stored->calibration.rect_w == drawn.rect_w);
-    CHECK(stored->calibration.rect_h == drawn.rect_h);
-    CHECK(stored->calibration.y_100 == drawn.y_100);
-    CHECK(stored->calibration.y_0 == drawn.y_0);
-    CHECK(stored->calibration.conf == drawn.conf);
-    CHECK(stored->calibration.hold_ms == drawn.hold_ms);
+    CHECK(stored->zones.at(0).calibration.rect_x == drawn.rect_x);
+    CHECK(stored->zones.at(0).calibration.rect_y == drawn.rect_y);
+    CHECK(stored->zones.at(0).calibration.rect_w == drawn.rect_w);
+    CHECK(stored->zones.at(0).calibration.rect_h == drawn.rect_h);
+    CHECK(stored->zones.at(0).calibration.y_100 == drawn.y_100);
+    CHECK(stored->zones.at(0).calibration.y_0 == drawn.y_0);
+    CHECK(stored->zones.at(0).calibration.conf == drawn.conf);
+    CHECK(stored->zones.at(0).calibration.hold_ms == drawn.hold_ms);
     // The view the geometry was drawn against is fingerprinted with it.
     CHECK(stored->view_revision ==
           denso::camera::view_revision(denso::camera::all(h.h()).at(0)));
@@ -892,9 +892,9 @@ TEST_CASE("reopening the Ball wizard reloads the stored configuration",
     find_button(f2.level, QStringLiteral("levelSave"))->click();
     const auto stored = denso::level::level_config_for(h.h(), cam);
     REQUIRE(stored.has_value());
-    CHECK(stored->calibration.rect_x == saved.rect_x);
-    CHECK(stored->calibration.y_100 == saved.y_100);
-    CHECK(stored->calibration.y_0 == saved.y_0);
+    CHECK(stored->zones.at(0).calibration.rect_x == saved.rect_x);
+    CHECK(stored->zones.at(0).calibration.y_100 == saved.y_100);
+    CHECK(stored->zones.at(0).calibration.y_0 == saved.y_0);
     CHECK(stored->model_id == h.id["float-big"]);
 }
 
@@ -918,13 +918,13 @@ TEST_CASE("an edited calibration replaces the stored one, still one row",
     const double y0 = f.level.draft().draft().y_0;
     drag(f.level.canvas(), QPointF(wx(0.5), wy(y0)), QPointF(wx(0.5), wy(0.70)));
     const double moved = f.level.draft().draft().y_0;
-    CHECK(moved != first->calibration.y_0);
+    CHECK(moved != first->zones.at(0).calibration.y_0);
     find_button(f.level, QStringLiteral("levelSave"))->click();
 
     const auto second = denso::level::level_config_for(h.h(), cam);
     REQUIRE(second.has_value());
-    CHECK(second->calibration.y_0 == moved);
-    CHECK(second->calibration.y_100 == f.level.draft().draft().y_100);
+    CHECK(second->zones.at(0).calibration.y_0 == moved);
+    CHECK(second->zones.at(0).calibration.y_100 == f.level.draft().draft().y_100);
     // One configuration per camera, by schema — the edit replaced, not appended.
     const auto all = denso::level::cameras_with_valid_config(h.h());
     REQUIRE(all.size() == 1);

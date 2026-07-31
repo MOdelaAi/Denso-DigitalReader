@@ -262,12 +262,23 @@ IntegrityVerdict evaluate_integrity(const QSqlDatabase& db, const QString& model
                      QStringLiteral("level_calibration_missing")});
                 continue;
             }
-            const auto check = denso::level::validate_calibration(cfg->calibration);
+            // EVERY zone is checked, and the FIRST failure disqualifies the whole
+            // camera. A camera with one broken zone is not partially serviceable:
+            // reporting the other three would hide the fault behind a green line.
+            // The zone number is named so the operator knows which one to fix.
+            denso::level::CalibrationCheck check;
+            int bad_zone = 0;
+            for (const denso::level::LevelZone& z : cfg->zones) {
+                check = denso::level::validate_calibration(z.calibration);
+                if (!check.ok) { bad_zone = z.zone_no; break; }
+            }
             if (!check.ok) {
                 v.issues.push_back(
                     {ZoneIssue::Kind::LevelCalibrationInvalid, cam,
-                     QStringLiteral("camera %1: Ball Leveler calibration invalid (%2)")
+                     QStringLiteral("camera %1 zone %2: Ball Leveler calibration "
+                                    "invalid (%3)")
                          .arg(cam)
+                         .arg(bad_zone)
                          .arg(QString::fromStdString(check.reason_code)),
                      QString::fromStdString(check.reason_code)});
                 continue;

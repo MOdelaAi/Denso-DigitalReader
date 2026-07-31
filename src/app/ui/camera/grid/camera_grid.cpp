@@ -299,61 +299,7 @@ void CameraGrid::reload() {
     verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir(), mode_,
                                           *view_, platform_);
 
-    // Per-camera inhibit owner (GUI thread, no mutex). Any cause transition gates
-    // the reporter, repaints the camera's tile, and rewrites status.json. Created
-    // even without brazing so tiles + status.json still reflect faults.
-    health_ = std::make_unique<health::ZoneHealth>(
-        [this](int64_t camera_id, bool inhibited) {
-            if (reporter_) reporter_->set_camera_inhibited(camera_id, inhibited);
-            refresh_tile_inhibit(camera_id);
-            refresh_status_file();
-        });
-
-    // Brazing zone reporting: when enabled, a single machine-wide ZoneReporter
-    // collects every camera's assembled zones and POSTs the combined snapshot on
-    // change. The reporter is called from capture threads; its callback hops to
-    // the GUI thread (post_to_gui) where the BrazingReporter lives.
-    const brazing::BrazingConfig bcfg = brazing::load(db_);
-    // DELIVERY is optional; AGGREGATION is not. The ZoneReporter is always built
-    // below, so zone values are computed, debounced, held and inhibited even with
-    // no backend configured — the grid overlay is a LOCAL check and must not
-    // depend on the server it exists to cross-check. Only the sender and this
-    // callback are gated on configuration; an empty callback is a supported state
-    // (ZoneReporter guards every publish with `if (snapshot && on_snapshot_)`).
-    std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot;
-    if (bcfg.enabled && !bcfg.base_url.empty()) {
-        brazing_reporter_ = std::make_unique<BrazingReporter>(
-            std::make_unique<BrazingClient>(bcfg.base_url));
-        BrazingReporter* reporter = brazing_reporter_.get();
-        on_snapshot =
-            [this, reporter](const std::map<int, int>& snap, uint64_t seq) {
-                // Marshal to `reporter` (not `this`) so Qt drops the queued call if
-                // the BrazingReporter is torn down; `reporter` is owned by this
-                // grid, so `this` (for last_applied_seq_) is valid whenever it runs.
-                common::post_to_gui(reporter, [this, reporter, snap, seq] {
-                    // Callbacks fire outside the reporter mutex and marshal from
-                    // several threads, so an older eviction can overtake a newer
-                    // recovery. Drop the stale one rather than let whole-snapshot
-                    // latest-wins clobber the recovery (spec §3.3d).
-                    if (seq <= last_applied_seq_) return;
-                    last_applied_seq_ = seq;
-                    reporter->submit(snap);
-                });
-            };
-    }
-    // ALWAYS constructed — see above. With no backend configured this holds an
-    // empty callback and simply publishes nowhere.
-    reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot));
-
-    // Overlay polling. Parented to `this`, so it dies with the grid even if a
-    // teardown path ever forgets it; clear() stops it explicitly BEFORE the
-    // reporter is destroyed, so no tick can outlive what it reads.
-    if (!zone_timer_) {
-        zone_timer_ = new QTimer(this);
-        zone_timer_->setInterval(kZonePollMs);
-        connect(zone_timer_, &QTimer::timeout, this, &CameraGrid::poll_zone_runtime);
-    }
-    zone_timer_->start();
+    build_zone_reporting(kStableFrames, kHoldTimeoutMs);
 
     const GridDims dims = grid_dims(static_cast<int>(cams.size()));
     for (int i = 0; i < static_cast<int>(cams.size()); ++i) {
@@ -474,6 +420,74 @@ void CameraGrid::set_engines(std::shared_ptr<EngineRegistry> engines,
     }
 }
 
+void CameraGrid::build_zone_reporting(int stable_frames, int64_t hold_timeout_ms) {
+    // ONE construction site for the whole zone-reporting subsystem, shared by
+    // BOTH modes. It exists as a function precisely so the two reload paths
+    // cannot drift into building different pipelines for the same job: whatever
+    // the digit reader gets, the Ball Leveler gets, and the ONLY difference
+    // between them is the two aggregator parameters passed in here (amendment
+    // §10.4). A Ball-specific copy of this block would be the second reporting
+    // authority the amendment forbids.
+
+    // Per-camera inhibit owner (GUI thread, no mutex). Any cause transition gates
+    // the reporter, repaints the camera's tile, and rewrites status.json. Created
+    // even without brazing so tiles + status.json still reflect faults.
+    health_ = std::make_unique<health::ZoneHealth>(
+        [this](int64_t camera_id, bool inhibited) {
+            if (reporter_) reporter_->set_camera_inhibited(camera_id, inhibited);
+            refresh_tile_inhibit(camera_id);
+            refresh_status_file();
+        });
+
+    // Brazing zone reporting: when enabled, a single machine-wide ZoneReporter
+    // collects every camera's assembled zones and POSTs the combined snapshot on
+    // change. The reporter is called from capture threads; its callback hops to
+    // the GUI thread (post_to_gui) where the BrazingReporter lives.
+    const brazing::BrazingConfig bcfg = brazing::load(db_);
+    // DELIVERY is optional; AGGREGATION is not. The ZoneReporter is always built
+    // below, so zone values are computed, debounced, held and inhibited even with
+    // no backend configured — the grid overlay is a LOCAL check and must not
+    // depend on the server it exists to cross-check. Only the sender and this
+    // callback are gated on configuration; an empty callback is a supported state
+    // (ZoneReporter guards every publish with `if (snapshot && on_snapshot_)`).
+    std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot;
+    if (bcfg.enabled && !bcfg.base_url.empty()) {
+        brazing_reporter_ = std::make_unique<BrazingReporter>(
+            std::make_unique<BrazingClient>(bcfg.base_url));
+        BrazingReporter* reporter = brazing_reporter_.get();
+        on_snapshot =
+            [this, reporter](const std::map<int, int>& snap, uint64_t seq) {
+                // Marshal to `reporter` (not `this`) so Qt drops the queued call if
+                // the BrazingReporter is torn down; `reporter` is owned by this
+                // grid, so `this` (for last_applied_seq_) is valid whenever it runs.
+                common::post_to_gui(reporter, [this, reporter, snap, seq] {
+                    // Callbacks fire outside the reporter mutex and marshal from
+                    // several threads, so an older eviction can overtake a newer
+                    // recovery. Drop the stale one rather than let whole-snapshot
+                    // latest-wins clobber the recovery (spec §3.3d).
+                    if (seq <= last_applied_seq_) return;
+                    last_applied_seq_ = seq;
+                    reporter->submit(snap);
+                });
+            };
+    }
+    // ALWAYS constructed — see above. With no backend configured this holds an
+    // empty callback and simply publishes nowhere.
+    reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot), stable_frames,
+                                               std::function<int64_t()>{},
+                                               hold_timeout_ms);
+
+    // Overlay polling. Parented to `this`, so it dies with the grid even if a
+    // teardown path ever forgets it; clear() stops it explicitly BEFORE the
+    // reporter is destroyed, so no tick can outlive what it reads.
+    if (!zone_timer_) {
+        zone_timer_ = new QTimer(this);
+        zone_timer_->setInterval(kZonePollMs);
+        connect(zone_timer_, &QTimer::timeout, this, &CameraGrid::poll_zone_runtime);
+    }
+    zone_timer_->start();
+}
+
 void CameraGrid::reload_ball() {
     // Judged against the SAME facts for every camera in this generation: the
     // committed mode, the production manifest view and the measured platform.
@@ -494,13 +508,28 @@ void CameraGrid::reload_ball() {
         return;
     }
 
+    // The SAME zone-reporting subsystem the digit reader builds, differing only
+    // in the two aggregator parameters (amendment §10.4):
+    //   stable_frames  = 1 — a continuous quantized measurement will not
+    //                        reliably repeat five identical integers, so the
+    //                        digit debounce would mean Ball never publishes.
+    //   hold_timeout_ms = 0 — a level measurement that stopped is not evidence
+    //                        of the current level. Zero makes the hold window
+    //                        empty, so the first non-Complete reading evicts the
+    //                        value instead of republishing it for 30 s. This is
+    //                        what carries Ball's "no old percentage is ever
+    //                        reported as live" invariant THROUGH the shared
+    //                        reporter rather than around it.
+    build_zone_reporting(/*stable_frames=*/1, /*hold_timeout_ms=*/0);
+
     const GridDims dims = grid_dims(static_cast<int>(cams.size()));
     for (int i = 0; i < static_cast<int>(cams.size()); ++i) {
         const camera::Camera& cam = cams[static_cast<size_t>(i)];
         auto* tile = new CameraTile(QString::fromStdString(cam.name));
         // No set_areas(): ball_leveler reads no camera_area. ROI polygons are a
         // digit-reader concept and drawing them here would show geometry that
-        // governs nothing.
+        // governs nothing. Ball zone geometry is burned into the frame by the
+        // level overlay instead.
         grid_->addWidget(tile, i / dims.cols, i % dims.cols);
         tiles_.push_back(tile);
         tiles_by_cam_[cam.id] = tile;
@@ -512,11 +541,10 @@ void CameraGrid::reload_ball() {
     cols_ = dims.cols;
     relayout_letterbox();
 
-    // Ball Leveler has no zone runtime at all - no ZoneHealth, no reporter, no
-    // zones - so the zone-less document this writes IS its complete runtime
-    // status. Expanding status.json with level data is deliberately deferred
-    // (Lean V1), and CameraGrid remains its single runtime writer.
-    publish_idle_status();
+    // The SAME status writer the digit path uses. Ball zones now flow through
+    // the shared ZoneHealth + ZoneReporter, so status.json reports them the way
+    // it reports digit zones — CameraGrid remains its single runtime writer.
+    refresh_status_file();
 }
 
 void CameraGrid::start_one_ball(const camera::Camera& cam, CameraTile* tile) {
@@ -565,14 +593,20 @@ void CameraGrid::start_one_ball(const camera::Camera& cam, CameraTile* tile) {
         show_state(level::LevelState::CalibrationInvalid);
         return;
     }
-    if (!level::validate_calibration(cfg.calibration).ok) {
-        qWarning().noquote()
-            << "[level] camera" << cam.id << "- stored calibration is invalid ("
-            << QString::fromStdString(
-                   level::validate_calibration(cfg.calibration).reason_code)
-            << "); measurement paused";
-        show_state(level::LevelState::CalibrationInvalid);
-        return;
+    // EVERY zone must validate. A camera with one broken zone does not measure
+    // its other three: the operator must see and fix the fault, and quietly
+    // running the healthy zones would hide it behind a working display.
+    for (const level::LevelZone& z : cfg.zones) {
+        const auto check = level::validate_calibration(z.calibration);
+        if (!check.ok) {
+            qWarning().noquote()
+                << "[level] camera" << cam.id << "zone" << z.zone_no
+                << "- stored calibration is invalid ("
+                << QString::fromStdString(check.reason_code)
+                << "); measurement paused";
+            show_state(level::LevelState::CalibrationInvalid);
+            return;
+        }
     }
 
     // ── 3. The bound model, through the ONE central policy ───────────────────
@@ -651,19 +685,54 @@ void CameraGrid::start_one_ball(const camera::Camera& cam, CameraTile* tile) {
     }
 
     // ── 5. The measuring pipeline ────────────────────────────────────────────
-    // NO WorkerFailedFn. The inference cause belongs to the processor and to the
-    // worker that observes it: the processor raises and clears it under its own
-    // mutex, and ONLY a genuine inference success clears it.
-    //
-    // The grid used to marshal that callback back into set_unavailable(), which
-    // silently re-coupled the two causes it was split apart to separate - a
-    // queued "recovered" would land in the CAMERA slot and wipe a live
-    // camera_offline. Ball Leveler has no ZoneHealth and no reporter, so nothing
-    // on the GUI side consumed the notification anyway; there is no second
-    // writer of this state.
+    // Display ownership comes from CONFIGURATION, not from observations —
+    // identically to the digit path. A camera inhibited before any frame arrives
+    // never reaches the reporter's observation-derived map, so its zones could
+    // otherwise never render as Paused.
+    if (reporter_) {
+        std::set<int> configured_zones;
+        for (const level::LevelZone& z : cfg.zones) configured_zones.insert(z.zone_no);
+        reporter_->set_configured_zones(cam.id, std::move(configured_zones));
+    }
+
+    // This camera's rows from the SHARED projection, read on the capture thread
+    // once per displayed frame — the same ZoneViewFn seam and the same
+    // mutex-guarded, copy-returning implementation the digit processors use. The
+    // overlay renders the state the REPORTER decided; it does not compute a
+    // second opinion.
+    ZoneViewFn zone_view;
+    if (reporter_) {
+        ZoneReporter* rep = reporter_.get();
+        const int64_t cid = cam.id;
+        zone_view = [rep, cid] {
+            std::vector<ZoneRuntimeEntry> mine;
+            for (const ZoneRuntimeEntry& e : rep->runtime_view()) {
+                if (e.camera_id == cid) mine.push_back(e);
+            }
+            return mine;
+        };
+    }
+
+    // WorkerFailedFn now HAS a consumer: ZoneHealth, exactly as in the digit
+    // path. It is marshalled to the GUI thread and routed to ZoneHealth — NOT
+    // back into set_unavailable(), which is the CAMERA cause slot. Feeding it
+    // there is what once re-coupled the two causes a queued "recovered" could
+    // then wipe a live camera_offline with. Two causes, two owners.
+    auto on_worker_failed = [this, id = cam.id, gen = generation_](int64_t camera_id,
+                                                                   bool failed) {
+        common::post_to_gui(this, [this, id, camera_id, gen, failed] {
+            if (!camera::callback_is_current(gen, generation_)) return;
+            if (camera_id != id) return;
+            if (health_) {
+                health_->set_cause(id, health::ZoneCause::InferenceWorkerFailed, failed);
+            }
+        });
+    };
+
     auto proc = std::make_unique<BallLevelProcessor>(
         static_cast<int>(cam.rotation), cam.pitch, cam.roll, engine,
-        cfg.class_id, cfg.calibration, cam.id);
+        cfg.class_id, cfg.zones, cam.id, reporter_.get(),
+        std::move(on_worker_failed), std::move(zone_view));
     BallLevelProcessor* proc_raw = proc.get();
 
     auto* stream = new CameraStream(cam, std::move(proc));
@@ -683,6 +752,15 @@ void CameraGrid::start_one_ball(const camera::Camera& cam, CameraTile* tile) {
                 it->second->set_unavailable(
                     offline ? std::optional<std::string>(level::kReasonCameraOffline)
                             : std::nullopt);
+                // The processor clearing its own measurements is only half of it:
+                // the values already ACCEPTED by the machine-wide aggregator must
+                // also go, or the backend keeps seeing this camera's last zone
+                // values while it is dark. That eviction is ZoneHealth's job
+                // through the shared reporter — the same one authority the digit
+                // path uses, not a second eviction written here.
+                if (health_) {
+                    health_->set_cause(id, health::ZoneCause::CaptureOffline, offline);
+                }
             });
     tile->set_frame_counter(stream->frame_counter());
     // Recorded only once the stream that OWNS the processor is in streams_, so

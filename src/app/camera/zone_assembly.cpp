@@ -10,7 +10,7 @@ namespace denso::ui {
 
 ZoneAssembly assemble_zone_value(const std::vector<NamedDetection>& digits_in_zone) {
     if (digits_in_zone.empty()) {
-        return {ReadingKind::NoDigits, 0};
+        return {ReadingKind::NoValue, 0};
     }
     std::vector<const NamedDetection*> ordered;
     ordered.reserve(digits_in_zone.size());
@@ -94,7 +94,7 @@ std::vector<ZoneReading> group_into_zones(const std::vector<NamedDetection>& kep
             }
         }
         const ZoneAssembly a = assemble_zone_value(in_zone);
-        // Emit for EVERY zoned area, including NoDigits: the aggregator needs the
+        // Emit for EVERY zoned area, including NoValue: the aggregator needs the
         // liveness signal, or the 10s expiry erases a held zone (spec §5.3).
         ZoneReading r;
         r.zone_no = *area.zone;

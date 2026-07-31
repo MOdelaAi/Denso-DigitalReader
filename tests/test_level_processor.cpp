@@ -33,11 +33,12 @@ using denso::level::LevelCalibration;
 using denso::level::LevelRuntimeEntry;
 using denso::level::LevelState;
 using denso::ui::BallLevelProcessor;
+using denso::ui::LevelZoneDraw;
+using denso::ui::ZoneDisplayState;
+using denso::ui::level_zone_text;
 using denso::ui::Detection;
 using denso::ui::draw_level_overlay;
 using denso::ui::InferenceEngine;
-using denso::ui::level_state_text;
-using denso::ui::level_value_text;
 using denso::ui::LevelStateProcessor;
 
 namespace {
@@ -109,6 +110,35 @@ private:
     int calls_ = 0;
 };
 
+/// One calibration as the single-zone set the multi-zone processor takes. These
+/// cases are about the measurement CORE and its interruption rules, not about
+/// zone fan-out, so they state one zone once here.
+std::vector<denso::level::LevelZone> one_zone(const denso::level::LevelCalibration& c,
+                                              int zone_no = 1) {
+    return {denso::level::LevelZone{zone_no, c}};
+}
+
+/// The camera picture with zone 1's percentage folded in — the single-zone shape
+/// these cases were written against, expressed over the multi-zone API.
+///
+/// Healthy is DOWNGRADED to Acquiring when the camera is measuring but this zone
+/// selected no ball: at camera level "measuring" is true, and it is the ZONE that
+/// has no value. Collapsing that into the camera state is exactly what the
+/// multi-zone design stopped doing, so the shim states it rather than hiding it.
+denso::level::LevelRuntimeEntry snap1(const BallLevelProcessor& p) {
+    denso::level::LevelRuntimeEntry e = p.camera_snapshot();
+    e.percent.reset();
+    if (e.state == denso::level::LevelState::Healthy) {
+        const auto zones = p.snapshot();
+        if (!zones.empty() && zones.front().percent) {
+            e.percent = zones.front().percent;
+        } else {
+            e.state = denso::level::LevelState::Acquiring;
+        }
+    }
+    return e;
+}
+
 QImage grey_frame() {
     QImage img(kW, kH, QImage::Format_RGB888);
     img.fill(QColor(40, 40, 40));
@@ -122,10 +152,10 @@ bool pump_until(BallLevelProcessor& p, Pred pred, int max_frames = 200) {
     const QImage frame = grey_frame();
     for (int i = 0; i < max_frames; ++i) {
         p.process(frame);
-        if (pred(p.snapshot())) return true;
+        if (pred(snap1(p))) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    return pred(p.snapshot());
+    return pred(snap1(p));
 }
 
 /// Holds the worker inside infer() until released, so a test can raise an
@@ -208,56 +238,90 @@ TEST_CASE("only a Healthy level entry can carry a percentage", "[level][runtime]
 // ── Overlay text ────────────────────────────────────────────────────────────
 
 TEST_CASE("level overlay renders the required captions", "[level][overlay]") {
-    SECTION("Healthy shows the number and no state line") {
-        const auto e = LevelRuntimeEntry::healthy(1, 67.4, 0);
-        CHECK(level_value_text(e) == "LEVEL 67.4%");
-        CHECK(level_state_text(e).empty());
+    // The caption is now per ZONE and speaks the SHARED zone state vocabulary
+    // (ui::ZoneDisplayState), because Ball zones render through the same
+    // annotation boundary the digit zone panel uses.
+    const auto row = [](ZoneDisplayState st, std::optional<double> pct) {
+        LevelZoneDraw z;
+        z.zone_no = 1;
+        z.calib = calib();
+        z.state = st;
+        z.percent = pct;
+        return z;
+    };
+    SECTION("Healthy shows the number, at one decimal") {
+        // One decimal on the FRAME; the backend receives the quantized integer.
+        // The two differ by design (amendment §10.3).
+        CHECK(level_zone_text(row(ZoneDisplayState::Healthy, 67.4)) ==
+              "ZONE 1   LEVEL 67.4%");
     }
-    SECTION("Acquiring shows no fabricated percentage") {
-        const auto e = LevelRuntimeEntry::acquiring(1, 0);
-        CHECK(level_value_text(e) == "LEVEL --");
-        CHECK(level_state_text(e) == "STATE ACQUIRING");
+    SECTION("no state but Healthy can show a number") {
+        // The percentage is absent for every other state BY CONSTRUCTION - the
+        // producer only engages it for Healthy - so these render their state
+        // word rather than a fabricated reading.
+        CHECK(level_zone_text(row(ZoneDisplayState::Acquiring, std::nullopt)) ==
+              "ZONE 1   ACQUIRING");
+        CHECK(level_zone_text(row(ZoneDisplayState::Inhibited, std::nullopt)) ==
+              "ZONE 1   UNAVAILABLE");
+        CHECK(level_zone_text(row(ZoneDisplayState::Paused, std::nullopt)) ==
+              "ZONE 1   PAUSED");
+        CHECK(level_zone_text(row(ZoneDisplayState::Conflict, std::nullopt)) ==
+              "ZONE 1   CONFLICT");
     }
-    SECTION("Unavailable") {
-        const auto e = LevelRuntimeEntry::unavailable(1, "camera_offline", 0);
-        CHECK(level_value_text(e) == "LEVEL --");
-        CHECK(level_state_text(e) == "STATE UNAVAILABLE");
-    }
-    SECTION("CalibrationInvalid") {
-        const auto e = LevelRuntimeEntry::calibration_invalid(1, 0);
-        CHECK(level_value_text(e) == "LEVEL --");
-        CHECK(level_state_text(e) == "STATE CALIBRATION INVALID");
-    }
-    SECTION("Unconfigured") {
-        const auto e = LevelRuntimeEntry::unconfigured(1, 0);
-        CHECK(level_value_text(e) == "LEVEL --");
-        CHECK(level_state_text(e) == "STATE UNCONFIGURED");
+    SECTION("the zone number is part of the caption") {
+        LevelZoneDraw z = row(ZoneDisplayState::Healthy, 12.0);
+        z.zone_no = 4;
+        CHECK(level_zone_text(z) == "ZONE 4   LEVEL 12.0%");
     }
 }
 
-TEST_CASE("level overlay draws geometry only when there is a calibration",
-          "[level][overlay]") {
-    const auto entry = LevelRuntimeEntry::healthy(1, 50.0, 0);
+TEST_CASE("level overlay draws every configured zone", "[level][overlay]") {
+    LevelZoneDraw z1;
+    z1.zone_no = 1;
+    z1.calib = calib();
+    z1.state = ZoneDisplayState::Healthy;
+    z1.percent = 50.0;
     BallBox b;
     b.x1 = 0.4; b.y1 = 0.4; b.x2 = 0.6; b.y2 = 0.6; b.conf = 0.9;
+    z1.ball = b;
 
-    cv::Mat with_geometry = black();
-    draw_level_overlay(with_geometry, calib(), entry, b);
+    cv::Mat one = black();
+    draw_level_overlay(one, {z1});
 
-    cv::Mat text_only = black();
-    draw_level_overlay(text_only, std::nullopt, LevelRuntimeEntry::unconfigured(1, 0),
-                       std::nullopt);
+    // A SECOND zone, elsewhere on the frame, must add its own geometry rather
+    // than replace the first - one zone's annotation never erases a sibling's.
+    LevelZoneDraw z2 = z1;
+    z2.zone_no = 2;
+    z2.calib.rect_x = 0.05;
+    z2.calib.rect_w = 0.2;
+    z2.ball.reset();
+    z2.percent.reset();
+    z2.state = ZoneDisplayState::Acquiring;
 
-    // Both drew SOMETHING (the readout panel at minimum)...
-    CHECK(nonzero_pixels(with_geometry) > 0);
-    CHECK(nonzero_pixels(text_only) > 0);
-    // ...but the calibrated frame carries the rectangle, both reference lines,
-    // the ball box and the centre marker on top of it.
-    CHECK(nonzero_pixels(with_geometry) > nonzero_pixels(text_only));
+    cv::Mat two = black();
+    draw_level_overlay(two, {z1, z2});
+
+    CHECK(nonzero_pixels(one) > 0);
+    CHECK(nonzero_pixels(two) > nonzero_pixels(one));
+
+    SECTION("a zone that is not measuring is still outlined") {
+        // Its rectangle and reference lines remain, so the operator can see
+        // WHERE a zone reporting nothing was configured.
+        cv::Mat silent = black();
+        draw_level_overlay(silent, {z2});
+        CHECK(nonzero_pixels(silent) > 0);
+    }
+
+    SECTION("an empty zone set leaves the frame byte-identical") {
+        cv::Mat untouched = black();
+        const int before = nonzero_pixels(untouched);
+        draw_level_overlay(untouched, {});
+        CHECK(nonzero_pixels(untouched) == before);
+    }
 
     SECTION("an empty Mat is a no-op rather than a crash") {
         cv::Mat empty;
-        draw_level_overlay(empty, calib(), entry, b);
+        draw_level_overlay(empty, {z1});
         CHECK(empty.empty());
     }
 }
@@ -270,12 +334,12 @@ TEST_CASE("a ball inside the rectangle produces a level from its bbox CENTRE",
     // 100% line (0.2) and the 0% line (0.8). Using the bbox TOP would give
     // 66.7%, so this single number distinguishes the two.
     StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 7);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 7);
 
     REQUIRE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Healthy;
     }));
-    const LevelRuntimeEntry e = p.snapshot();
+    const LevelRuntimeEntry e = snap1(p);
     REQUIRE(e.percent.has_value());
     CHECK_THAT(*e.percent, Catch::Matchers::WithinAbs(50.0, 0.001));
     CHECK(e.camera_id == 7);
@@ -285,39 +349,39 @@ TEST_CASE("a detection outside the measurement rectangle is ignored",
           "[level][processor]") {
     // Centre at x = 0.85, outside the rectangle's x band [0.3, 0.7).
     StubEngine engine({det(0.8, 0.4, 0.9, 0.6, 0.99f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     // Let the worker actually run — otherwise "still Acquiring" would prove
     // nothing but that inference had not happened yet.
     REQUIRE(pump_until(p, [&engine](const LevelRuntimeEntry&) {
         return engine.calls() >= 3;
     }));
-    CHECK(p.snapshot().state == LevelState::Acquiring);
-    CHECK_FALSE(p.snapshot().percent.has_value());
+    CHECK(snap1(p).state == LevelState::Acquiring);
+    CHECK_FALSE(snap1(p).percent.has_value());
 }
 
 TEST_CASE("the calibration's confidence threshold is enforced",
           "[level][processor]") {
     // Perfectly placed, but below the calibration's 0.5 floor.
     StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.20f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     REQUIRE(pump_until(p, [&engine](const LevelRuntimeEntry&) {
         return engine.calls() >= 3;
     }));
-    CHECK(p.snapshot().state == LevelState::Acquiring);
-    CHECK_FALSE(p.snapshot().percent.has_value());
+    CHECK(snap1(p).state == LevelState::Acquiring);
+    CHECK_FALSE(snap1(p).percent.has_value());
 }
 
 TEST_CASE("a detection of another class is discarded", "[level][processor]") {
     // Well-placed and confident, but class 3 while the binding names class 0.
     StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.99f, /*class_id*/ 3)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, /*class_id*/ 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, /*class_id*/ 0, one_zone(calib()), 1);
 
     REQUIRE(pump_until(p, [&engine](const LevelRuntimeEntry&) {
         return engine.calls() >= 3;
     }));
-    CHECK(p.snapshot().state == LevelState::Acquiring);
+    CHECK(snap1(p).state == LevelState::Acquiring);
 }
 
 TEST_CASE("the highest-confidence valid ball wins", "[level][processor]") {
@@ -325,27 +389,27 @@ TEST_CASE("the highest-confidence valid ball wins", "[level][processor]") {
     // line, the higher-confidence one halfway. Picking by confidence gives 50%.
     StubEngine engine({det(0.4, 0.15, 0.6, 0.25, 0.60f),
                        det(0.4, 0.40, 0.6, 0.60, 0.95f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     REQUIRE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Healthy;
     }));
-    CHECK_THAT(*p.snapshot().percent, Catch::Matchers::WithinAbs(50.0, 0.001));
+    CHECK_THAT(*snap1(p).percent, Catch::Matchers::WithinAbs(50.0, 0.001));
 }
 
 TEST_CASE("an unavailable camera clears the live value", "[level][processor]") {
     StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     REQUIRE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Healthy;
     }));
-    REQUIRE(p.snapshot().percent.has_value());
+    REQUIRE(snap1(p).percent.has_value());
 
     // The camera drops. The measurement is still fresh in the processor, which
     // is precisely the situation in which a stale number could leak out.
     p.set_unavailable(std::string(denso::level::kReasonCameraOffline));
-    const LevelRuntimeEntry off = p.snapshot();
+    const LevelRuntimeEntry off = snap1(p);
     CHECK(off.state == LevelState::Unavailable);
     CHECK(off.reason == "camera_offline");
     CHECK_FALSE(off.percent.has_value());
@@ -369,13 +433,13 @@ TEST_CASE("an unavailable camera clears the live value", "[level][processor]") {
 TEST_CASE("a camera flap cannot resurrect a dead model's last reading",
           "[level][processor]") {
     StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     // 1. A genuine live reading.
     REQUIRE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Healthy;
     }));
-    REQUIRE(p.snapshot().percent.has_value());
+    REQUIRE(snap1(p).percent.has_value());
 
     // 2. Inference dies and stays dead, WELL past the escalation threshold — the
     //    `==` test that used to guard it fires only on the exact 10th failure.
@@ -388,12 +452,12 @@ TEST_CASE("a camera flap cannot resurrect a dead model's last reading",
     // 3. The camera flaps: offline, then back. This is an ordinary event on this
     //    appliance — the whole reconnect loop in CameraStream exists for it.
     p.set_unavailable(std::string(denso::level::kReasonCameraOffline));
-    CHECK(p.snapshot().reason == "camera_offline");
+    CHECK(snap1(p).reason == "camera_offline");
     p.set_unavailable(std::nullopt);   // Connecting/Live clears the CAMERA cause
 
     // 4. The model is still dead, so the camera cause clearing must NOT hand the
     //    picture back. It must certainly never carry the old percentage.
-    const LevelRuntimeEntry after = p.snapshot();
+    const LevelRuntimeEntry after = snap1(p);
     CHECK(after.state == LevelState::Unavailable);
     CHECK(after.reason == denso::level::kReasonInferenceError);
     CHECK_FALSE(after.percent.has_value());
@@ -410,7 +474,7 @@ TEST_CASE("a camera flap cannot resurrect a dead model's last reading",
     REQUIRE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Healthy;
     }, 400));
-    CHECK(p.snapshot().percent.has_value());
+    CHECK(snap1(p).percent.has_value());
 }
 
 TEST_CASE("an inference recovery does not clear a camera-offline cause",
@@ -419,7 +483,7 @@ TEST_CASE("an inference recovery does not clear a camera-offline cause",
     // fix cannot have been a one-directional patch.
     StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
     engine.set_throwing(true);
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     REQUIRE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Unavailable &&
@@ -434,7 +498,7 @@ TEST_CASE("an inference recovery does not clear a camera-offline cause",
     REQUIRE_FALSE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Healthy;
     }, 60));
-    const LevelRuntimeEntry e = p.snapshot();
+    const LevelRuntimeEntry e = snap1(p);
     CHECK(e.state == LevelState::Unavailable);
     CHECK(e.reason == "camera_offline");
     CHECK_FALSE(e.percent.has_value());
@@ -447,7 +511,7 @@ TEST_CASE("a measurement does not survive an availability interruption",
     // a cause ENGAGES, so the first picture after a recovery is Acquiring: what
     // the operator sees always comes from a frame taken after the interruption.
     StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     REQUIRE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Healthy;
@@ -457,7 +521,7 @@ TEST_CASE("a measurement does not survive an availability interruption",
     p.set_unavailable(std::nullopt);
 
     // Read the state WITHOUT pumping a frame: no new measurement can have landed.
-    const LevelRuntimeEntry e = p.snapshot();
+    const LevelRuntimeEntry e = snap1(p);
     CHECK(e.state == LevelState::Acquiring);
     CHECK_FALSE(e.percent.has_value());
 }
@@ -475,7 +539,7 @@ TEST_CASE("a result computed before an interruption is never published",
     // worker can possibly publish is the stale one — no legitimate later
     // measurement can be mistaken for it.
     BlockingEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     // ONE frame, and the worker is genuinely inside infer() before we go on.
     p.process(grey_frame());
@@ -492,7 +556,7 @@ TEST_CASE("a result computed before an interruption is never published",
     engine.wait_until_returned(1);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    const LevelRuntimeEntry after = p.snapshot();
+    const LevelRuntimeEntry after = snap1(p);
     CHECK(after.state == LevelState::Acquiring);
     CHECK_FALSE(after.percent.has_value());
     CHECK(engine.entered() == 1);   // no second frame could have produced this
@@ -506,7 +570,7 @@ TEST_CASE("a frame QUEUED before an interruption is never published",
     // pre-interruption picture as a post-recovery measurement. The stamp
     // therefore travels WITH the frame, applied at submission.
     BlockingEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     // Frame 1 goes in and the worker blocks inside infer() on it.
     p.process(grey_frame());
@@ -527,7 +591,7 @@ TEST_CASE("a frame QUEUED before an interruption is never published",
     engine.wait_until_returned(2);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    const LevelRuntimeEntry after = p.snapshot();
+    const LevelRuntimeEntry after = snap1(p);
     CHECK(after.state == LevelState::Acquiring);
     CHECK_FALSE(after.percent.has_value());
     CHECK(engine.entered() == 2);
@@ -535,7 +599,7 @@ TEST_CASE("a frame QUEUED before an interruption is never published",
 
 TEST_CASE("the overlay lands on the FINAL displayed image", "[level][processor]") {
     StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
-    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
 
     REQUIRE(pump_until(p, [](const LevelRuntimeEntry& e) {
         return e.state == LevelState::Healthy;
@@ -566,7 +630,7 @@ TEST_CASE("a throwing engine does not kill the worker and escalates once",
     std::atomic<int> cleared{0};
     {
         BallLevelProcessor p(
-            0, 0.0, 0.0, &engine, 0, calib(), 5,
+            0, 0.0, 0.0, &engine, 0, one_zone(calib()), 5, /*zone_sink=*/nullptr,
             [&raised, &cleared](int64_t, bool failed) {
                 if (failed) ++raised; else ++cleared;
             });
@@ -582,7 +646,7 @@ TEST_CASE("a throwing engine does not kill the worker and escalates once",
         // measurement yet". That gap is what let a camera-status change wipe the
         // failure, so the state is now raised in the processor, under its own
         // mutex, by the worker that observed it.
-        const LevelRuntimeEntry escalated = p.snapshot();
+        const LevelRuntimeEntry escalated = snap1(p);
         CHECK(escalated.state == LevelState::Unavailable);
         CHECK(escalated.reason == denso::level::kReasonInferenceError);
         CHECK_FALSE(escalated.percent.has_value());
@@ -613,7 +677,7 @@ TEST_CASE("construction is counted only for a MEASURING processor",
 
     {
         StubEngine engine({});
-        BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), 1);
+        BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), 1);
     }
     CHECK(BallLevelProcessor::constructed_count() == before + 1);
 }
@@ -623,7 +687,7 @@ TEST_CASE("repeated construction and teardown joins cleanly", "[level][processor
     // detached worker touching freed members, so exercise it in a loop.
     for (int i = 0; i < 8; ++i) {
         StubEngine engine({det(0.4, 0.4, 0.6, 0.6, 0.9f)});
-        BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, calib(), i);
+        BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, one_zone(calib()), i);
         p.process(grey_frame());
     }
     SUCCEED();

@@ -22,7 +22,10 @@
 namespace denso::ui {
 
 namespace {
-constexpr int kMaxZone = 12;
+// The zone-number namespace is machine-wide and shared with the Ball Leveler,
+// so its bound lives in core (camera::kMaxZone) rather than being redeclared per
+// page. Aliased rather than replaced inline to keep the picker code unchanged.
+constexpr int kMaxZone = camera::kMaxZone;
 constexpr int kSidePanelWidth = 280;
 
 /// The list row for an area: the zone belongs here, not two clicks away in the

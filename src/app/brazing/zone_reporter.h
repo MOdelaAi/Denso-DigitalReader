@@ -35,10 +35,19 @@ public:
     /// steady_clock is read directly; injected by tests so the 30 s hold timeout
     /// is driven deterministically instead of slept through. Same seam idiom as
     /// ZoneAggregator::observe(zones, now_ms) and LogEpisode.
+    ///
+    /// `stable_frames` and `hold_timeout_ms` are forwarded verbatim to the ONE
+    /// aggregator this reporter owns. They are the two knobs the Ball Leveler
+    /// turns (1 and 0 respectively — amendment §10.4) so that a continuous,
+    /// quantized measurement publishes at all and never keeps an old percentage
+    /// alive. Everything else about aggregation, delivery, retry and payload is
+    /// identical between the modes, which is why there is one reporter and not
+    /// two.
     explicit ZoneReporter(
         std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot,
         int stable_frames = kStableFrames,
-        std::function<int64_t()> clock = {});
+        std::function<int64_t()> clock = {},
+        int64_t hold_timeout_ms = kHoldTimeoutMs);
 
     void on_zones(int64_t camera_id, const std::vector<ZoneReading>& zones) override;
 

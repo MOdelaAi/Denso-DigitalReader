@@ -73,6 +73,23 @@ struct Point {
     float y = 0.0f;
 };
 
+/// The highest reporting-zone number the machine supports, and therefore the
+/// size of the whole zone-number namespace.
+///
+/// It lives HERE, in core, rather than in the digit Areas page where it began,
+/// because it is not a digit-reader fact: zone numbers are unique machine-wide
+/// across every camera AND both operating modes (the brazing payload keys by
+/// zone number alone and carries no camera identity). The Ball Leveler allocates
+/// out of this same namespace, so a second copy of this bound in the Ball path
+/// would be a second zone-numbering authority — the one thing the multi-zone
+/// amendment forbids.
+///
+/// Note what this is NOT: it is not a per-camera cap. A digit camera has no
+/// limit on how many zones it owns; a Ball camera is capped at
+/// level::kMaxBallZones, which is a Ball rule enforced in the Ball write
+/// chokepoint, not here.
+inline constexpr int kMaxZone = 12;
+
 /// One ROI area belonging to a camera. A camera can have many areas. The area
 /// is a closed polygon of 3+ vertices (triangle, rectangle, …); the closing
 /// edge from the last vertex back to the first is implicit, never stored.
@@ -80,7 +97,7 @@ struct CameraArea {
     int64_t id = 0;
     int64_t camera_id = 0;  // FK → camera.id
     std::string name;
-    std::optional<int> zone;  // 1..12 reporting zone, or nullopt (ROI-only)
+    std::optional<int> zone;  // 1..kMaxZone reporting zone, or nullopt (ROI-only)
     std::vector<Point> points;
 };
 

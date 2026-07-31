@@ -82,7 +82,7 @@ public slots:
     /// Persist the camera's complete Ball Leveler configuration — the model
     /// binding chosen at step 3 AND this geometry — through the ONE Ball write
     /// chokepoint, then finish setup.
-    void save_level_calibration(const denso::level::LevelCalibration& calibration);
+    void save_level_calibration(const std::vector<denso::level::LevelZone>& zones);
     void level_back();             // Level Back → Models step
 
 private:

@@ -22,6 +22,11 @@ QString read_source(const char* rel) {
 // MUTATION: "construct ZoneReporter only when the backend is configured" must
 // die. The reporter is the local aggregation owner; gating it on brazing config
 // is exactly the defect this slice exists to remove.
+//
+// The construction now lives in build_zone_reporting(), which BOTH modes call —
+// so this guard also pins that there is exactly ONE reporter construction site
+// for the digit reader and the Ball Leveler (amendment §10.6). The aggregator
+// parameters differ per mode; the pipeline does not.
 TEST_CASE("CameraGrid constructs the zone reporter unconditionally",
           "[zone_runtime][wiring]") {
     const QString src = read_source("/src/app/ui/camera/grid/camera_grid.cpp");
@@ -29,7 +34,7 @@ TEST_CASE("CameraGrid constructs the zone reporter unconditionally",
     // The reporter is built from a possibly-empty callback, OUTSIDE the config
     // branch. The moved-from optional callback is the signature of that shape.
     CHECK(src.contains(QStringLiteral(
-        "reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot))")));
+        "reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot)")));
 
     // The delivery SENDER is still gated — aggregation must be unconditional,
     // but a POST with no configured URL would be a regression.
@@ -42,7 +47,7 @@ TEST_CASE("CameraGrid constructs the zone reporter unconditionally",
     const int sender_at = src.indexOf(
         QStringLiteral("brazing_reporter_ = std::make_unique<BrazingReporter>"));
     const int reporter_at = src.indexOf(QStringLiteral(
-        "reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot))"));
+        "reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot)"));
     REQUIRE(sender_at > 0);
     REQUIRE(reporter_at > 0);
     CHECK(reporter_at > sender_at);  // built after the branch closes, not within it

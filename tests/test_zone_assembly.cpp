@@ -31,7 +31,7 @@ TEST_CASE("assemble_zone_value collapses leading zeros", "[zone_assembly]") {
 }
 
 TEST_CASE("assemble_zone_value on empty or non-digit is not Complete", "[zone_assembly]") {
-    CHECK(assemble_zone_value({}).kind == ReadingKind::NoDigits);
+    CHECK(assemble_zone_value({}).kind == ReadingKind::NoValue);
     const auto r = assemble_zone_value({digit(10, "x")});
     CHECK(r.kind == ReadingKind::Incomplete);
     CHECK(r.value == 0);  // an unparseable label must never carry a usable value
@@ -166,8 +166,8 @@ TEST_CASE("assemble: a non-positive median box height does not false-flag a gap"
     REQUIRE(r.value == 12);
 }
 
-TEST_CASE("assemble: no detections is NoDigits", "[zone_assembly]") {
-    REQUIRE(assemble_zone_value({}).kind == ReadingKind::NoDigits);
+TEST_CASE("assemble: no detections is NoValue", "[zone_assembly]") {
+    REQUIRE(assemble_zone_value({}).kind == ReadingKind::NoValue);
 }
 
 TEST_CASE("assemble: an incomplete reading carries NO usable value", "[zone_assembly]") {
@@ -216,7 +216,7 @@ TEST_CASE("assemble: more than three digits is Incomplete, not a bogus value",
     REQUIRE(r.value == 0);
 }
 
-TEST_CASE("group_into_zones emits NoDigits for a zoned area with no detections",
+TEST_CASE("group_into_zones emits NoValue for a zoned area with no detections",
           "[zone_assembly]") {
     CameraArea a;
     a.zone = 7;
@@ -224,7 +224,7 @@ TEST_CASE("group_into_zones emits NoDigits for a zoned area with no detections",
     const auto out = group_into_zones({}, {a}, 640.0f, 480.0f);
     REQUIRE(out.size() == 1);
     REQUIRE(out[0].zone_no == 7);
-    REQUIRE(out[0].kind == ReadingKind::NoDigits);
+    REQUIRE(out[0].kind == ReadingKind::NoValue);
     REQUIRE(out[0].value == 0);
     REQUIRE(out[0].conf == 0.0f);
 }

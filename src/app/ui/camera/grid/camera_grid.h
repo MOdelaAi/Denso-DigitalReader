@@ -129,13 +129,26 @@ private:
     // as a parameter removes a second full hash per camera from the boot path.
     void start_one(const camera::Camera& cam, CameraTile* tile,
                    const detection::CameraDetection& det);
+    /// Build the machine-wide zone-reporting subsystem — ZoneHealth, the
+    /// optional BrazingReporter, the ONE ZoneReporter and the overlay poll timer.
+    ///
+    /// Shared by BOTH reload paths so they cannot drift into building different
+    /// pipelines for the same job. The only mode difference is the two aggregator
+    /// parameters passed here: the digit reader takes (kStableFrames,
+    /// kHoldTimeoutMs), the Ball Leveler takes (1, 0) — see amendment §10.4.
+    void build_zone_reporting(int stable_frames, int64_t hold_timeout_ms);
     /// The ball_leveler build path, branched at the SUBSYSTEM level rather than
-    /// inside start_one(). reload() builds ZoneHealth and the zone/brazing
-    /// reporters before any per-camera work, and start_one() reads camera_area
-    /// and wires zone plumbing; branching only at processor construction would
-    /// make Ball Leveler inherit digit quarantine and zone-reporting semantics it
-    /// has no use for. This path builds NO ZoneHealth, NO ZoneReporter, NO
-    /// BrazingReporter, reads NO camera_area and constructs NO DetectionProcessor.
+    /// inside start_one(), because the two modes read DIFFERENT configuration
+    /// (ball_level_binding + ball_level_zone vs camera_model + camera_area) and
+    /// build different processors. Branching only at processor construction would
+    /// make Ball Leveler inherit the digit ROI-quarantine semantics it has no use
+    /// for.
+    ///
+    /// What it does NOT branch on any more (amendment §10.6): the zone-reporting
+    /// subsystem. This path calls the SAME build_zone_reporting() the digit path
+    /// calls, so Ball zones travel the same ZoneHealth, ZoneReporter,
+    /// BrazingReporter, retry policy and payload. It reads NO camera_area and
+    /// constructs NO DetectionProcessor.
     void reload_ball();
     /// One ball_leveler camera: resolve its stored configuration, decide its
     /// state, and build the matching processor. A failure here is confined to
