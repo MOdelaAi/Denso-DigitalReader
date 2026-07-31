@@ -27,8 +27,61 @@ QString next_connection_name() {
     return QStringLiteral("denso_%1").arg(counter.fetch_add(1));
 }
 
+/// Does `table` exist in this database?
+///
+/// `nullopt` means the PROBE ITSELF failed, which is not the same as "absent"
+/// and must not be silently read as one — the same distinction every cursor site
+/// in this codebase draws between end-of-rows and a fetch error.
+std::optional<bool> table_exists(const QSqlDatabase& db, const QString& table) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"));
+    q.addBindValue(table);
+    if (!q.exec()) {
+        qWarning().noquote() << "schema probe: table_exists(" << table
+                             << ") failed:" << q.lastError().text();
+        return std::nullopt;
+    }
+    const bool found = q.next();
+    if (q.lastError().isValid()) return std::nullopt;
+    return found;
+}
+
+/// Does `table` exist AND carry `column`?
+///
+/// PRAGMA table_info returns an empty result set for a missing table rather than
+/// an error, so this answers both questions in one probe.
+std::optional<bool> column_exists(const QSqlDatabase& db, const QString& table,
+                                  const QString& column) {
+    QSqlQuery q(db);
+    // PRAGMA cannot be parameterized. Both call sites pass a literal table name
+    // owned by this file, never anything operator-supplied.
+    if (!q.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table))) {
+        qWarning().noquote() << "schema probe: column_exists(" << table << "."
+                             << column << ") failed:" << q.lastError().text();
+        return std::nullopt;
+    }
+    bool found = false;
+    while (q.next()) {
+        if (q.value(1).toString() == column) { found = true; break; }
+    }
+    if (q.lastError().isValid()) return std::nullopt;
+    return found;
+}
+
 /// v14 -> v15 backfill: every stored single-tank Ball calibration becomes a
 /// camera-level binding plus ONE zone row.
+///
+/// EVERY input this reads is PROBED before it is queried, and none is inferred
+/// from the entry `user_version`. The `version < N` blocks are conditional, so a
+/// database entering at v11 never executes v4/v7/v10 — the migration that
+/// creates `camera_area.zone`. Reading the version and concluding "v11 >= v10,
+/// therefore the column is there" is an assumption about a step that did not run
+/// in this process; the schema itself is the only authority on whether a
+/// migration completed. Absence is then answered semantically, not defensively:
+/// a database with no `camera_area.zone` has no digit zone claims, and one with
+/// no `ball_level_calibration` has nothing to migrate. Both are correct answers,
+/// not fallbacks.
 ///
 /// The zone number cannot simply be 1 for everyone. Zone numbers are unique
 /// MACHINE-WIDE — across cameras and across BOTH modes — because the brazing
@@ -44,9 +97,27 @@ QString next_connection_name() {
 /// free a number and reconfigure. Failing the migration instead would refuse to
 /// boot the appliance over a configuration problem.
 bool migrate_ball_calibration_to_zones(const QSqlDatabase& db) {
-    // Every zone number already spoken for by the digit reader.
+    // The SOURCE of this backfill. v14 creates it, but v14's block is skipped on
+    // a database entering at v14 or later, so its presence is probed rather than
+    // assumed. Nothing to migrate is a successful migration.
+    const auto have_legacy = table_exists(db, QStringLiteral("ball_level_calibration"));
+    if (!have_legacy.has_value()) return false;
+    if (!*have_legacy) return true;
+
+    // Every zone number already spoken for, by EITHER mode. This mirrors
+    // camera::zones_owned_by_other_cameras, which is the runtime authority over
+    // the same machine-wide namespace: a number claimed by a digit ROI and one
+    // claimed by a Ball zone are equally unavailable, because the brazing payload
+    // keys by zone number alone.
     std::set<int> taken;
-    {
+
+    // Digit claims. `camera_area.zone` arrives in v10 over a table created in
+    // v4 and rebuilt in v7 — none of which runs on a database entering above
+    // them. No column means no digit zone has ever been claimed.
+    const auto have_area_zone =
+        column_exists(db, QStringLiteral("camera_area"), QStringLiteral("zone"));
+    if (!have_area_zone.has_value()) return false;
+    if (*have_area_zone) {
         QSqlQuery q(db);
         if (!q.exec(QStringLiteral("SELECT zone FROM camera_area "
                                    "WHERE zone IS NOT NULL AND zone != 0"))) {
@@ -55,6 +126,26 @@ bool migrate_ball_calibration_to_zones(const QSqlDatabase& db) {
             return false;
         }
         while (q.next()) taken.insert(q.value(0).toInt());
+        if (q.lastError().isValid()) return false;
+    }
+
+    // Ball claims already on disk. `ball_level_zone` was created unconditionally
+    // a few statements above, so it always exists here; it is non-empty only if a
+    // previous run of this backfill was interrupted after inserting but before
+    // `user_version` was stamped. Reading it is what makes a re-run land on the
+    // same numbers instead of handing an already-migrated camera a second zone.
+    std::set<qlonglong> already_migrated;
+    {
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral("SELECT camera_id, zone_no FROM ball_level_zone"))) {
+            qWarning().noquote() << "v15: read existing ball zones failed:"
+                                 << q.lastError().text();
+            return false;
+        }
+        while (q.next()) {
+            already_migrated.insert(q.value(0).toLongLong());
+            taken.insert(q.value(1).toInt());
+        }
         if (q.lastError().isValid()) return false;
     }
 
@@ -107,6 +198,12 @@ bool migrate_ball_calibration_to_zones(const QSqlDatabase& db) {
     }
 
     for (const Legacy& r : rows) {
+        // Already carries a zone from an interrupted earlier run. Re-deriving a
+        // number for it would not be a no-op: INSERT OR IGNORE only ignores a
+        // collision on (camera_id, zone_no), so a DIFFERENT number would insert a
+        // second zone and hand this camera two tanks it never had.
+        if (already_migrated.count(r.camera_id)) continue;
+
         int zone_no = 0;
         for (int z = 1; z <= denso::camera::kMaxZone; ++z) {
             if (!taken.count(z)) { zone_no = z; break; }

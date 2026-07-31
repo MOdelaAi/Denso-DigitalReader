@@ -593,6 +593,20 @@ void CameraGrid::start_one_ball(const camera::Camera& cam, CameraTile* tile) {
         show_state(level::LevelState::CalibrationInvalid);
         return;
     }
+    // A camera owns 1..kMaxBallZones zones. try_level_config_for already reports
+    // the empty set as Unconfigured, so what is left to catch here is a set that
+    // is too LARGE. The cap is a property of the SET, not of a row, so no CHECK
+    // constraint can hold it and the write chokepoint's count test is the only
+    // other place it exists — which means a restored backup or a hand-edited
+    // database meets this check first and nowhere else.
+    if (cfg.zones.size() > static_cast<size_t>(level::kMaxBallZones)) {
+        qCritical().noquote()
+            << "[level] camera" << cam.id << "- stored configuration has"
+            << cfg.zones.size() << "zones, more than the" << level::kMaxBallZones
+            << "permitted; camera not measuring";
+        show_state(level::LevelState::CalibrationInvalid);
+        return;
+    }
     // EVERY zone must validate. A camera with one broken zone does not measure
     // its other three: the operator must see and fix the fault, and quietly
     // running the healthy zones would hide it behind a working display.
@@ -626,6 +640,21 @@ void CameraGrid::start_one_ball(const camera::Camera& cam, CameraTile* tile) {
                 << "compatibility policy ("
                 << QString::fromStdString(verdict.reason_code)
                 << "); camera not measuring";
+            break;   // filename stays empty -> Unavailable below
+        }
+        // The bound CLASS must exist in the resolved metadata. The authority is
+        // md.class_names — the canonical list resolved from the manifest/sidecar
+        // for the ACTIVE backend — which is the same authority
+        // save_level_configuration uses, so a binding that could not be SAVED
+        // cannot be LOADED. Selecting a class the model cannot emit would not
+        // fail loudly: the processor would find no ball in every frame and
+        // report the tank as permanently incomplete rather than misconfigured.
+        if (cfg.class_id < 0 ||
+            static_cast<size_t>(cfg.class_id) >= md.class_names.size()) {
+            qCritical().noquote()
+                << "[level] camera" << cam.id << "- bound class" << cfg.class_id
+                << "does not exist in" << QString::fromStdString(md.filename)
+                << "; camera not measuring";
             break;   // filename stays empty -> Unavailable below
         }
         filename = md.filename;

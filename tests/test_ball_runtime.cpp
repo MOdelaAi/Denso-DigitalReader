@@ -495,13 +495,19 @@ TEST_CASE("a ball camera bound to a wrong-mode model builds no measuring "
     // Repoint the binding at digitv3 DIRECTLY, bypassing the write chokepoint —
     // the restored-backup / hand-edited-database path. The chokepoint would have
     // refused this, which is exactly why read-time enforcement must catch it.
+    //
+    // The edit targets `ball_level_binding`, the v15 table the runtime actually
+    // reads. `ball_level_calibration` is the retained LEGACY v14 row: writing
+    // there changes nothing the grid consults, so a test that edited it would
+    // pass while enforcing nothing.
     {
         QSqlQuery q(f.h());
         q.prepare(QStringLiteral(
-            "UPDATE ball_level_calibration SET model_id = ? WHERE camera_id = ?"));
+            "UPDATE ball_level_binding SET model_id = ? WHERE camera_id = ?"));
         q.addBindValue(static_cast<qlonglong>(digit));
         q.addBindValue(static_cast<qlonglong>(cam));
         REQUIRE(q.exec());
+        REQUIRE(q.numRowsAffected() == 1);   // the edit must actually land
     }
     REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
 
@@ -516,6 +522,152 @@ TEST_CASE("a ball camera bound to a wrong-mode model builds no measuring "
     // digitv3 was never requested, even though the registry would have built it.
     CHECK(count_built(log, "digitv3") == 0);
 
+    grid.teardown();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Validation ORDERING: every stored fact is checked before anything is built.
+//
+// These all attack the same seam. `save_level_configuration` validates the
+// model, the class and the zone COUNT before it writes — but a restored backup,
+// a hand-edited database or a downgrade-then-upgrade never went through it. The
+// read path is the only enforcement such a database ever meets, so each check
+// the chokepoint makes must have a counterpart here, and every one of them must
+// run BEFORE a processor is constructed or an engine is requested.
+//
+// `log.built.empty()` is the load-bearing assertion, not a bonus: the registry
+// is deliberately permissive, so it records what the grid ASKED for. Requesting
+// an engine deserializes a TensorRT plan on the GUI thread for a camera that was
+// never going to measure.
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("a ball binding whose class does not exist in the resolved metadata "
+          "builds no measuring pipeline", "[ball_runtime][validation]") {
+    Fixture f;
+    f.declare_both();
+    const int64_t flt = f.add_model("float-small", {"Small"});
+    const int64_t cam = f.add_camera(dead_cam("Hand-edited class"));
+    f.calibrate(cam, flt, 0, good_calibration());
+
+    // float-small declares exactly ONE class ("Small"), so class_id 7 names
+    // nothing. The chokepoint refuses this (it checks against md.class_names);
+    // this row got in around it.
+    {
+        QSqlQuery q(f.h());
+        q.prepare(QStringLiteral(
+            "UPDATE ball_level_binding SET class_id = 7 WHERE camera_id = ?"));
+        q.addBindValue(static_cast<qlonglong>(cam));
+        REQUIRE(q.exec());
+        REQUIRE(q.numRowsAffected() == 1);
+    }
+    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+
+    BuildLog log;
+    auto engines = permissive_registry(log);
+    const uint64_t before = BallLevelProcessor::constructed_count();
+
+    CameraGrid grid(f.h(), engines, nullptr);
+    grid.reload();
+
+    // A processor built on class 7 would select balls from a class the model
+    // cannot emit, so it would measure an empty detection set forever and report
+    // the tank as permanently incomplete rather than as misconfigured.
+    CHECK(BallLevelProcessor::constructed_count() == before);
+    CHECK(log.built.empty());
+    grid.teardown();
+}
+
+TEST_CASE("a ball camera whose bound model is gone builds no measuring pipeline",
+          "[ball_runtime][validation]") {
+    Fixture f;
+    f.declare_both();
+    const int64_t flt = f.add_model("float-small", {"Small"});
+    const int64_t cam = f.add_camera(dead_cam("Model deleted"));
+    f.calibrate(cam, flt, 0, good_calibration());
+
+    // The catalog row is gone — an uninstalled model generation — but the
+    // binding still points at its id.
+    {
+        QSqlQuery q(f.h());
+        q.prepare(QStringLiteral("DELETE FROM model WHERE id = ?"));
+        q.addBindValue(static_cast<qlonglong>(flt));
+        REQUIRE(q.exec());
+    }
+    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+
+    BuildLog log;
+    auto engines = permissive_registry(log);
+    const uint64_t before = BallLevelProcessor::constructed_count();
+
+    CameraGrid grid(f.h(), engines, nullptr);
+    grid.reload();
+
+    CHECK(BallLevelProcessor::constructed_count() == before);
+    CHECK(log.built.empty());
+    grid.teardown();
+}
+
+TEST_CASE("a ball camera carrying more than the four permitted zones builds no "
+          "measuring pipeline", "[ball_runtime][validation]") {
+    Fixture f;
+    f.declare_both();
+    const int64_t flt = f.add_model("float-small", {"Small"});
+    const int64_t cam = f.add_camera(dead_cam("Five zones"));
+    f.calibrate_zones(cam, flt, 0,
+                      {{1, good_calibration()},
+                       {2, good_calibration()},
+                       {3, good_calibration()},
+                       {4, good_calibration()}});
+
+    // A FIFTH zone, inserted around the chokepoint that caps the set at four.
+    // The cap is a property of the SET, so no per-row CHECK constraint can hold
+    // it — which is exactly why the read path has to.
+    {
+        QSqlQuery q(f.h());
+        q.prepare(QStringLiteral(
+            "INSERT INTO ball_level_zone (camera_id, zone_no, conf, rect_x, "
+            "rect_y, rect_w, rect_h, y_100, y_0, hold_ms) "
+            "VALUES (?, 5, 0.5, 0.3, 0.1, 0.4, 0.8, 0.2, 0.8, 2000)"));
+        q.addBindValue(static_cast<qlonglong>(cam));
+        REQUIRE(q.exec());
+    }
+    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+
+    BuildLog log;
+    auto engines = permissive_registry(log);
+    const uint64_t before = BallLevelProcessor::constructed_count();
+
+    CameraGrid grid(f.h(), engines, nullptr);
+    grid.reload();
+
+    CHECK(BallLevelProcessor::constructed_count() == before);
+    CHECK(log.built.empty());
+    grid.teardown();
+}
+
+TEST_CASE("a valid Float binding builds exactly one processor per camera",
+          "[ball_runtime][validation]") {
+    Fixture f;
+    f.declare_both();
+    const int64_t flt = f.add_model("float-small", {"Small"});
+    const int64_t a = f.add_camera(dead_cam("Tank A"));
+    const int64_t b = f.add_camera(dead_cam("Tank B"));
+    f.calibrate(a, flt, 0, good_calibration(), 1);
+    f.calibrate(b, flt, 0, good_calibration(), 2);
+    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+
+    BuildLog log;
+    auto engines = permissive_registry(log);
+    const uint64_t before = BallLevelProcessor::constructed_count();
+
+    CameraGrid grid(f.h(), engines, nullptr);
+    grid.reload();
+
+    // The positive control for every rejection above: the same path, given a
+    // valid binding, really does build. Without this the rejections could all be
+    // passing because nothing ever builds.
+    CHECK(BallLevelProcessor::constructed_count() == before + 2);
+    CHECK(count_built(log, "float-small") == 1);   // ONE engine, shared
     grid.teardown();
 }
 

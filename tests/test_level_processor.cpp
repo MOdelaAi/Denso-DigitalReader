@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -343,6 +344,87 @@ TEST_CASE("a ball inside the rectangle produces a level from its bbox CENTRE",
     REQUIRE(e.percent.has_value());
     CHECK_THAT(*e.percent, Catch::Matchers::WithinAbs(50.0, 0.001));
     CHECK(e.camera_id == 7);
+}
+
+// The load-bearing economic claim of the multi-zone amendment (§10.1): a camera
+// binds ONE model and runs ONE inference per frame, whatever its zone count. The
+// one detection set is then evaluated independently per zone. A per-zone
+// inference would quadruple GPU work on a four-tank camera for no new
+// information, and on an Orin Nano running four cameras that is the difference
+// between keeping frame rate and not.
+TEST_CASE("four zones share one inference execution per frame",
+          "[level][processor][multizone]") {
+    // Four balls at four heights. Each zone's rectangle selects exactly one of
+    // them, so a correct fan-out yields four DIFFERENT percentages from the one
+    // detection set — which is what distinguishes real per-zone evaluation from
+    // one measurement copied four times.
+    // Each ball sits at a DIFFERENT height within its own zone, so the four
+    // percentages must come out distinct. Equal heights would let a broken
+    // fan-out that measures zone 1 four times pass unnoticed.
+    StubEngine engine({det(0.33, 0.15, 0.39, 0.21, 0.9f),    // zone 1: ~92%
+                       det(0.53, 0.33, 0.59, 0.39, 0.9f),    // zone 2: ~69%
+                       det(0.33, 0.58, 0.39, 0.64, 0.9f),    // zone 3: ~38%
+                       det(0.53, 0.76, 0.59, 0.82, 0.9f)});  // zone 4: ~15%
+
+    // Four side-by-side/stacked rectangles, each containing exactly one ball.
+    const auto zone_at = [](double x, double y) {
+        LevelCalibration c;
+        c.rect_x = x;
+        c.rect_y = y;
+        c.rect_w = 0.16;
+        c.rect_h = 0.15;
+        c.y_100 = y + 0.01;
+        c.y_0 = y + 0.14;
+        c.conf = 0.5;
+        c.hold_ms = 2000;
+        return c;
+    };
+    std::vector<denso::level::LevelZone> zones{
+        {1, zone_at(0.28, 0.16)},
+        {2, zone_at(0.48, 0.31)},
+        {3, zone_at(0.28, 0.52)},
+        {4, zone_at(0.48, 0.67)}};
+
+    BallLevelProcessor p(0, 0.0, 0.0, &engine, 0, zones, 11);
+
+    // Pump by hand rather than through pump_until, because the FRAME COUNT is
+    // half the assertion: the claim is inference-per-frame, so the denominator
+    // has to be counted, not assumed.
+    const QImage frame = grey_frame();
+    int frames_submitted = 0;
+    const auto all_measured = [&p] {
+        const std::vector<denso::ui::LevelZoneResult> s = p.snapshot();
+        if (s.size() != 4) return false;
+        for (const denso::ui::LevelZoneResult& z : s)
+            if (!z.percent.has_value()) return false;
+        return true;
+    };
+    for (int i = 0; i < 200 && !all_measured(); ++i) {
+        p.process(frame);
+        ++frames_submitted;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(all_measured());
+
+    const std::vector<denso::ui::LevelZoneResult> s = p.snapshot();
+    REQUIRE(s.size() == 4);
+    CHECK(s[0].zone_no == 1);
+    CHECK(s[3].zone_no == 4);
+    // Four distinct measurements, each from its OWN zone's ball and reference
+    // lines — not one value fanned out.
+    std::set<int> distinct;
+    for (const denso::ui::LevelZoneResult& z : s) {
+        REQUIRE(z.percent.has_value());
+        distinct.insert(static_cast<int>(*z.percent));
+    }
+    CHECK(distinct.size() == 4);
+
+    // Inference ran at most once per submitted frame. The worker keeps a single
+    // latest-frame slot, so calls can only be FEWER than frames (coalescing),
+    // never more — four zones must not multiply it. A per-zone inference would
+    // put this at roughly 4x the frame count.
+    CHECK(engine.calls() <= frames_submitted);
+    CHECK(engine.calls() >= 1);
 }
 
 TEST_CASE("a detection outside the measurement rectangle is ignored",

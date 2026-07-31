@@ -223,6 +223,94 @@ int row_count(const QSqlDatabase& db, const QString& table) {
     return q.value(0).toInt();
 }
 
+std::optional<int> single_int(const QSqlDatabase& db, const QString& sql) {
+    QSqlQuery q(db);
+    REQUIRE(q.exec(sql));
+    if (!q.next()) return std::nullopt;
+    return q.value(0).toInt();
+}
+
+bool has_table(const QSqlDatabase& db, const QString& table) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?"));
+    q.addBindValue(table);
+    REQUIRE(q.exec());
+    return q.next();
+}
+
+/// Build the `camera` + `camera_area` + detection schema EXACTLY as v11 left it:
+/// the v4 CREATEs, the v5/v6/v11 ALTERs, the v7 polygon rebuild and the v10 zone
+/// column. Nothing above v11 — no `setup_complete`, no receipt table, no Ball
+/// table. This is what a real appliance that has never seen v12 has on disk, and
+/// building it statement-by-statement is the point: migrating an already-current
+/// database only proves the CREATEs are idempotent, never that the upgrade path
+/// works.
+void build_v11_schema(const QSqlDatabase& db) {
+    const auto run = [&db](const char* sql) {
+        QSqlQuery q(db);
+        REQUIRE(q.exec(QString::fromUtf8(sql)));
+    };
+    run("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    run("CREATE TABLE net_config (iface TEXT PRIMARY KEY, mode TEXT NOT NULL,"
+        " ip TEXT, prefix INTEGER, gateway TEXT, dns1 TEXT, dns2 TEXT,"
+        " ssid TEXT, security TEXT)");
+    run("CREATE TABLE camera (id INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+        " camera_type TEXT NOT NULL, active INTEGER NOT NULL, cam_index INTEGER,"
+        " ip TEXT, rtsp TEXT, username TEXT, width INTEGER NOT NULL,"
+        " height INTEGER NOT NULL, fps INTEGER NOT NULL, pitch REAL NOT NULL,"
+        " roll REAL NOT NULL, rotation INTEGER NOT NULL)");
+    run("ALTER TABLE camera ADD COLUMN password TEXT");
+    run("ALTER TABLE camera ADD COLUMN channel INTEGER");
+    run("ALTER TABLE camera ADD COLUMN stream INTEGER");
+    run("ALTER TABLE camera ADD COLUMN manufacturer TEXT");
+    run("ALTER TABLE camera ADD COLUMN areas_need_review INTEGER NOT NULL DEFAULT 0");
+    run("CREATE TABLE camera_area (id INTEGER PRIMARY KEY,"
+        " camera_id INTEGER NOT NULL REFERENCES camera(id), name TEXT NOT NULL,"
+        " points TEXT NOT NULL)");
+    run("CREATE INDEX idx_camera_area_camera ON camera_area(camera_id)");
+    run("ALTER TABLE camera_area ADD COLUMN zone INTEGER");
+    run("CREATE TABLE model (id INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+        " filename TEXT NOT NULL UNIQUE, class_names TEXT NOT NULL)");
+    run("CREATE TABLE camera_model (id INTEGER PRIMARY KEY,"
+        " camera_id INTEGER NOT NULL REFERENCES camera(id),"
+        " model_id INTEGER NOT NULL REFERENCES model(id))");
+    run("CREATE TABLE camera_model_class (id INTEGER PRIMARY KEY,"
+        " camera_model_id INTEGER NOT NULL REFERENCES camera_model(id),"
+        " class_id INTEGER NOT NULL, conf REAL NOT NULL)");
+    run("CREATE TABLE reading (id INTEGER PRIMARY KEY,"
+        " camera_id INTEGER NOT NULL REFERENCES camera(id), ts_ms INTEGER NOT NULL,"
+        " value TEXT NOT NULL, conf REAL NOT NULL)");
+}
+
+/// Take a fully-migrated database back to the v14 SHAPE by removing exactly what
+/// v15 adds. Dropping the two v15 tables is not a simulation of v14 — it IS v14:
+/// v14 is defined as every migration up to and including `ball_level_calibration`
+/// and nothing after it.
+void demote_to_v14(const QSqlDatabase& db) {
+    const auto run = [&db](const char* sql) {
+        QSqlQuery q(db);
+        REQUIRE(q.exec(QString::fromUtf8(sql)));
+    };
+    run("DROP TABLE IF EXISTS ball_level_zone");
+    run("DROP TABLE IF EXISTS ball_level_binding");
+    run("PRAGMA user_version = 14");
+}
+
+/// Insert a v14-era Ball calibration directly, the way the shipped v14 build did.
+void insert_v14_calibration(const QSqlDatabase& db, int64_t camera_id,
+                            int64_t model_id, double y_0) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO ball_level_calibration (camera_id, model_id, class_id, conf,"
+        " rect_x, rect_y, rect_w, rect_h, y_100, y_0, hold_ms, view_revision)"
+        " VALUES (?, ?, 0, 0.55, 0.30, 0.10, 0.40, 0.80, 0.20, ?, 2000, 'rev-v14')"));
+    q.addBindValue(static_cast<qlonglong>(camera_id));
+    q.addBindValue(static_cast<qlonglong>(model_id));
+    q.addBindValue(y_0);
+    REQUIRE(q.exec());
+}
+
 /// Wrap ONE calibration as the single-zone set the multi-zone chokepoint takes.
 /// Most of these cases are about the MODEL binding, not the zone set, so they
 /// state the zone set once here rather than restating it at every call.
@@ -317,6 +405,12 @@ TEST_CASE("v13 -> v15 migrates a populated database and preserves every Digital 
         CHECK(row_count(db->handle(), "camera_area") == 1);
         CHECK(row_count(db->handle(), "reading") == 1);
         CHECK(row_count(db->handle(), "ball_level_calibration") == 0);
+        // The v15 tables are created even with nothing to backfill, so the
+        // running app never meets a half-present schema.
+        CHECK(has_table(db->handle(), "ball_level_binding"));
+        CHECK(has_table(db->handle(), "ball_level_zone"));
+        CHECK(row_count(db->handle(), "ball_level_binding") == 0);
+        CHECK(row_count(db->handle(), "ball_level_zone") == 0);
 
         const auto cams = denso::camera::all(db->handle());
         REQUIRE(cams.size() == 1);
@@ -339,6 +433,244 @@ TEST_CASE("v13 -> v15 migrates a populated database and preserves every Digital 
         REQUIRE(q.next());
         CHECK(q.value(0).toInt() == 3);
         CHECK(q.value(1).toDouble() == 0.77);
+    }
+}
+
+// ─── 2b. the v15 backfill may not assume schema it did not create ────────────
+//
+// The regression these pin: `migrate_ball_calibration_to_zones` read
+// `camera_area.zone` unconditionally. That column arrives in v10, over a table
+// created in v4 and rebuilt in v7 — none of which EXECUTES on a database
+// entering at v11, because the `version < N` blocks are conditional. The entry
+// `user_version` therefore says nothing about what is actually on disk, and a
+// migration that infers schema from it fails at the first query. A failed
+// `run_migrations` is a bricked upgrade: the appliance refuses to boot.
+
+TEST_CASE("v11 -> v15 upgrades a real legacy database and preserves every row",
+          "[level][schema][migration]") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QString path = QDir(dir.path()).filePath("denso.db");
+
+    {
+        auto db = denso::db::Db::open(path);
+        REQUIRE(db.has_value());
+        build_v11_schema(db->handle());
+
+        const auto run = [&](const char* sql) {
+            QSqlQuery q(db->handle());
+            REQUIRE(q.exec(QString::fromUtf8(sql)));
+        };
+        run("INSERT INTO camera (name, camera_type, active, cam_index, width,"
+            " height, fps, pitch, roll, rotation) VALUES"
+            " ('Legacy Line', 'usb', 1, 0, 1280, 720, 30, 0.0, 0.0, 0)");
+        run("INSERT INTO model (name, filename, class_names)"
+            " VALUES ('digitv3', 'digitv3.engine', '[\"0\",\"1\"]')");
+        run("INSERT INTO camera_model (camera_id, model_id) VALUES (1, 1)");
+        run("INSERT INTO camera_model_class (camera_model_id, class_id, conf)"
+            " VALUES (1, 7, 0.61)");
+        run("INSERT INTO camera_area (camera_id, name, points, zone)"
+            " VALUES (1, 'Zone A', '0.1,0.1;0.9,0.1;0.9,0.9', 3)");
+        run("INSERT INTO reading (camera_id, ts_ms, value, conf)"
+            " VALUES (1, 1700000000000, '4321', 0.88)");
+        run("INSERT INTO settings (key, value) VALUES ('backend_url', 'http://x')");
+        run("PRAGMA user_version = 11");
+    }
+
+    {
+        auto db = denso::db::Db::open(path);
+        REQUIRE(db.has_value());
+        REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 11);
+
+        REQUIRE(denso::db::run_migrations(db->handle()));
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+
+        // Every v11 row survives, values intact.
+        CHECK(row_count(db->handle(), "camera") == 1);
+        CHECK(row_count(db->handle(), "camera_model") == 1);
+        CHECK(row_count(db->handle(), "camera_model_class") == 1);
+        CHECK(row_count(db->handle(), "camera_area") == 1);
+        CHECK(row_count(db->handle(), "reading") == 1);
+        CHECK(row_count(db->handle(), "settings") == 1);
+        CHECK(single_int(db->handle(),
+                         QStringLiteral("SELECT zone FROM camera_area")) == 3);
+        CHECK(single_int(db->handle(),
+                         QStringLiteral("SELECT class_id FROM camera_model_class")) == 7);
+
+        // v12 grandfathering still applies, and the v15 tables now exist and are
+        // empty — this machine never had a Ball calibration to carry forward.
+        const auto cams = denso::camera::all(db->handle());
+        REQUIRE(cams.size() == 1);
+        CHECK(cams.front().setup_complete);
+        CHECK(has_table(db->handle(), "ball_level_binding"));
+        CHECK(has_table(db->handle(), "ball_level_zone"));
+        CHECK(row_count(db->handle(), "ball_level_binding") == 0);
+        CHECK(row_count(db->handle(), "ball_level_zone") == 0);
+    }
+}
+
+TEST_CASE("a populated v14 Ball calibration becomes one binding plus one zone",
+          "[level][schema][migration]") {
+    Fixture fx;
+    const QString path = QDir(fx.dir.path()).filePath("denso.db");
+    const auto cid = denso::camera::insert(fx.h(), ip_camera("Tank 1"));
+    REQUIRE(cid.has_value());
+    const int64_t model_id = fx.float_model_id;
+
+    insert_v14_calibration(fx.h(), *cid, model_id, 0.80);
+    demote_to_v14(fx.h());
+    fx.db.reset();   // close before reopening the same file
+
+    auto db = denso::db::Db::open(path);
+    REQUIRE(db.has_value());
+    REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 14);
+    REQUIRE(denso::db::run_migrations(db->handle()));
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+
+    // Exactly one binding, carrying the camera-level model identity.
+    REQUIRE(row_count(db->handle(), "ball_level_binding") == 1);
+    QSqlQuery b(db->handle());
+    REQUIRE(b.exec(QStringLiteral(
+        "SELECT camera_id, model_id, class_id, view_revision FROM ball_level_binding")));
+    REQUIRE(b.next());
+    CHECK(b.value(0).toLongLong() == *cid);
+    CHECK(b.value(1).toLongLong() == model_id);
+    CHECK(b.value(2).toInt() == 0);
+    CHECK(b.value(3).toString() == QStringLiteral("rev-v14"));
+
+    // Exactly one zone, at Zone 1 — the documented case for a Ball-only machine
+    // with nothing else claiming a number — carrying the v14 geometry verbatim.
+    REQUIRE(row_count(db->handle(), "ball_level_zone") == 1);
+    QSqlQuery z(db->handle());
+    REQUIRE(z.exec(QStringLiteral(
+        "SELECT camera_id, zone_no, conf, rect_x, rect_y, rect_w, rect_h,"
+        " y_100, y_0, hold_ms FROM ball_level_zone")));
+    REQUIRE(z.next());
+    CHECK(z.value(0).toLongLong() == *cid);
+    CHECK(z.value(1).toInt() == 1);
+    CHECK(z.value(2).toDouble() == 0.55);
+    CHECK(z.value(3).toDouble() == 0.30);
+    CHECK(z.value(4).toDouble() == 0.10);
+    CHECK(z.value(5).toDouble() == 0.40);
+    CHECK(z.value(6).toDouble() == 0.80);
+    CHECK(z.value(7).toDouble() == 0.20);
+    CHECK(z.value(8).toDouble() == 0.80);
+    CHECK(z.value(9).toInt() == 2000);
+
+    // The legacy row is RETAINED untouched — the migration drops nothing.
+    CHECK(row_count(db->handle(), "ball_level_calibration") == 1);
+    CHECK(single_int(db->handle(),
+                     QStringLiteral("SELECT hold_ms FROM ball_level_calibration")) == 2000);
+}
+
+TEST_CASE("a migrated v14 calibration takes the lowest zone number free "
+          "MACHINE-WIDE, across both modes",
+          "[level][schema][migration][zones]") {
+    Fixture fx;
+    const QString path = QDir(fx.dir.path()).filePath("denso.db");
+    const auto digit_cam = denso::camera::insert(fx.h(), ip_camera("Digit line"));
+    const auto ball_a = denso::camera::insert(fx.h(), ip_camera("Tank A"));
+    const auto ball_b = denso::camera::insert(fx.h(), ip_camera("Tank B"));
+    REQUIRE(digit_cam.has_value());
+    REQUIRE(ball_a.has_value());
+    REQUIRE(ball_b.has_value());
+
+    // The digit reader already reports zones 1 and 3. `build_brazing_payload`
+    // keys by zone number ALONE and carries no camera identity, so handing a
+    // migrated Ball camera zone 1 would silently make two cameras write one
+    // backend field.
+    const auto claim = [&](int64_t cam, int zone) {
+        QSqlQuery q(fx.h());
+        q.prepare(QStringLiteral(
+            "INSERT INTO camera_area (camera_id, name, points, zone)"
+            " VALUES (?, 'A', '0.1,0.1;0.9,0.1;0.9,0.9', ?)"));
+        q.addBindValue(static_cast<qlonglong>(cam));
+        q.addBindValue(zone);
+        REQUIRE(q.exec());
+    };
+    claim(*digit_cam, 1);
+    claim(*digit_cam, 3);
+
+    insert_v14_calibration(fx.h(), *ball_a, fx.float_model_id, 0.80);
+    insert_v14_calibration(fx.h(), *ball_b, fx.float_model_id, 0.75);
+    demote_to_v14(fx.h());
+    fx.db.reset();
+
+    auto db = denso::db::Db::open(path);
+    REQUIRE(db.has_value());
+    REQUIRE(denso::db::run_migrations(db->handle()));
+
+    // 1 and 3 are taken by the digit ROIs, so the two Ball cameras take 2 and 4
+    // in camera_id order. The digit claims are untouched.
+    QSqlQuery z(db->handle());
+    REQUIRE(z.exec(QStringLiteral(
+        "SELECT camera_id, zone_no FROM ball_level_zone ORDER BY camera_id")));
+    REQUIRE(z.next());
+    CHECK(z.value(0).toLongLong() == *ball_a);
+    CHECK(z.value(1).toInt() == 2);
+    REQUIRE(z.next());
+    CHECK(z.value(0).toLongLong() == *ball_b);
+    CHECK(z.value(1).toInt() == 4);
+    CHECK_FALSE(z.next());
+
+    CHECK(row_count(db->handle(), "camera_area") == 2);
+    QSqlQuery a(db->handle());
+    REQUIRE(a.exec(QStringLiteral("SELECT zone FROM camera_area ORDER BY zone")));
+    REQUIRE(a.next());
+    CHECK(a.value(0).toInt() == 1);
+    REQUIRE(a.next());
+    CHECK(a.value(0).toInt() == 3);
+
+    // No number is claimed twice anywhere on the machine.
+    CHECK(single_int(db->handle(), QStringLiteral(
+              "SELECT COUNT(*) FROM (SELECT zone AS z FROM camera_area"
+              " WHERE zone IS NOT NULL UNION ALL"
+              " SELECT zone_no FROM ball_level_zone) GROUP BY z"
+              " HAVING COUNT(*) > 1")) == std::nullopt);
+}
+
+TEST_CASE("re-running the migration after a restart adds no second zone",
+          "[level][schema][migration][idempotent]") {
+    Fixture fx;
+    const QString path = QDir(fx.dir.path()).filePath("denso.db");
+    const auto cid = denso::camera::insert(fx.h(), ip_camera("Tank 1"));
+    REQUIRE(cid.has_value());
+    insert_v14_calibration(fx.h(), *cid, fx.float_model_id, 0.80);
+    demote_to_v14(fx.h());
+    fx.db.reset();
+
+    {
+        auto db = denso::db::Db::open(path);
+        REQUIRE(db.has_value());
+        REQUIRE(denso::db::run_migrations(db->handle()));
+        REQUIRE(row_count(db->handle(), "ball_level_zone") == 1);
+    }
+
+    // Restart: the appliance runs migrations on EVERY boot.
+    for (int boot = 0; boot < 2; ++boot) {
+        auto db = denso::db::Db::open(path);
+        REQUIRE(db.has_value());
+        REQUIRE(denso::db::run_migrations(db->handle()));
+        CHECK(row_count(db->handle(), "ball_level_binding") == 1);
+        CHECK(row_count(db->handle(), "ball_level_zone") == 1);
+        CHECK(single_int(db->handle(),
+                         QStringLiteral("SELECT zone_no FROM ball_level_zone")) == 1);
+    }
+
+    // And a re-entry that finds the stamp MISSING — an earlier run interrupted
+    // between the inserts and the `PRAGMA user_version` write — must still not
+    // hand this camera a second tank. INSERT OR IGNORE only ignores a collision
+    // on (camera_id, zone_no), so re-deriving a DIFFERENT number would insert,
+    // not ignore.
+    {
+        auto db = denso::db::Db::open(path);
+        REQUIRE(db.has_value());
+        QSqlQuery q(db->handle());
+        REQUIRE(q.exec(QStringLiteral("PRAGMA user_version = 14")));
+        REQUIRE(denso::db::run_migrations(db->handle()));
+        CHECK(row_count(db->handle(), "ball_level_zone") == 1);
+        CHECK(single_int(db->handle(),
+                         QStringLiteral("SELECT zone_no FROM ball_level_zone")) == 1);
     }
 }
 

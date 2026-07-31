@@ -57,6 +57,7 @@ add_library(denso_camera STATIC
     camera/frame_processor.cpp
     camera/level_overlay.cpp
     camera/level_processor.cpp
+    camera/level_zone_assembly.cpp
 )
 target_include_directories(denso_camera PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})

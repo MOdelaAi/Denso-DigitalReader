@@ -50,9 +50,26 @@ CalibrationDraft::CalibrationDraft() {
 
 CalibrationDraft CalibrationDraft::from_calibration(const LevelCalibration& c) {
     CalibrationDraft d;
-    d.c_ = c;             // assigned WHOLE, deliberately: routing a stored value
-    d.has_rect_ = true;   // through the clamping mutators could nudge it, and
-                          // opening the page must never alter what is stored.
+    d.c_ = c;   // assigned WHOLE, deliberately: routing a stored value through
+                // the clamping mutators could nudge it, and opening the page
+                // must never alter what is stored.
+    // Whether a rectangle EXISTS is read from the value, not assumed. This was
+    // an unconditional `true`, which was accurate while the only caller passed a
+    // calibration loaded from the database — those always carry a drawn
+    // rectangle, because the write chokepoint validated one. Multi-zone added a
+    // second caller: an operator adding a zone gets a DEFAULT-constructed
+    // LevelCalibration, whose rectangle is 0x0 because nothing has been drawn
+    // yet. Claiming a rectangle for it put the canvas into Editing mode on a new
+    // zone, where a press looks for a reference line to grab instead of starting
+    // a band — so the operator could not draw the rectangle at all, and got a
+    // geometry error in place of the "drag out the rectangle" prompt.
+    //
+    // The test is deliberately only "are the extents real", not the full
+    // validation: a rectangle drawn too small to measure through HAS been drawn,
+    // and must reach the operator as that specific complaint rather than as a
+    // blank page.
+    d.has_rect_ = std::isfinite(c.rect_w) && std::isfinite(c.rect_h) &&
+                  c.rect_w > 0.0 && c.rect_h > 0.0;
     return d;
 }
 

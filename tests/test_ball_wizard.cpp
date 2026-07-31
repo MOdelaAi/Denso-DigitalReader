@@ -55,6 +55,7 @@
 #include "ui/camera/dialog/configure_page.h"
 #include "ui/camera/dialog/level_calibration_page.h"
 #include "ui/camera/dialog/level_canvas.h"
+#include "ui/camera/shared/roi_geometry.h"
 #include "ui/camera/dialog/models_page.h"
 #include "ui/camera/wizard_controller.h"
 #include "ui/mainwindow.h"
@@ -71,6 +72,7 @@
 #include <QFile>
 #include <QImage>
 #include <QLabel>
+#include <QLayout>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPointF>
@@ -503,6 +505,57 @@ QAbstractButton* find_button(const QWidget& w, const QString& object_name) {
 }
 
 }  // namespace
+
+// The zone list, its buttons and the two spin boxes were added BESIDE the canvas.
+// Every other case in this section sizes the canvas by hand, which is right for
+// testing the mapping but means none of them can notice the side panel eating the
+// drawing area. This one lets the LAYOUT decide and then draws at whatever size it
+// produced, so "the panel does not squeeze the canvas to an unusable size" is a
+// tested property rather than an eyeballed one.
+TEST_CASE("the zone side panel leaves the canvas usable and drawable",
+          "[ball_wizard][ui][layout]") {
+    LevelCalibrationPage page;
+    page.set_background(test_frame());
+    page.load({}, {});
+    page.resize(1024, 700);   // a realistic wizard size on the appliance display
+    REQUIRE(page.layout() != nullptr);
+    page.layout()->activate();   // NO manual canvas resize — the layout decides
+
+    LevelCanvas* canvas = page.canvas();
+    REQUIRE(canvas != nullptr);
+
+    // The canvas keeps the majority of the width and a workable height. A side
+    // panel that grew until the canvas was a sliver would still "work" by every
+    // other assertion in this file.
+    CHECK(canvas->width() * 2 >= page.width());
+    CHECK(canvas->width() >= 400);
+    CHECK(canvas->height() >= 300);
+    // And it does not run under the panel: the canvas ends before the page does.
+    CHECK(canvas->geometry().right() <= page.width());
+
+    // Drawing works AT THE ACTUAL SIZE. The mapping is recomputed from the real
+    // geometry rather than restating the fixture's assumed 640x480, so this stays
+    // honest if the layout changes again.
+    const QRectF img = denso::ui::fitted_image_rect(QSizeF(1280.0, 720.0),
+                                                    QSizeF(canvas->size()));
+    REQUIRE_FALSE(img.isEmpty());
+    const auto at = [&img](double nx, double ny) {
+        return QPointF(img.x() + nx * img.width(), img.y() + ny * img.height());
+    };
+    CHECK_FALSE(page.draft().has_rect());
+    drag(canvas, at(0.20, 0.20), at(0.80, 0.80));
+
+    REQUIRE(page.draft().has_rect());
+    const LevelCalibration& c = page.draft().draft();
+    CHECK(c.rect_x == Catch::Approx(0.20).margin(0.01));
+    CHECK(c.rect_y == Catch::Approx(0.20).margin(0.01));
+    CHECK(c.rect_w == Catch::Approx(0.60).margin(0.01));
+    CHECK(c.rect_h == Catch::Approx(0.60).margin(0.01));
+    CHECK(c.y_100 < c.y_0);          // 100% stays above 0%
+    CHECK(c.y_100 >= c.rect_y);      // both lines land inside the rectangle
+    CHECK(c.y_0 <= c.rect_y + c.rect_h);
+    CHECK(page.draft().check().ok);
+}
 
 TEST_CASE("dragging out a rectangle writes it into the draft", "[ball_wizard][ui]") {
     PageFixture f;
