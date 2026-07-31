@@ -6,6 +6,8 @@
 #include "settings/repo.h"
 #include "ui/camera/camera_dialog.h"
 #include "ui/camera/camera_view.h"
+#include "ui/engine_session.h"
+#include "ui/warmup_state.h"
 #include "ui/settings/display_confirm_dialog.h"
 #include "ui/settings/mode_confirm_dialog.h"
 #include "ui/settings/settings_dialog.h"
@@ -19,6 +21,8 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QMessageBox>
+
+#include <algorithm>
 #include <QPalette>
 #include <QPixmap>
 #include <QPushButton>
@@ -60,7 +64,7 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
                        std::shared_ptr<EngineRegistry> engines, WarmupState* warmup,
                        QWidget* parent)
     : QMainWindow(parent), db_(std::move(db)), state_(std::move(state)),
-      warmup_(warmup) {
+      warmup_(warmup), engines_(engines) {
     setWindowTitle(QStringLiteral("Denso Digital Reader"));
     setWindowIcon(QIcon(QStringLiteral(":/icon.png")));  // title bar + taskbar
 
@@ -210,8 +214,12 @@ void MainWindow::open_settings() {
 }
 
 void MainWindow::apply_camera_button_gate() {
-    // digit_reader keeps the existing behavior; ball_leveler exposes no wizard.
-    camera_btn_->setEnabled(current_mode_ != mode::TargetMode::BallLeveler);
+    // Both modes now expose a camera wizard — digit_reader ends at Areas,
+    // ball_leveler at Level calibration — so the button is enabled in both. The
+    // method is KEPT rather than deleted: it is the one place the button's
+    // mode-dependence lives, and a future mode that must not open the wizard
+    // should re-express itself here rather than growing a new call site.
+    camera_btn_->setEnabled(true);
 }
 
 void MainWindow::set_switch_observer(std::function<void(SwitchEvent)> observer) {
@@ -252,6 +260,37 @@ void MainWindow::on_switch_mode(int target) {
     }
 
     perform_switch(want);
+}
+
+void MainWindow::prune_retired_warmups() {
+    // Reclaim only the ones whose thread has already finished, so the join in
+    // ~WarmupState returns immediately and the GUI never waits.
+    retired_warmups_.erase(
+        std::remove_if(retired_warmups_.begin(), retired_warmups_.end(),
+                       [](const std::unique_ptr<WarmupState>& w) {
+                           return w && !w->worker_running();
+                       }),
+        retired_warmups_.end());
+}
+
+void MainWindow::fail_closed_session() {
+    // The destination session could not be built, but the mode HAS committed.
+    // Keep the outgoing registry attached rather than substituting nothing: it
+    // is immutable and mode-pure, so its allow-list authorizes nothing for the
+    // mode now in effect and every get() refuses. Each camera therefore resolves
+    // to Unavailable through the firewalls that already exist, which is the
+    // fail-closed outcome - a null registry would instead be dereferenced by the
+    // digit build path.
+    //
+    // The COORDINATOR must go, though: it is retired and will never report
+    // again, so a camera consulting it would wait on a readiness that can never
+    // arrive. With no coordinator the grid skips the gate and lets the refusal
+    // speak.
+    try {
+        camera_view_->set_engines(engines_, nullptr);
+    } catch (...) {
+        // Nothing further to fall back to; the note() above already records it.
+    }
 }
 
 mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
@@ -382,6 +421,79 @@ mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
     // reload() is non-failing for this feature: per-camera engine failures are
     // firewalled inside the grid and surface as an Offline tile. Still protected,
     // because leaving the view torn down is the one outcome worth guarding against.
+    // ── 5b. Replace the inference session for the mode now in effect ─────────
+    // Without this the feature cannot work at all: the boot registry's allow-list
+    // is immutable and get() THROWS for anything outside it, so a live switch to
+    // a configured ball_leveler could never load a Float engine (spec 3.1).
+    //
+    // Ordering is what makes this safe, and it is already correct above: the
+    // teardown at step 2 joined every capture and inference thread, so no worker
+    // holds an engine pointer from the outgoing registry. Only after a COMMIT,
+    // and built from current_mode_ - the mode re-read from the database - so the
+    // running process and the persisted mode cannot disagree.
+    if (outcome == Outcome::Committed) {
+        // Retire the OUTGOING coordinator FIRST - before anything that can throw.
+        // Retiring only on the success path left a window in which the mode had
+        // committed but the old coordinator was still live, so a boot-wired
+        // `failed` could still reach app.exit(1) AFTER the switch and take the
+        // appliance dark (spec 7.3/7.5). Retirement is a consequence of the
+        // COMMIT, not of the replacement succeeding.
+        if (warmup_) {
+            warmup_->retire();
+        }
+        if (owned_warmup_) {
+            // Park rather than destroy: ~WarmupState joins an uncancellable
+            // warm-up thread, and doing that inline would freeze the GUI.
+            prune_retired_warmups();
+            retired_warmups_.push_back(std::move(owned_warmup_));
+        }
+        warmup_ = nullptr;
+        try {
+            auto engines = build_engine_registry(db_, current_mode_);
+            auto warmup = std::make_unique<WarmupState>(engines);
+            // A post-commit warm-up failure is a CAMERA-level fault, not a
+            // mode-level one (spec 7.3-7.5): the mode does NOT revert, no
+            // old-mode model is loaded, and the operator can still switch back.
+            // Deliberately NOT app.exit(1) - that is boot-only semantics, and
+            // applying it here would take a working appliance dark over one
+            // unusable model.
+            connect(warmup.get(), &WarmupState::failed, this,
+                    [this](const QString& err) {
+                        qCritical().noquote()
+                            << "[mode] model warm-up failed after the switch;"
+                            << "affected cameras report unavailable:" << err;
+                        // Release the cameras still waiting on a model that will
+                        // now never warm. Without this they hold
+                        // "Preparing model..." forever: the worker emits `failed`
+                        // and never `finished`, so the pending gate has no
+                        // terminating edge of its own.
+                        camera_view_->settle_pending_after_warmup();
+                        show_non_modal(
+                            this, QMessageBox::Warning,
+                            QStringLiteral("Models unavailable"),
+                            QStringLiteral(
+                                "The mode switch completed, but a model for this "
+                                "mode could not be loaded. Affected cameras will "
+                                "show as unavailable.\n\n%1").arg(err));
+                    });
+            camera_view_->set_engines(engines, warmup.get());
+            engines_ = std::move(engines);
+            owned_warmup_ = std::move(warmup);
+            warmup_ = owned_warmup_.get();
+            // Started only after the grid has subscribed; is_ready/is_complete
+            // cover anything that still races.
+            owned_warmup_->start();
+        } catch (const std::exception& e) {
+            note(QStringLiteral("could not prepare models for the new mode: %1")
+                     .arg(QString::fromUtf8(e.what())));
+            fail_closed_session();
+        } catch (...) {
+            note(QStringLiteral("could not prepare models for the new mode"));
+            fail_closed_session();
+        }
+        last_switch_error_ = failure;
+    }
+
     fire(SwitchEvent::ReloadStarted);
     try {
         camera_view_->reload();
@@ -435,10 +547,9 @@ mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
 }
 
 void MainWindow::open_camera() {
-    // The wizard is a digit_reader concept. ball_leveler ships no processing setup
-    // (spec §2.1), so the gate lives HERE as well as on the button — a disabled
-    // button is a UI affordance, not an invariant.
-    if (current_mode_ == mode::TargetMode::BallLeveler) return;
+    // The wizard is available in BOTH modes. Which fourth step it presents —
+    // Areas or Level calibration — is decided by CameraWizardController from the
+    // COMMITTED mode, so this entry point holds no mode rule of its own.
     if (!camera_) {
         camera_ = new CameraDialog(db_, this);
         camera_->setModal(true);

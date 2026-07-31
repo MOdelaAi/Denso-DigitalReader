@@ -40,6 +40,19 @@ std::vector<Camera> all(const QSqlDatabase& db);
 /// one of the grid's four tile slots.
 std::vector<Camera> runtime(const QSqlDatabase& db);
 
+/// The cameras the BALL LEVELER runtime may stream: enabled, full stop.
+///
+/// Deliberately NOT runtime(). `setup_complete` records that the DIGIT wizard
+/// finished, and Ball Leveler must show an enabled-but-uncalibrated camera as an
+/// explicit Unconfigured state on the wall rather than filter it out before it
+/// can be seen — a camera silently missing from the grid is the failure this
+/// exists to prevent. Per-camera Ball readiness is resolved in the grid from
+/// `ball_level_calibration`, which is the only authority on it.
+///
+/// This is an ADMISSION query for one mode, not a second definition of
+/// runtime(): digit_reader still uses runtime() and nothing here changes it.
+std::vector<Camera> active(const QSqlDatabase& db);
+
 /// Mark the add wizard finished for `id`. Call only AFTER the models/areas write
 /// it completes has itself succeeded: completing first would let a failed write
 /// leave a live camera whose setup never actually landed.

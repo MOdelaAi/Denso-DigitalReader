@@ -25,17 +25,38 @@ The appliance does one job at a time, chosen by an explicit operator action.
 table. Absent/unknown/corrupt ⇒ `digit_reader`, never the newer mode, so existing
 installations upgrade unchanged.
 
-**`ball_leveler` configuration exists; the operator surface is still guarded.**
-Ball Leveler model bindings and calibration have a durable home
+**`ball_leveler` is ACTIVATED.** Bindings and calibration have a durable home
 (`ball_level_calibration`, schema v14), the measurement core is complete
-(`src/core/level/`), and the Camera Wizard now has a Ball branch — a
-single-model step plus a Level-calibration page driving `CalibrationDraft` and
-saving through the one `save_level_configuration` chokepoint. **None of it is
-reachable**: selecting the mode still lands on an explicit "not available in this
-release" page, no stream, processor or reporter is constructed, and the top-bar
-Camera button stays disabled, so the wizard branch can only be driven by tests.
-Still not implemented: inference, the OpenCV level annotation, the runtime
-`CameraGrid` branch and the EngineRegistry replacement — Phase B.
+(`src/core/level/`), the Camera Wizard's Ball branch is reachable (single-model
+step plus a Level-calibration page driving `CalibrationDraft`, saving through the
+one `save_level_configuration` chokepoint), and a configured camera measures:
+`CameraGrid::reload_ball()` builds a `BallLevelProcessor` whose worker runs the
+bound Float engine and whose result is burned into the display-only `cv::Mat`
+just before `mat_to_qimage()`.
+
+Facts worth knowing before touching it:
+- **Five runtime states, and `percent` is engaged ONLY in `Healthy`** — enforced
+  by `LevelRuntimeEntry`'s named constructors, not by a convention each draw site
+  re-checks. There is no `HoldingLastValid`: no state means "a number from the
+  past".
+- **Two INDEPENDENT unavailability causes.** Camera-level (`set_unavailable`,
+  written by the grid from `status_changed`) and worker-level (`inference_failed_`,
+  raised by the inference worker and cleared ONLY by a genuine success). They were
+  one slot once and that was a real defect — a camera coming back online wiped a
+  live `inference_error` and the last good percentage was republished as live.
+  Neither may clear the other, and the grid passes NO `WorkerFailedFn`.
+- **A measurement does not survive an interruption.** Engaging a cause drops it
+  and bumps `avail_gen_`; every frame is stamped with that epoch AT SUBMISSION, so
+  a frame in flight — or merely queued — when the camera dropped can never be
+  published afterwards.
+- **`get()` is not a readiness test.** `EngineRegistry` caches the engine it
+  constructs BEFORE `warm_up()` runs the blank inference on it, so a plan whose
+  warm-up inference threw is still cached and non-null. Both build paths therefore
+  refuse a model that warm-up finished without marking ready, without calling
+  `get()`.
+- **A failed warm-up is TERMINAL** (`WarmupState::on_failed` sets `complete_`):
+  the worker emits `failed` and never `finished`, so without that a camera waiting
+  on a model would hold "Preparing model…" for the life of the process.
 
 `switch_mode` is ONE transaction and is **NON-DESTRUCTIVE — it deletes nothing.**
 Every `camera` row survives with all 20 of its columns, **including

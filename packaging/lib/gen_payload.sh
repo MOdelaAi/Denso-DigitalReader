@@ -121,17 +121,28 @@ assert_float_seeding_guarded() (
     floats="$(awk 'NF && $1 !~ /^#/ && $1 ~ /^float-/ { print $1 }' "$approved")"
     [ -n "$floats" ] || return 0
     comp="$root/src/core/models/compatibility.cpp"
+    session="$root/src/app/ui/engine_session.cpp"
     start="$root/src/app/ui/startup.cpp"
+    # The allow-list construction MOVED in Phase B: boot and a committed mode
+    # switch must build it the same way, so it now lives once in
+    # ui/engine_session.cpp and startup.cpp calls that builder. The assertion
+    # follows the whole CHAIN rather than one file, which makes it strictly
+    # stronger than before: the symbol must be defined, really used by the
+    # builder, AND the builder must really be called on the boot path. Checking
+    # only "used somewhere" would pass a builder nothing invokes.
     if cpp_symbol_present def loadable_model_files "$comp" \
-       && cpp_symbol_present use loadable_model_files "$start"; then
+       && cpp_symbol_present use loadable_model_files "$session" \
+       && cpp_symbol_present use build_engine_registry "$start"; then
         return 0
     fi
     echo "gen_payload: REFUSED — a Float model is approved for seeding but the" >&2
-    echo "  Slice-7 warm-up allow-list is absent. A Float engine in the models" >&2
+    echo "  warm-up allow-list chain is incomplete. A Float engine in the models" >&2
     echo "  directory would be deserialized on a Digital Number Reader appliance." >&2
     echo "  Require a real definition of loadable_model_files in" >&2
     echo "    src/core/models/compatibility.cpp" >&2
-    echo "  AND its use in src/app/ui/startup.cpp (a comment/declaration is not enough)." >&2
+    echo "  AND its use in src/app/ui/engine_session.cpp" >&2
+    echo "  AND a real call to build_engine_registry from src/app/ui/startup.cpp" >&2
+    echo "  (a comment or a declaration is not enough)." >&2
     echo "  approved Float stem(s): $floats" >&2
     return 1
 )

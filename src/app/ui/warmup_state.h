@@ -33,7 +33,30 @@ public:
     /// connected (or rely on is_ready/is_complete for anything that races).
     void start();
 
+    /// Sever this coordinator from everything it drives and stop pinning its
+    /// registry. Called on the OUTGOING coordinator when a mode switch commits.
+    ///
+    /// Needed because the BOOT coordinator is owned by ui::launch, not by the
+    /// window, so a switch cannot destroy it — and its `failed` is wired at boot
+    /// to app.exit(1), which is BOOT-only semantics. Left connected, an outgoing
+    /// mode's warm-up failure arriving after a committed switch would take a
+    /// working appliance dark, contrary to spec 7.3/7.5. Its `model_ready` would
+    /// likewise be able to start a camera in a mode it was not built for.
+    ///
+    /// Does NOT join: warm_up() has no cancellation point, and blocking the GUI
+    /// thread on a deserialize in progress is worse than letting the retired
+    /// worker finish into a disconnected object. The destructor still joins.
+    void retire();
+
+    /// Is the warm-up thread still running? Lets an owner hold a RETIRED
+    /// coordinator until its uncancellable work drains, instead of destroying it
+    /// inline and blocking on the join in ~WarmupState.
+    bool worker_running() const;
+
     bool is_ready(const std::string& filename) const;
+    /// True once warm-up can produce nothing further — completed OR failed.
+    /// Failure counts: a caller waiting for a model that will now never warm
+    /// must fall through and resolve, not wait forever.
     bool is_complete() const { return complete_; }
 
 signals:
@@ -46,6 +69,7 @@ signals:
 private slots:
     void on_model_ready(const QString& filename);
     void on_finished();
+    void on_failed(const QString& error);
 
 private:
     std::shared_ptr<EngineRegistry> engines_;
@@ -53,6 +77,7 @@ private:
     WarmupWorker* worker_ = nullptr;
     std::set<std::string> ready_;
     bool complete_ = false;
+    bool retired_ = false;
 };
 
 } // namespace denso::ui

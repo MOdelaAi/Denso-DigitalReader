@@ -28,6 +28,7 @@
 #include "brazing/config.h"
 #include "camera/camera.h"
 #include "camera/camera_stream.h"  // CameraStream::constructed_count()
+#include "camera/frame_processor.h"  // DetectionProcessor::constructed_count()
 #include "camera/repo.h"
 #include "db/db.h"
 #include "detection/engine_registry.h"
@@ -63,6 +64,7 @@
 using denso::mode::TargetMode;
 using denso::ui::CameraDialog;
 using denso::ui::CameraStream;
+using denso::ui::DetectionProcessor;
 using denso::ui::EngineRegistry;
 using denso::ui::MainWindow;
 using denso::ui::WarmupState;
@@ -234,16 +236,18 @@ TEST_CASE("a committed switch keeps every row, disables reporting, and gates the
     CHECK(st.value(QStringLiteral("mode")).toString() == QStringLiteral("ball_leveler"));
     CHECK(st.value(QStringLiteral("mode_setup_required")).toBool() == true);
 
-    // The view is on the unavailable page and no setup/wizard action is exposed.
-    CHECK(win->camera_view_page_index() == 2);
+    // ACTIVATION. The destination has a runtime, so the view lands on the LIVE
+    // grid (the camera is active) rather than an unavailable page, and the
+    // wizard is reachable — its Ball branch is how a level calibration is made.
+    CHECK(win->camera_view_page_index() == 1);
     QPushButton* cam_btn = camera_button(*win);
     REQUIRE(cam_btn != nullptr);
-    CHECK_FALSE(cam_btn->isEnabled());          // top-bar Camera gated off
+    CHECK(cam_btn->isEnabled());
 
-    // …and the handler itself refuses, not merely the button: open_camera() must
-    // short-circuit so no code path can reach the wizard in ball_leveler.
+    // …and the handler agrees with the button. Before activation both refused;
+    // both must now admit, or the affordance and the invariant disagree.
     win->open_camera();
-    CHECK(win->findChild<CameraDialog*>() == nullptr);
+    CHECK(win->findChild<CameraDialog*>() != nullptr);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -644,31 +648,32 @@ TEST_CASE("the identical request proceeds when no display transaction is active"
 // 9. Boot already in Ball Leveler
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("a window booted in ball_leveler is gated from the start",
+TEST_CASE("a window booted in ball_leveler comes up in the ball runtime",
           "[mode_switch_flow]") {
     Harness h;
     REQUIRE(denso::mode::save(h.handle(), TargetMode::BallLeveler));
-    // An out-of-flow DB: this camera is completed AND active, so runtime() alone
-    // would admit it. The boot-time mode gate must still refuse to build anything.
     REQUIRE(denso::camera::insert(
-        h.handle(), model_less_cam("Rogue Cam", /*active*/ true, /*setup*/ true)));
-    REQUIRE(denso::camera::runtime(h.handle()).size() == 1);
+        h.handle(), model_less_cam("Tank Cam", /*active*/ true, /*setup*/ true)));
 
-    const uint64_t streams_before = CameraStream::constructed_count();
+    const uint64_t procs_before = DetectionProcessor::constructed_count();
     auto win = h.make_window();
 
     // The committed mode is adopted at construction — never assumed DigitReader.
     CHECK(win->current_mode() == TargetMode::BallLeveler);
-    CHECK(win->camera_view_page_index() == 2);              // unavailable page
-    CHECK(win->camera_view_grid_reload_invocations() == 0); // grid build never entered
-    CHECK(CameraStream::constructed_count() == streams_before);
+    // ACTIVATION: the grid builds, and the camera reaches the wall. It carries no
+    // calibration, so its tile reports Unconfigured — visible, not filtered away.
+    CHECK(win->camera_view_page_index() == 1);
+    CHECK(win->camera_view_grid_reload_invocations() > 0);
+
+    // But NO digit machinery was built for it. That is the mode-purity half of
+    // the assertion, and it is what a regression to the digit path would break.
+    CHECK(DetectionProcessor::constructed_count() == procs_before);
 
     QPushButton* cam_btn = camera_button(*win);
     REQUIRE(cam_btn != nullptr);
-    CHECK_FALSE(cam_btn->isEnabled());
-    // The handler refuses too, so no path reaches the wizard.
+    CHECK(cam_btn->isEnabled());
     win->open_camera();
-    CHECK(win->findChild<CameraDialog*>() == nullptr);
+    CHECK(win->findChild<CameraDialog*>() != nullptr);
 }
 
 TEST_CASE("a window booted in digit_reader keeps the Camera button usable",
@@ -701,7 +706,7 @@ TEST_CASE("after a switch no reporter is rebuilt and reporting stays off",
         h.handle(), model_less_cam("Line A", /*active*/ true, /*setup*/ true)));
 
     auto win = h.make_window();
-    const uint64_t reloads_before = win->camera_view_grid_reload_invocations();
+    const uint64_t procs_before = DetectionProcessor::constructed_count();
 
     REQUIRE(win->perform_switch(TargetMode::BallLeveler) == TargetMode::BallLeveler);
 
@@ -709,11 +714,13 @@ TEST_CASE("after a switch no reporter is rebuilt and reporting stays off",
     // resume when the destination mode is later configured.
     CHECK_FALSE(denso::brazing::load(h.handle()).enabled);
 
-    // No reporter was rebuilt: CameraGrid constructs the ZoneReporter and
-    // BrazingReporter ONLY inside reload()'s build path, and ball_leveler never
-    // enters it — so an unchanged invocation counter covers all three object kinds
-    // (reporter, ZoneHealth, every processor/stream) with one observable.
-    CHECK(win->camera_view_grid_reload_invocations() == reloads_before);
+    // ACTIVATION changes the OBSERVABLE, not the property. The grid DOES rebuild
+    // now (ball_leveler has a runtime), so an unchanged reload counter no longer
+    // proves anything. What still must hold is that the ball branch returns
+    // before ZoneHealth and the zone/brazing reporters are constructed — and
+    // those live in the same build path as DetectionProcessor, so an unchanged
+    // processor count is the observable that survives.
+    CHECK(DetectionProcessor::constructed_count() == procs_before);
 
     // Nothing re-enables reporting on its own; that is an explicit operator action.
     CHECK_FALSE(denso::brazing::load(h.handle()).enabled);
@@ -843,9 +850,12 @@ TEST_CASE("the confirmation states what is preserved and Cancel changes nothing"
     // The copy states what is PRESERVED, and promises no deletion of any kind.
     CHECK(clicker.body.contains(QStringLiteral("camera connections are kept")));
     CHECK(clicker.body.contains(QStringLiteral("Nothing is deleted")));
-    CHECK(clicker.body.contains(QStringLiteral("Processing stops")));
+    CHECK(clicker.body.contains(QStringLiteral("Processing pauses")));
     CHECK(clicker.body.contains(QStringLiteral("reporting will be turned off")));
-    CHECK(clicker.body.contains(QStringLiteral("not available in this release")));
+    // ACTIVATION: the destination is available, so the copy must NOT say
+    // otherwise. Asserted negatively here so the removed paragraph cannot
+    // reappear through this path either.
+    CHECK_FALSE(clicker.body.contains(QStringLiteral("not available in this release")));
     // MUTATION GUARD: the dialog must never again promise deletion or finality.
     CHECK_FALSE(clicker.body.contains(QStringLiteral("cannot be undone")));
     CHECK_FALSE(clicker.body.contains(QStringLiteral("will be deleted")));
@@ -887,10 +897,12 @@ TEST_CASE("confirming the dialog runs the full switch", "[mode_switch_flow]") {
     CHECK_FALSE(denso::camera::runtime(h.handle()).empty());  // nothing deleted
     CHECK_FALSE(denso::brazing::load(h.handle()).enabled);
     CHECK(denso::camera::all(h.handle()).size() == 1);  // camera KEPT, not deleted
-    CHECK(win->camera_view_page_index() == 2);
+    // ACTIVATION: the destination runs, so the operator lands on the live grid
+    // with the wizard reachable.
+    CHECK(win->camera_view_page_index() == 1);
     QPushButton* cam_btn = camera_button(*win);
     REQUIRE(cam_btn != nullptr);
-    CHECK_FALSE(cam_btn->isEnabled());
+    CHECK(cam_btn->isEnabled());
 }
 
 TEST_CASE("no stale delivered_ can suppress the next mode's first snapshot",

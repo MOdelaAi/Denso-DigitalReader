@@ -50,6 +50,19 @@ public:
     void show_refusal(const QString& reason_code);
 
     const denso::level::CalibrationDraft& draft() const { return draft_; }
+
+    /// Has the operator changed anything since load()?
+    ///
+    /// Compared against the snapshot taken at load, not against "a rectangle
+    /// exists": resuming a stored calibration and touching nothing must NOT
+    /// count as dirty, or every visit would warn on the way out.
+    bool is_dirty() const;
+
+    /// Ask before discarding unsaved edits, mirroring the Areas step. Returns
+    /// true when it is safe to leave (nothing unsaved, or the operator
+    /// confirmed). `action` names the button that triggered it, so the prompt
+    /// says what is about to happen.
+    bool confirm_discard(const QString& action);
     LevelCanvas* canvas() const { return canvas_; }
 
 signals:
@@ -68,6 +81,12 @@ private:
     QLabel* status_ = nullptr;
 
     denso::level::CalibrationDraft draft_;
+    // The calibration as LOADED, for the dirty check. Held as an optional so a
+    // fresh page (no stored configuration) is distinguishable from a resumed one
+    // - drawing the first rectangle on a fresh page IS a change worth warning
+    // about, while a resumed page that has not moved is not.
+    std::optional<denso::level::LevelCalibration> loaded_;
+    bool loaded_had_rect_ = false;
 };
 
 } // namespace denso::ui

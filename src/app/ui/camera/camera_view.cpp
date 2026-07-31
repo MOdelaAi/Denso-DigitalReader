@@ -178,24 +178,35 @@ CameraView::CameraView(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
 }
 
 void CameraView::reload() {
-    // Mode is a HARD admission gate — read it FIRST (spec §3.5, §12.14). A
-    // committed ball_leveler NEVER builds the digit-reader pipeline, regardless of
-    // any DB camera flags (even a hand-restored completed+active row).
+    // Mode is still a HARD admission gate, read FIRST: a committed ball_leveler
+    // never builds the digit-reader pipeline and vice versa. What CHANGED at
+    // activation is only the destination — ball_leveler now has a real runtime,
+    // so it gets the live grid instead of an "unavailable" page.
+    //
+    // CameraGrid::reload() branches on the same committed mode at the subsystem
+    // level, so the pipeline it builds is decided in ONE place; this function
+    // only decides which PAGE the operator sees.
+    const std::vector<camera::Camera> all = camera::all(db_);
     if (denso::mode::load(db_) == denso::mode::TargetMode::BallLeveler) {
-        // Tear the grid down via the ONE authoritative primitive (no reload(), so
-        // no CameraStream / processor / reporter / ZoneHealth is constructed and
-        // reload_invocations() does not advance), publish the idle status (real
-        // verdict + mode fields), and show the unavailable page.
-        grid_->teardown();
-        grid_->publish_idle_status();
-        populate_retained_page(/*ball_leveler*/ true);
-        stack_->setCurrentIndex(2);
+        // active(), matching CameraGrid's ball admission exactly: an enabled but
+        // uncalibrated camera IS shown, reporting Unconfigured on its tile, so
+        // the page must not send it to the empty state.
+        const int n_active = static_cast<int>(camera::active(db_).size());
+        grid_->reload();
+        if (n_active > 0) {
+            stack_->setCurrentIndex(1);   // live grid, Ball runtime
+        } else if (all.empty()) {
+            stack_->setCurrentIndex(0);   // "No cameras yet" + Add
+        } else {
+            // Cameras exist but every one is disabled — retained, not empty.
+            populate_retained_page(/*ball_leveler*/ true);
+            stack_->setCurrentIndex(2);
+        }
         return;
     }
 
     // digit_reader. Must match what CameraGrid will actually show: a database
     // holding only unfinished drafts has nothing live.
-    const std::vector<camera::Camera> all = camera::all(db_);
     const int n_runtime = static_cast<int>(camera::runtime(db_).size());
     grid_->reload();  // rebuild + start streams (clears to nothing when runtime is empty)
     if (n_runtime > 0) {
@@ -224,12 +235,13 @@ void CameraView::populate_retained_page(bool ball_leveler) {
                                 : QStringLiteral("%1 camera connections kept").arg(n);
 
     if (ball_leveler) {
-        // Unavailable state: read-only list, no action. The count header only
-        // appears when there is something to list.
-        retained_header_->setText(kept);
-        retained_header_->setVisible(n > 0);
+        // Ball Leveler with cameras retained but none ENABLED. Not an
+        // unavailability any more — the mode has a runtime; these cameras are
+        // simply switched off, and the action that fixes it is the same wizard.
+        retained_header_->setText(kept + QStringLiteral(" — no camera is enabled"));
+        retained_header_->setVisible(true);
         retained_message_->setText(QStringLiteral(
-            "Floating Ball Leveler setup is not available in this release."));
+            "Enable a camera and set its level calibration to start measuring."));
     } else {
         retained_header_->setText(kept + QStringLiteral(" — processing setup required"));
         retained_header_->setVisible(true);
@@ -244,8 +256,9 @@ void CameraView::populate_retained_page(bool ball_leveler) {
         retained_list_box_->addWidget(l);
     }
 
-    // The setup action re-enters the existing wizard; ball_leveler exposes none.
-    retained_setup_btn_->setVisible(!ball_leveler);
+    // The setup action re-enters the existing wizard. Offered in BOTH modes now:
+    // the Ball branch of that wizard is the way a level calibration is created.
+    retained_setup_btn_->setVisible(true);
 }
 
 void CameraView::release_streams() {
@@ -259,6 +272,17 @@ void CameraView::teardown_for_switch() {
     // the old-mode cameras before the switch commits (spec §6.2).
     grid_->teardown();
     stack_->setCurrentIndex(0);
+}
+
+void CameraView::set_engines(std::shared_ptr<EngineRegistry> engines,
+                             WarmupState* warmup) {
+    engines_ = engines;
+    warmup_ = warmup;
+    grid_->set_engines(std::move(engines), warmup);
+}
+
+void CameraView::settle_pending_after_warmup() {
+    grid_->settle_pending_after_warmup();
 }
 
 int CameraView::current_page_index() const { return stack_->currentIndex(); }

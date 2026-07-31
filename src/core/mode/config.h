@@ -22,10 +22,12 @@ TargetMode load(const QSqlDatabase& db);
 /// Upsert mode.target. Returns the SQL execution result (false on write error).
 bool save(const QSqlDatabase& db, TargetMode m);
 
-/// Does `mode` still need first-run setup? The one place the §2.1 "Leveler setup
-/// is unavailable" rule lives, so every status writer stays consistent.
-///  - ball_leveler → ALWAYS true this release (ships no Leveler setup, so it is
-///    never "configured"); independent of any camera state.
+/// Does `mode` still need first-run setup? The one place that rule lives, so
+/// every status writer stays consistent.
+///  - ball_leveler → true until at least one camera carries a Ball Leveler
+///    calibration whose geometry still VALIDATES. "A row exists" is not enough:
+///    a row can be hand-edited or restored from a backup. (The pre-activation
+///    "always true this release" hardcode is gone — the mode is configurable.)
 ///  - digit_reader → true if NO camera row has setup_complete = 1 (setup
 ///    required); false when at least one completed camera exists — even if it is
 ///    inactive (NOT runtime()-based: a configured-but-disabled fleet is not

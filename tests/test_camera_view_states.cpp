@@ -198,7 +198,7 @@ TEST_CASE("digit_reader with a retained setup-incomplete camera shows setup-requ
     CHECK_FALSE(view.grid_has_live_streams());
 }
 
-TEST_CASE("ball_leveler with a retained incomplete camera shows the unavailable page",
+TEST_CASE("ball_leveler with only a DISABLED camera shows the retained page",
           "[camera_view_states]") {
     Harness h;
     REQUIRE(denso::mode::save(h.handle(), TargetMode::BallLeveler));
@@ -207,49 +207,50 @@ TEST_CASE("ball_leveler with a retained incomplete camera shows the unavailable 
 
     const uint64_t streams_before = CameraStream::constructed_count();
     CameraView view = h.make_view();
-    const uint64_t reloads_before = view.grid_reload_invocations();
 
-    CHECK(view.current_page_index() == 2);              // unavailable page
-    CHECK(visible_label_contains(
-        view, QStringLiteral("Floating Ball Leveler setup is not available in this release")));
-    // Retained connection shown read-only; NO setup/add/wizard action.
+    // ACTIVATION: page 2 is no longer an "unavailable" state — the mode has a
+    // runtime. It now means what it means in digit_reader: cameras are retained
+    // but none can run. Here that is because the only camera is DISABLED, which
+    // is the one thing ball admission (camera::active) filters out.
+    CHECK(view.current_page_index() == 2);
+    CHECK_FALSE(visible_label_contains(
+        view, QStringLiteral("not available in this release")));
+    CHECK(visible_label_contains(view, QStringLiteral("no camera is enabled")));
     CHECK(visible_label_contains(view, QStringLiteral("Leveler Cam")));
-    CHECK_FALSE(visible_button(view, QStringLiteral("setupCamerasButton")));
+    // The wizard IS offered now — its Ball branch is how a calibration is made.
+    CHECK(visible_button(view, QStringLiteral("setupCamerasButton")));
     CHECK_FALSE(visible_button(view, QStringLiteral("addCameraButton")));
-    // No runtime pipeline was built.
-    CHECK(view.grid_reload_invocations() == reloads_before);
+    // Nothing streams: the camera is disabled, so there was nothing to admit.
     CHECK(CameraStream::constructed_count() == streams_before);
     CHECK_FALSE(view.grid_has_live_streams());
-    // status.json reports the mode with setup-required permanently true.
+    // Setup IS still required — no camera carries a valid Ball calibration.
     const QJsonObject o = read_status_json();
     CHECK(o.value(QStringLiteral("mode")).toString() == QStringLiteral("ball_leveler"));
     CHECK(o.value(QStringLiteral("mode_setup_required")).toBool() == true);
 }
 
-TEST_CASE("ball_leveler cannot start a completed active camera (out-of-flow DB)",
+TEST_CASE("ball_leveler shows an uncalibrated camera rather than hiding it",
           "[camera_view_states]") {
     Harness h;
     REQUIRE(denso::mode::save(h.handle(), TargetMode::BallLeveler));
-    // The DB says this camera is completed AND active — camera::runtime() alone
-    // would admit it. The mode gate must still refuse to start the digit grid.
+    // Completed and active, but carrying NO ball calibration — the ordinary
+    // state of a camera set up under digit_reader and then switched over.
     REQUIRE(denso::camera::insert(
-        h.handle(), model_less_ip_cam("Rogue Cam", /*active*/ true, /*setup*/ true)));
-    REQUIRE(denso::camera::runtime(h.handle()).size() == 1);
+        h.handle(), model_less_ip_cam("Uncalibrated Cam", /*active*/ true, /*setup*/ true)));
 
-    const uint64_t streams_before = CameraStream::constructed_count();
     CameraView view = h.make_view();
-    const uint64_t reloads_before = view.grid_reload_invocations();
 
-    // Re-run reload() and prove the grid build path is NEVER entered across it.
-    view.reload();
+    // It reaches the live grid, where its tile reports Unconfigured. Filtering
+    // it out would be worse than showing it: a camera silently missing from the
+    // wall is indistinguishable from one nobody added.
+    CHECK(view.current_page_index() == 1);
+    CHECK(view.grid_has_live_streams());
 
-    CHECK(view.current_page_index() == 2);              // unavailable page
-    CHECK(view.grid_reload_invocations() == reloads_before);       // no grid build
-    CHECK(CameraStream::constructed_count() == streams_before);    // no stream built
-    CHECK_FALSE(view.grid_has_live_streams());
-    CHECK_FALSE(visible_button(view, QStringLiteral("setupCamerasButton")));
-    CHECK_FALSE(visible_button(view, QStringLiteral("addCameraButton")));
-    // Despite a completed camera, setup-required stays true for ball_leveler.
+    // But it builds NO measuring pipeline and asks for NO engine — those are
+    // pinned in the ball_runtime suite, which can observe the processor counters
+    // and an injected engine factory directly.
+    //
+    // Setup is still required: an uncalibrated camera is not a configured one.
     const QJsonObject o = read_status_json();
     CHECK(o.value(QStringLiteral("mode")).toString() == QStringLiteral("ball_leveler"));
     CHECK(o.value(QStringLiteral("mode_setup_required")).toBool() == true);
@@ -274,7 +275,7 @@ TEST_CASE("retained list strips user-info from an IP field so no credential leak
     CHECK_FALSE(visible_label_contains(view, QStringLiteral("@")));       // no user-info marker
 }
 
-TEST_CASE("ball_leveler with zero cameras shows the unavailable page, never page 0",
+TEST_CASE("ball_leveler with zero cameras shows the ordinary empty state",
           "[camera_view_states]") {
     Harness h;
     REQUIRE(denso::mode::save(h.handle(), TargetMode::BallLeveler));
@@ -283,12 +284,13 @@ TEST_CASE("ball_leveler with zero cameras shows the unavailable page, never page
     const uint64_t streams_before = CameraStream::constructed_count();
     CameraView view = h.make_view();
 
-    CHECK(view.current_page_index() == 2);              // unavailable, NOT page 0
-    CHECK(visible_label_contains(
-        view, QStringLiteral("Floating Ball Leveler setup is not available in this release")));
-    CHECK_FALSE(visible_button(view, QStringLiteral("addCameraButton")));
-    CHECK_FALSE(visible_button(view, QStringLiteral("setupCamerasButton")));
-    CHECK(view.grid_reload_invocations() == 0);         // grid build path never entered
+    // ACTIVATION: with no camera at all, ball_leveler shows the SAME empty state
+    // digit_reader does. There is no longer an unavailability to announce, and
+    // "No cameras yet" is the accurate description plus the action that fixes it.
+    CHECK(view.current_page_index() == 0);
+    CHECK_FALSE(visible_label_contains(
+        view, QStringLiteral("not available in this release")));
+    CHECK(visible_button(view, QStringLiteral("addCameraButton")));
     CHECK(CameraStream::constructed_count() == streams_before);
     const QJsonObject o = read_status_json();
     CHECK(o.value(QStringLiteral("mode")).toString() == QStringLiteral("ball_leveler"));

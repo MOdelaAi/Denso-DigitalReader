@@ -36,6 +36,7 @@ add_library(denso_core STATIC
     level/edit.cpp
     level/measure.cpp
     level/repo.cpp
+    level/runtime.cpp
     mode/config.cpp
     mode/reset.cpp
     models/hashing.cpp

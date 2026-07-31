@@ -13,6 +13,7 @@
 #include "platform/platform_info.h"
 #include "ui/mainwindow.h"
 #include "ui/startup_mode.h"
+#include "ui/engine_session.h"
 #include "ui/startup_screen.h"
 #include "ui/warmup_state.h"
 #include "ui/warmup_worker.h"
@@ -90,6 +91,12 @@ int launch_cold_with_splash(QApplication& app, QSqlDatabase db,
                      });
 
     thread->start();
+    // Release THIS scope's reference. The worker and the finished handler each
+    // hold their own, and the window takes one when it is built - but a copy
+    // parked in a frame that lives across app.exec() would keep the boot registry
+    // (and its GPU engines) resident for the life of the process, defeating the
+    // release that a committed mode switch performs.
+    engines.reset();
     return app.exec();
 }
 
@@ -123,6 +130,10 @@ int launch_warm_ui_first(QApplication& app, QSqlDatabase db,
     });
 
     warmup.start();
+    // As above: WarmupState and MainWindow each hold their own reference, so this
+    // frame's copy would only serve to outlive the switch that is supposed to
+    // release the outgoing registry.
+    engines.reset();
     return app.exec();
 }
 
@@ -176,33 +187,18 @@ int launch(QApplication& app, QSqlDatabase db,
     const std::string models_dir = denso::paths::models_dir().toStdString();
     const std::string cache_dir = denso::paths::trt_cache_dir().toStdString();
 
-    // ── Release-B warm-up firewall (spec §7.0) ───────────────────────────────
-    // Build the compatibility allow-list and the mode-filtered fail-loud required
-    // set from the ONE central policy. A rejected model — wrong mode, undeclared,
-    // metadata/provenance fault — is excluded from BOTH, so it is never scanned,
+    // Release-B warm-up firewall (spec 7.0). The compatibility allow-list and the
+    // mode-filtered fail-loud required set come from the ONE central policy,
+    // through the ONE builder that a committed mode switch also uses
+    // (ui/engine_session.h). A rejected model - wrong mode, undeclared,
+    // metadata/provenance fault - is excluded from BOTH, so it is never scanned,
     // never get()-ed, never deserialized, and can never abort startup.
     //
-    // `mode`, `view` and `platform` were resolved ONCE above, for the readiness
-    // verdict, and are reused verbatim here: the set of models the appliance may
-    // LOAD and the set it reports as REJECTED are then two readings of the same
-    // facts, and cannot drift apart.
-
-    // Resolve every catalogued model for the active backend, then reduce to the
-    // filenames the policy allows in the committed mode — the ONLY set warm-up
-    // may load.
-    std::vector<denso::models::ModelMetadata> metadata;
-    for (const auto& row : detection::list_models(db))
-        metadata.push_back(denso::models::resolve_model_metadata(view, row, platform));
-    std::set<std::string> allow_list =
-        denso::models::loadable_model_files(mode, metadata);
-
-    // The models configured cameras actually need — MODE-FILTERED, so a rejected
-    // attachment is never in the fail-loud set (spec §7.0). warm_up fails loud
-    // only for an ALLOWED model that is missing or invalid.
-    std::vector<std::string> required =
-        detection::attached_model_filenames(db, mode, view, platform);
-    auto engines = std::make_shared<EngineRegistry>(
-        models_dir, cache_dir, std::move(allow_list), std::move(required));
+    // Boot and the switch therefore cannot derive different sets for the same
+    // mode: there is ONE construction site, not two that must be kept in step.
+    // There is never a union allow-list - each registry is built for exactly one
+    // mode and stays immutable and mode-pure for its whole life.
+    auto engines = build_engine_registry(db, mode);
 
     // Splash only when there's a minutes-long build to wait on (cold); otherwise
     // the fast UI-first load.

@@ -264,16 +264,18 @@ touching anything below. The rules, condensed:
   the engine **and** sidecar as a pair — a `float-*` stem may only be approved
   once the warm-up allow-list exists (machine-enforced by
   `assert_float_seeding_guarded`).
-- **Ball Leveler stays LOCKED TO THE OPERATOR.** The mode persists, the policy
-  authorizes Float models for it, the measurement core exists
-  (`src/core/level/`: calibration + validation, percentage mapping, ball
-  selection, the editing draft, the v14 write chokepoint) and the Camera Wizard
-  has a Ball branch (single-model step → `LevelCalibrationPage`). **None of it is
-  reachable in production.** All three guards stand, so no wizard,
-  `CameraStream`, `DetectionProcessor`, `ZoneHealth` or reporter is constructed
-  in `ball_leveler`, and the branch is exercised by tests only. No processor,
-  overlay or level-result runtime exists yet. Unlocking is Phase B of the
-  approved activation plan — not a side effect of any other change.
+- **Ball Leveler is ACTIVATED (Phase B).** All three production guards came
+  down together, once the whole runtime path was green: the mode is selectable,
+  the Camera Wizard's Ball branch is reachable, and a configured camera measures.
+  A camera gets a `BallLevelProcessor` only with a stored calibration that still
+  validates against the CURRENT view (`camera::view_revision`) and a bound model
+  the central policy authorizes for `BallLeveler`; anything less is an explicit
+  `Unconfigured` / `CalibrationInvalid` / `Unavailable` tile, never a silent one.
+  Mode purity is unchanged and still absolute — a `ball_leveler` grid builds NO
+  `ZoneHealth`, NO zone/brazing reporter and NO `DetectionProcessor`, reads no
+  `camera_area`, and asks only for its one Float engine. Still deliberately
+  absent (Lean V1): `HoldingLastValid`, the status-file `level` array, backend
+  level reporting, historical persistence.
 
 ## Hard rules
 
@@ -303,9 +305,13 @@ touching anything below. The rules, condensed:
   re-queries `runtime()` (still the *old* mode's rows) and restarts the pipeline,
   and never `release_streams()`, which joins only capture threads. The in-memory
   mode is assigned **only after the commit**; a rollback re-reads it from the DB
-  and rebuilds the old pipeline. `ball_leveler` is an **unavailable destination**
-  in this release — no Floating Ball algorithm exists, and no stream, processor,
-  reporter or wizard may be constructed for it.
+  and rebuilds the old pipeline. Both modes are now real destinations, so a
+  committed switch must also **replace the inference session** — `EngineRegistry`
+  is immutable and mode-pure for its whole life, so the boot registry can never
+  load the other mode's engines. Build the replacement through the ONE builder
+  (`ui/engine_session.h`), after the commit and after teardown, never a union
+  allow-list; retire the outgoing `WarmupState` as a consequence of the COMMIT
+  (its boot-wired `failed` means `app.exit(1)`, which is boot-only semantics).
 - **`192.168.1.81` is excluded from all automated/remote operation** — it is
   reserved for manual `.deb` testing. On-device validation is `192.168.1.15` only.
 - Packaging keeps **one** definition of each rule: `packaging/lib/policy.sh` is

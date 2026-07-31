@@ -8,6 +8,11 @@
 #include "camera/camera_stream.h"
 #include "ui/camera/grid/camera_tile.h"
 #include "camera/frame_processor.h"
+#include "camera/level_processor.h"
+#include "level/calibration.h"
+#include "level/repo.h"
+#include "camera/source_change.h"   // view_revision
+#include "models/compatibility.h"
 #include "ui/camera/grid/grid_layout.h"
 #include "brazing/zone_reporter.h"
 #include "detection/engine_registry.h"
@@ -160,6 +165,11 @@ void CameraGrid::clear() {
         delete s;
     }
     streams_.clear();
+    // Cleared with the streams, not after: every entry pointed INTO a stream we
+    // just deleted, so leaving them would be a map of dangling pointers for the
+    // duration of the rest of this function.
+    level_procs_.clear();
+    pending_ball_.clear();
     for (CameraTile* t : tiles_) {
         grid_->removeWidget(t);
         delete t;
@@ -261,6 +271,15 @@ void CameraGrid::reload() {
     // proves the grid never built a stream/processor/reporter/ZoneHealth.
     ++reload_invocations_;
     clear();
+
+    // SUBSYSTEM-level mode branch. Read the COMMITTED mode from the database -
+    // never a settings-page selector, which may hold an unapplied choice. Taken
+    // before any digit machinery exists, so a ball_leveler appliance constructs
+    // no ZoneHealth, no reporter and no DetectionProcessor at all.
+    if (denso::mode::load(db_) == denso::mode::TargetMode::BallLeveler) {
+        reload_ball();
+        return;
+    }
 
     // runtime(), not all(): an unfinished camera must never stream, and the
     // filter happens in SQL so it cannot eat one of the four tile slots below.
@@ -423,6 +442,256 @@ void CameraGrid::reload() {
     // warm), so there is no batch start here.
 }
 
+void CameraGrid::set_engines(std::shared_ptr<EngineRegistry> engines,
+                             WarmupState* warmup) {
+    if (!streams_.empty()) {
+        // A live inference worker holds a raw InferenceEngine* owned by the
+        // OUTGOING registry. Swapping underneath it would leave that pointer
+        // dangling the moment the old registry is released. The switch tears the
+        // grid down first, so reaching here means an ordering invariant broke -
+        // refuse loudly rather than corrupt a running pipeline.
+        qCritical().noquote()
+            << "[mode] refusing to replace the engine registry while"
+            << streams_.size() << "stream(s) are live; the grid must be torn"
+            << "down first";
+        return;
+    }
+    // Drop the OLD warm-up subscriptions before adopting the new coordinator, so
+    // a late model_ready from the previous mode cannot start a camera in this one.
+    if (warmup_) {
+        disconnect(warmup_, nullptr, this, nullptr);
+    }
+    engines_ = std::move(engines);
+    warmup_ = warmup;
+    // drain() is the existing remove-everything primitive; the returned ids are
+    // discarded because the OLD mode has no camera left to start.
+    (void)pending_.drain();
+    pending_cams_.clear();
+    pending_ball_.clear();
+    if (warmup_) {
+        connect(warmup_, &WarmupState::model_ready, this, &CameraGrid::on_model_ready);
+        connect(warmup_, &WarmupState::finished, this, &CameraGrid::on_warmup_finished);
+    }
+}
+
+void CameraGrid::reload_ball() {
+    // Judged against the SAME facts for every camera in this generation: the
+    // committed mode, the production manifest view and the measured platform.
+    refresh_compatibility_inputs();
+    verdict_ = health::evaluate_integrity(db_, denso::paths::models_dir(), mode_,
+                                          *view_, platform_);
+
+    // active(), not runtime(): setup_complete records that the DIGIT wizard
+    // finished. An enabled but uncalibrated camera must appear on the wall as an
+    // explicit Unconfigured state rather than be filtered out before it can be
+    // seen.
+    std::vector<camera::Camera> cams = camera::active(db_);
+    if (cams.size() > static_cast<size_t>(kMaxTiles)) {
+        cams.resize(kMaxTiles);   // first four by id
+    }
+    if (cams.empty()) {
+        publish_idle_status();
+        return;
+    }
+
+    const GridDims dims = grid_dims(static_cast<int>(cams.size()));
+    for (int i = 0; i < static_cast<int>(cams.size()); ++i) {
+        const camera::Camera& cam = cams[static_cast<size_t>(i)];
+        auto* tile = new CameraTile(QString::fromStdString(cam.name));
+        // No set_areas(): ball_leveler reads no camera_area. ROI polygons are a
+        // digit-reader concept and drawing them here would show geometry that
+        // governs nothing.
+        grid_->addWidget(tile, i / dims.cols, i % dims.cols);
+        tiles_.push_back(tile);
+        tiles_by_cam_[cam.id] = tile;
+        start_one_ball(cam, tile);
+    }
+    for (int r = 0; r < dims.rows; ++r) grid_->setRowStretch(r, 1);
+    for (int c = 0; c < dims.cols; ++c) grid_->setColumnStretch(c, 1);
+    rows_ = dims.rows;
+    cols_ = dims.cols;
+    relayout_letterbox();
+
+    // Ball Leveler has no zone runtime at all - no ZoneHealth, no reporter, no
+    // zones - so the zone-less document this writes IS its complete runtime
+    // status. Expanding status.json with level data is deliberately deferred
+    // (Lean V1), and CameraGrid remains its single runtime writer.
+    publish_idle_status();
+}
+
+void CameraGrid::start_one_ball(const camera::Camera& cam, CameraTile* tile) {
+    tile->set_preparing(false);
+
+    // A per-camera failure must never take a sibling down, so everything from
+    // here is confined by this handler.
+    const auto show_state = [this, &cam, tile](level::LevelState state) {
+        auto proc = std::make_unique<LevelStateProcessor>(
+            static_cast<int>(cam.rotation), cam.pitch, cam.roll, cam.id, state);
+        auto* stream = new CameraStream(cam, std::move(proc));
+        connect(stream, &CameraStream::frame_ready, tile, &CameraTile::set_frame);
+        connect(stream, &CameraStream::status_changed, tile, &CameraTile::set_status);
+        tile->set_frame_counter(stream->frame_counter());
+        streams_.push_back(stream);
+        stream->start();
+    };
+
+    // ── 1. The stored configuration. THREE outcomes, kept distinct ───────────
+    // A failed QUERY is an infrastructure fault; a camera with no row is an
+    // ordinary setup gap. Collapsing them would report a corrupt database as a
+    // routine "not set up yet".
+    const std::optional<std::optional<level::LevelConfig>> probe =
+        level::try_level_config_for(db_, cam.id);
+    if (!probe) {
+        qCritical().noquote()
+            << "[level] camera" << cam.id
+            << "- could not read the ball calibration; camera not measuring";
+        show_state(level::LevelState::Unavailable);
+        return;
+    }
+    if (!*probe) {
+        show_state(level::LevelState::Unconfigured);
+        return;
+    }
+    const level::LevelConfig cfg = **probe;
+
+    // ── 2. Does the calibration still describe THIS view? ────────────────────
+    // Geometry is in oriented-frame coordinates, so a change to rotation /
+    // pitch / roll / width / height / source makes it refer to a different
+    // physical view. Do not measure against it - and do not delete it either.
+    if (cfg.view_revision != camera::view_revision(cam)) {
+        qWarning().noquote()
+            << "[level] camera" << cam.id
+            << "- the camera view changed since calibration; measurement paused";
+        show_state(level::LevelState::CalibrationInvalid);
+        return;
+    }
+    if (!level::validate_calibration(cfg.calibration).ok) {
+        qWarning().noquote()
+            << "[level] camera" << cam.id << "- stored calibration is invalid ("
+            << QString::fromStdString(
+                   level::validate_calibration(cfg.calibration).reason_code)
+            << "); measurement paused";
+        show_state(level::LevelState::CalibrationInvalid);
+        return;
+    }
+
+    // ── 3. The bound model, through the ONE central policy ───────────────────
+    // Never a filename or family test of our own: this path asks
+    // models::model_compatibility for BallLeveler exactly as the write
+    // chokepoint did, so a model that could not be SAVED can never be LOADED.
+    std::string filename;
+    for (const auto& row : detection::list_models(db_)) {
+        if (row.id != cfg.model_id) continue;
+        const denso::models::ModelMetadata md =
+            denso::models::resolve_model_metadata(*view_, row, platform_);
+        const auto verdict = denso::models::model_compatibility(
+            denso::mode::TargetMode::BallLeveler, md);
+        if (!verdict.allowed()) {
+            qCritical().noquote()
+                << "[level] camera" << cam.id << "- bound model rejected by the"
+                << "compatibility policy ("
+                << QString::fromStdString(verdict.reason_code)
+                << "); camera not measuring";
+            break;   // filename stays empty -> Unavailable below
+        }
+        filename = md.filename;
+        break;
+    }
+    if (filename.empty()) {
+        show_state(level::LevelState::Unavailable);
+        return;
+    }
+
+    // ── 3b. Wait for the engine to warm ──────────────────────────────────────
+    // engines_->get() below DESERIALIZES the plan, and this runs on the GUI
+    // thread. Enrol in the same warm-up gate the digit path uses so the tile
+    // shows "Preparing model..." instead of the window freezing. is_complete()
+    // is the terminating condition: once warm-up is done we fall through and
+    // let get() report the truth (a failed model returns null -> Unavailable),
+    // so a model that never warms cannot park the tile forever.
+    if (warmup_ && !warmup_->is_ready(filename) && !warmup_->is_complete()) {
+        tile->set_preparing(true);
+        pending_ball_[cam.id] = PendingBall{cam, tile};
+        pending_.add(cam.id, {filename});
+        return;
+    }
+
+    // ── 3c. Warm-up finished WITHOUT this model ──────────────────────────────
+    // get() is not a sufficient readiness test. EngineRegistry::get() caches the
+    // engine it constructs BEFORE warm_up() runs the blank inference on it, so a
+    // model whose warm-up inference threw is still cached and non-null - and a
+    // second get() would hand it back and build a measuring pipeline on a plan
+    // that failed to warm. Warm-up completing without marking this model ready is
+    // the authoritative answer, so take it and never ask again.
+    if (warmup_ && warmup_->is_complete() && !warmup_->is_ready(filename)) {
+        qCritical().noquote()
+            << "[level] camera" << cam.id
+            << "- the level model did not warm up; camera not measuring";
+        show_state(level::LevelState::Unavailable);
+        return;
+    }
+
+    // ── 4. The engine ────────────────────────────────────────────────────────
+    // engines_->get() constructs the native TensorRT engine, whose ctor THROWS
+    // on a missing sidecar or an invalid plan. This runs on the GUI thread, so
+    // an escaping exception would cross the event loop and terminate the app.
+    // Fail loud but survivable: this camera reports Unavailable, its siblings
+    // keep running.
+    InferenceEngine* engine = nullptr;
+    try {
+        engine = engines_ ? engines_->get(filename) : nullptr;
+    } catch (const std::exception& e) {
+        qCritical().noquote() << "[level] camera" << cam.id
+                              << "- level model failed to load:" << e.what();
+        engine = nullptr;
+    }
+    if (!engine) {
+        show_state(level::LevelState::Unavailable);
+        return;
+    }
+
+    // ── 5. The measuring pipeline ────────────────────────────────────────────
+    // NO WorkerFailedFn. The inference cause belongs to the processor and to the
+    // worker that observes it: the processor raises and clears it under its own
+    // mutex, and ONLY a genuine inference success clears it.
+    //
+    // The grid used to marshal that callback back into set_unavailable(), which
+    // silently re-coupled the two causes it was split apart to separate - a
+    // queued "recovered" would land in the CAMERA slot and wipe a live
+    // camera_offline. Ball Leveler has no ZoneHealth and no reporter, so nothing
+    // on the GUI side consumed the notification anyway; there is no second
+    // writer of this state.
+    auto proc = std::make_unique<BallLevelProcessor>(
+        static_cast<int>(cam.rotation), cam.pitch, cam.roll, engine,
+        cfg.class_id, cfg.calibration, cam.id);
+    BallLevelProcessor* proc_raw = proc.get();
+
+    auto* stream = new CameraStream(cam, std::move(proc));
+    connect(stream, &CameraStream::frame_ready, tile, &CameraTile::set_frame);
+    connect(stream, &CameraStream::status_changed, tile, &CameraTile::set_status);
+    // Camera-offline CLEARS the live value rather than leaving the last reading
+    // on screen. Receiver is this grid (GUI thread), so the AutoConnection is
+    // queued from the capture thread; the processor's own mutex makes the write
+    // safe against the capture thread that reads it while drawing.
+    connect(stream, &CameraStream::status_changed, this,
+            [this, id = cam.id, gen = generation_](int st) {
+                if (!camera::callback_is_current(gen, generation_)) return;
+                const auto it = level_procs_.find(id);
+                if (it == level_procs_.end()) return;
+                const bool offline =
+                    st == static_cast<int>(CameraStream::Status::Offline);
+                it->second->set_unavailable(
+                    offline ? std::optional<std::string>(level::kReasonCameraOffline)
+                            : std::nullopt);
+            });
+    tile->set_frame_counter(stream->frame_counter());
+    // Recorded only once the stream that OWNS the processor is in streams_, so
+    // clear() can never leave this map holding a pointer into a deleted stream.
+    streams_.push_back(stream);
+    level_procs_[cam.id] = proc_raw;
+    stream->start();
+}
+
 void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile,
                            const detection::CameraDetection& det) {
     // ROI quarantine: after a view-significant source/geometry edit the camera's
@@ -488,6 +757,40 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile,
         proc = std::make_unique<OrientationProcessor>(
             static_cast<int>(cam.rotation), cam.pitch, cam.roll, zone_view);
     } else {
+        // Warm-up finished WITHOUT one of this camera's models — the digit
+        // analogue of start_one_ball()'s step 3c, and reachable for the same
+        // reason: settle_pending_after_warmup() drains BOTH build paths, so a
+        // terminal warm-up FAILURE now reaches this one too.
+        //
+        // get() is not a readiness test. EngineRegistry caches the engine it
+        // constructs BEFORE warm_up() runs the blank inference on it, so a plan
+        // whose warm-up inference threw is still cached and still non-null.
+        // Falling through would either build a DetectionProcessor on a plan that
+        // never warmed, or — if the load returned null — quietly demote the
+        // camera to orientation-only, which is exactly the silent hiding of a
+        // missing detection this function refuses to do below.
+        if (warmup_ && warmup_->is_complete()) {
+            for (const detection::ResolvedModel& rm : det.models) {
+                if (warmup_->is_ready(rm.filename)) {
+                    continue;
+                }
+                qCritical().noquote()
+                    << "[camera] camera" << cam.id << "— detection model"
+                    << QString::fromStdString(rm.filename)
+                    << "did not warm up, camera not started";
+                // The documented cause for a rejected/unusable ATTACHED model.
+                // Inhibits this camera's reporting only; siblings keep running.
+                if (health_) {
+                    health_->set_cause(cam.id, health::ZoneCause::ModelUnavailable,
+                                       true);
+                    refresh_tile_inhibit(cam.id);
+                }
+                tile->set_preparing(false);
+                tile->set_status(static_cast<int>(CameraStream::Status::Offline));
+                return;
+            }
+        }
+
         // Engine-construction firewall. engines_->get() builds the native TensorRT
         // engine on Linux, whose ctor THROWS on a missing/bad <engine>.names.json
         // sidecar or an invalid engine. start_one() runs on the GUI thread — often
@@ -566,10 +869,27 @@ void CameraGrid::on_model_ready(const QString& filename) {
     const std::vector<int64_t> ids = pending_.ready(filename.toStdString());
     for (int64_t id : ids) {
         auto it = pending_cams_.find(id);
-        if (it == pending_cams_.end()) continue;
-        start_one(it->second.cam, it->second.tile, it->second.det);
-        pending_cams_.erase(it);
+        if (it != pending_cams_.end()) {
+            start_one(it->second.cam, it->second.tile, it->second.det);
+            pending_cams_.erase(it);
+            continue;
+        }
+        // A ball_leveler camera waiting on its Float engine. One gate, two build
+        // paths - never two coordinators.
+        auto bt = pending_ball_.find(id);
+        if (bt != pending_ball_.end()) {
+            const PendingBall pb = bt->second;
+            pending_ball_.erase(bt);   // erase BEFORE the rebuild, so a re-enrol
+            start_one_ball(pb.cam, pb.tile);   // cannot be wiped by this erase
+        }
     }
+}
+
+void CameraGrid::settle_pending_after_warmup() {
+    // Same drain as a normal completion: is_complete() is true for a FAILED
+    // warm-up too, so each rebuilt camera falls through the gate and reports the
+    // truth rather than re-enrolling and waiting forever.
+    on_warmup_finished();
 }
 
 void CameraGrid::on_warmup_finished() {
@@ -577,9 +897,19 @@ void CameraGrid::on_warmup_finished() {
     // resolved (start_one falls back to OrientationProcessor when no model loads).
     for (int64_t id : pending_.drain()) {
         auto it = pending_cams_.find(id);
-        if (it == pending_cams_.end()) continue;
-        start_one(it->second.cam, it->second.tile, it->second.det);
-        pending_cams_.erase(it);
+        if (it != pending_cams_.end()) {
+            start_one(it->second.cam, it->second.tile, it->second.det);
+            pending_cams_.erase(it);
+            continue;
+        }
+        auto bt = pending_ball_.find(id);
+        if (bt != pending_ball_.end()) {
+            const PendingBall pb = bt->second;
+            pending_ball_.erase(bt);
+            // warm-up is complete now, so start_one_ball falls through the gate
+            // and get() reports the truth for a model that never loaded.
+            start_one_ball(pb.cam, pb.tile);
+        }
     }
 }
 

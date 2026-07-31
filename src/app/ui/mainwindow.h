@@ -135,6 +135,25 @@ private:
 
     QSqlDatabase db_;
     std::shared_ptr<settings::Settings> state_;
+    // The inference session currently in effect. An EngineRegistry is immutable
+    // and mode-pure for its life, so a committed mode switch REPLACES both of
+    // these rather than widening the allow-list (spec 3.1 / 9).
+    //
+    // owned_warmup_ holds only the coordinators THIS window created. The boot
+    // one is owned by ui::launch and must not be destroyed here; after a switch
+    // we simply stop pointing at it.
+    std::shared_ptr<EngineRegistry> engines_;
+    std::unique_ptr<WarmupState> owned_warmup_;
+    // Coordinators retired by an earlier switch whose warm-up thread has not
+    // drained yet. ~WarmupState joins that thread, so destroying one inline would
+    // block the GUI for an uncancellable deserialize - a second switch during
+    // warm-up would freeze the window. They are inert (retire() severed every
+    // connection and released the registry), so parking them costs nothing;
+    // prune_retired_warmups() reclaims each once its thread has finished.
+    std::vector<std::unique_ptr<WarmupState>> retired_warmups_;
+    void prune_retired_warmups();
+    /// Attach a fail-closed session when the destination one cannot be built.
+    void fail_closed_session();
     SettingsDialog* settings_ = nullptr;
     CameraDialog* camera_ = nullptr;
     CameraView* camera_view_ = nullptr;

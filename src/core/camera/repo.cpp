@@ -188,6 +188,22 @@ std::vector<Camera> runtime(const QSqlDatabase& db) {
     return out;
 }
 
+std::vector<Camera> active(const QSqlDatabase& db) {
+    std::vector<Camera> out;
+    QSqlQuery q(db);
+    // Filtered in SQL for the same reason runtime() is: the grid truncates to the
+    // first four by id, so a disabled camera must be gone BEFORE that cut or it
+    // would occupy a tile slot and hide a live one behind it.
+    if (!q.exec(QStringLiteral("SELECT %1 FROM camera WHERE active = 1 ORDER BY id")
+                    .arg(COLUMNS))) {
+        return out;
+    }
+    while (q.next()) {
+        out.push_back(from_row(q));
+    }
+    return out;
+}
+
 bool mark_setup_complete(const QSqlDatabase& db, int64_t id) {
     QSqlQuery q(db);
     q.prepare(QStringLiteral("UPDATE camera SET setup_complete = 1 WHERE id = ?"));

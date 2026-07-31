@@ -43,6 +43,14 @@ public:
     /// the reset commits (spec §6.2). The rebuild happens later, after the switch.
     void teardown_for_switch();
 
+    /// Adopt a NEW inference session after a committed mode switch. Forwards to
+    /// CameraGrid, which refuses while anything is still streaming - see
+    /// CameraGrid::set_engines.
+    void set_engines(std::shared_ptr<EngineRegistry> engines, WarmupState* warmup);
+
+    /// Forwards to CameraGrid::settle_pending_after_warmup() - see there.
+    void settle_pending_after_warmup();
+
     // Test-only observers of the view's non-live state after teardown_for_switch().
     int current_page_index() const;      ///< 0 = empty, 1 = live grid, 2 = retained/unavailable
     bool grid_has_live_streams() const;  ///< whether the grid still holds a stream

@@ -987,7 +987,7 @@ TEST_CASE("the digit_reader wizard still goes to the Areas step",
 // reach any of this, and that must be asserted rather than assumed — the whole
 // point of building behind a guard is that the guard is what is shipping.
 // ═════════════════════════════════════════════════════════════════════════════
-TEST_CASE("ball_leveler still exposes no camera wizard and no calibration page",
+TEST_CASE("ball_leveler reaches the camera wizard after activation",
           "[ball_wizard][ui][guard]") {
     Harness h;
     REQUIRE(denso::mode::save(h.h(), TargetMode::BallLeveler));
@@ -1004,33 +1004,42 @@ TEST_CASE("ball_leveler still exposes no camera wizard and no calibration page",
     auto state = std::make_shared<denso::settings::Settings>();
     denso::ui::MainWindow window(h.h(), state, engines, warmup.get());
 
-    // Guard 3 — the top-bar Camera button is disabled in this mode.
+    // ACTIVATION — the top-bar Camera button is live in this mode.
     const auto buttons =
         window.findChildren<QPushButton*>(QStringLiteral("cameraButton"));
     REQUIRE(buttons.size() == 1);
-    CHECK_FALSE(buttons.at(0)->isEnabled());
+    CHECK(buttons.at(0)->isEnabled());
 
-    // …and it is an INVARIANT, not just an affordance: the slot itself refuses.
+    // The dialog is created once and REUSED, so two calls must not build two.
     window.open_camera();
     window.open_camera();
+    REQUIRE(window.findChildren<denso::ui::CameraDialog*>().size() == 1);
 
-    CHECK(window.findChildren<denso::ui::CameraDialog*>().isEmpty());
-    CHECK(window.findChildren<ModelsPage*>().isEmpty());
-    CHECK(window.findChildren<LevelCalibrationPage*>().isEmpty());
-    CHECK(window.findChildren<LevelCanvas*>().isEmpty());
+    // The Ball branch of the wizard really is hosted: both pages exist, so the
+    // operator can bind a model and draw a calibration.
+    CHECK(window.findChildren<ModelsPage*>().size() == 1);
+    CHECK(window.findChildren<LevelCalibrationPage*>().size() == 1);
+    CHECK(window.findChildren<LevelCanvas*>().size() == 1);
 
-    // No pipeline of any kind was built for the new mode.
-    CHECK(denso::ui::CameraStream::constructed_count() == streams_before);
+    // Mode purity survives activation: no DIGIT detection pipeline was built.
+    // (streams_before is unused now — the wizard releases streams rather than
+    // building them, and the ball runtime's own stream accounting is asserted in
+    // the ball_runtime suite against an injected engine factory.)
+    (void)streams_before;
     CHECK(denso::ui::DetectionProcessor::constructed_count() == procs_before);
 }
 
-TEST_CASE("the mode-confirm copy still calls Ball Leveler unavailable",
+TEST_CASE("the mode-confirm copy no longer calls Ball Leveler unavailable",
           "[ball_wizard][ui][guard]") {
-    // Guard 1 lives in the pure confirm-copy builder. Phase A must not soften it:
-    // a wizard that exists but cannot be reached is only safe while the operator
-    // is still told the destination is not available.
+    // Guard 1 lived in the pure confirm-copy builder and came down WITH the other
+    // guards, not before them. Its sentence existed to warn that the destination
+    // had no runtime; the destination now has one, so the sentence would be a
+    // falsehood shown to the operator at the moment of commitment.
     const QString body = denso::ui::mode_confirm_body(TargetMode::BallLeveler);
-    CHECK(body.contains(QStringLiteral("not available in this release")));
+    CHECK_FALSE(body.contains(QStringLiteral("not available in this release")));
+    // The rest of the copy is unchanged and still load-bearing.
+    CHECK(body.contains(QStringLiteral("Nothing is deleted")));
+    CHECK_FALSE(body.contains(QStringLiteral("cannot be undone")));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

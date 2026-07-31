@@ -59,18 +59,18 @@ TEST_CASE("the confirmation states BOTH modes' configuration is preserved",
 
 TEST_CASE("the confirmation discloses the processing pause honestly per target",
           "[mode_confirm]") {
-    // digit_reader genuinely resumes, so it may say so.
+    // Both modes now have a real runtime, so both genuinely resume once the
+    // destination's models are loaded — and the copy may say so for either.
+    // Before activation only digit_reader could make that promise.
     const QString to_digit = denso::ui::mode_confirm_body(TargetMode::DigitReader);
     CHECK(to_digit.contains(QStringLiteral("Processing pauses")));
     CHECK(to_digit.contains(QStringLiteral("starts again on its own")));
+    CHECK(to_digit.contains(QStringLiteral("Digital Number Reader is prepared")));
 
-    // ball_leveler does NOT resume in this release - it lands on the guarded
-    // "not available" page. Promising automatic resumption there would be a
-    // straight falsehood, so the copy must only claim the stop.
     const QString to_ball = denso::ui::mode_confirm_body(TargetMode::BallLeveler);
-    CHECK(to_ball.contains(QStringLiteral("Processing stops")));
+    CHECK(to_ball.contains(QStringLiteral("Processing pauses")));
+    CHECK(to_ball.contains(QStringLiteral("starts again on its own")));
     CHECK(to_ball.contains(QStringLiteral("Floating Ball Leveler is prepared")));
-    CHECK_FALSE(to_ball.contains(QStringLiteral("starts again on its own")));
 }
 
 TEST_CASE("the confirmation states reporting is disabled and the address kept",
@@ -81,12 +81,16 @@ TEST_CASE("the confirmation states reporting is disabled and the address kept",
     CHECK(body.contains(QStringLiteral("re-enable reporting yourself")));
 }
 
-TEST_CASE("Ball Leveler unavailability appears ONLY for the Ball Leveler target",
+TEST_CASE("the confirmation no longer calls any mode unavailable",
           "[mode_confirm]") {
-    // GUARD (Slice 1): the wizard is still not operator-accessible, and the copy
-    // must say so before the operator commits — but only when that is the target.
-    CHECK(denso::ui::mode_confirm_body(TargetMode::BallLeveler)
-              .contains(QStringLiteral("not available in this release")));
+    // ACTIVATION. The Slice-1 guard paragraph is gone, and it must not creep
+    // back: it warned that the destination had no runtime, and both modes now
+    // have one. A stray reintroduction would tell an operator the feature they
+    // are about to use does not exist.
+    //
+    // Asserted for BOTH targets, so the sentence cannot return for either.
+    CHECK_FALSE(denso::ui::mode_confirm_body(TargetMode::BallLeveler)
+                    .contains(QStringLiteral("not available in this release")));
     CHECK_FALSE(denso::ui::mode_confirm_body(TargetMode::DigitReader)
                     .contains(QStringLiteral("not available in this release")));
 }

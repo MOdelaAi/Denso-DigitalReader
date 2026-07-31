@@ -90,7 +90,7 @@ private:
     void open_configure(const QString& preview_text);  // seed Configure from draft_
     void enter_models();           // load catalog + attachments → Models page
     void enter_areas(bool direct); // load areas + frame → Areas page
-    void enter_level();            // load calibration + frame → Level page
+    void enter_level(bool direct = false);            // load calibration + frame → Level page
     /// True when the COMMITTED mode is the ball leveler, i.e. step 4 is level
     /// calibration and the binding belongs to the level repository.
     bool ball_mode() const;
@@ -131,6 +131,7 @@ private:
     // predicate rather than re-deriving aspect comparison here.
     camera::Camera captured_;
     bool entered_areas_directly_ = false;  // true: per-row Areas (Back → list)
+    bool entered_level_directly_ = false;  // true: per-row Level (Back -> list)
 
     // The model binding chosen at step 3, held in memory until the calibration is
     // saved. Deliberately NOT written when it is chosen: the Ball chokepoint takes

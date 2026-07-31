@@ -655,31 +655,41 @@ cp "$M/models.approved" "$ORD/appr"
 printf 'float-small %s %s trtexec\n' "$EH" "$SH" >> "$ORD/appr"
 assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
 rc_is "slice5: ordering assertion FAILS on a Float approval without the symbol" $? 1
-# (27) a mere COMMENT mentioning the symbol does NOT satisfy it
-printf '// loadable_model_files goes here in Slice 7\nint x(){return 0;}\n' > "$ORD/root/src/core/models/compatibility.cpp"
-printf 'void s(){/* loadable_model_files */}\n' > "$ORD/root/src/app/ui/startup.cpp"
+# (27) a mere COMMENT mentioning the symbols does NOT satisfy it
+printf '// loadable_model_files goes here\nint x(){return 0;}\n' > "$ORD/root/src/core/models/compatibility.cpp"
+printf 'void s(){/* loadable_model_files */}\n' > "$ORD/root/src/app/ui/engine_session.cpp"
+printf 'void s(){/* build_engine_registry */}\n' > "$ORD/root/src/app/ui/startup.cpp"
 assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
 rc_is "slice5: a comment mentioning loadable_model_files does NOT satisfy the assertion" $? 1
 # a bare DECLARATION also does not satisfy it
 printf 'std::vector<std::string> loadable_model_files(TargetMode m);\n' > "$ORD/root/src/core/models/compatibility.cpp"
 assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
 rc_is "slice5: a bare declaration does NOT satisfy the ordering assertion" $? 1
-# a real DEFINITION + a real USE -> passes (proves it is self-releasing for Slice 7/12)
+# a real DEFINITION + a real USE in the builder + a real CALL to the builder from
+# the boot path -> passes. All three links are required, so the assertion follows
+# the chain the appliance actually executes.
 cat > "$ORD/root/src/core/models/compatibility.cpp" <<'EOF'
 std::vector<std::string> loadable_model_files(const std::vector<DetectionModel>& m,
                                               TargetMode mode, const ManifestView& v) {
     return {};
 }
 EOF
-printf 'void launch(){ auto a = loadable_model_files(m,mode,v); (void)a; }\n' > "$ORD/root/src/app/ui/startup.cpp"
+printf 'void build_engine_registry(){ auto a = loadable_model_files(m,mode,v); (void)a; }\n' > "$ORD/root/src/app/ui/engine_session.cpp"
+printf 'void launch(){ auto e = build_engine_registry(db,mode); (void)e; }\n' > "$ORD/root/src/app/ui/startup.cpp"
 assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
 rc_is "slice5: a real definition+use satisfies the ordering assertion" $? 0
-# the USE must be a genuine call — a declaration, an uncalled dummy definition,
-# or a #if-0'd call in startup.cpp must NOT satisfy it (compatibility.cpp keeps
-# its real definition throughout).
-printf 'std::vector<std::string> loadable_model_files(TargetMode m);\n' > "$ORD/root/src/app/ui/startup.cpp"
+# the USE must be a genuine call — a declaration or a #if-0'd call in the builder
+# must NOT satisfy it (compatibility.cpp keeps its real definition throughout).
+printf 'std::vector<std::string> loadable_model_files(TargetMode m);\n' > "$ORD/root/src/app/ui/engine_session.cpp"
 assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
-rc_is "slice5: a mere declaration in startup.cpp does NOT satisfy 'use'" $? 1
+rc_is "slice5: a mere declaration in engine_session.cpp does NOT satisfy 'use'" $? 1
+# ...and the LAST link is load-bearing too: a builder that really uses the
+# allow-list still fails the gate if nothing on the boot path ever calls it.
+# Without this case the chain could be silently reduced to an orphan function.
+printf 'void build_engine_registry(){ auto a = loadable_model_files(m,mode,v); (void)a; }\n' > "$ORD/root/src/app/ui/engine_session.cpp"
+printf 'void launch(){ /* build_engine_registry is never called */ }\n' > "$ORD/root/src/app/ui/startup.cpp"
+assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
+rc_is "slice5: an uncalled builder does NOT satisfy the ordering assertion" $? 1
 printf 'std::vector<std::string> loadable_model_files(int a){ return {}; }\n' > "$ORD/root/src/app/ui/startup.cpp"
 assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
 rc_is "slice5: an uncalled dummy definition in startup.cpp does NOT satisfy 'use'" $? 1
@@ -699,12 +709,19 @@ rc_is "slice5: no Float approved -> ordering assertion passes" $? 0
 # is called from startup. Both halves are pinned — that the approvals exist, and
 # that they would be REFUSED against a tree without the symbol.
 
-# First, the call shape the REAL startup.cpp uses: namespace-qualified, on the
+# startup.cpp holds a genuine builder call for the whole block, so each case
+# below isolates ONE variable: how a `loadable_model_files` use is recognised in
+# engine_session.cpp. Without this pin, a shape failing for the wrong reason (the
+# missing third link) would look like a detection bug.
+printf 'void launch(){ auto e = build_engine_registry(db,mode); (void)e; }\n' \
+    > "$ORD/root/src/app/ui/startup.cpp"
+
+# First, the call shape the REAL engine_session.cpp uses: namespace-qualified, on the
 # continuation line of a wrapped assignment. At a line start that reads exactly
 # like `<type tokens> symbol(args);` — the declaration shape — and it is a CALL.
 # This is the case that made the gate refuse the real tree the first time a Float
 # stem was approved, so it is pinned here in both directions.
-cat > "$ORD/root/src/app/ui/startup.cpp" <<'EOF'
+cat > "$ORD/root/src/app/ui/engine_session.cpp" <<'EOF'
 void launch() {
     std::set<std::string> allow_list =
         denso::models::loadable_model_files(mode, metadata);
@@ -716,7 +733,7 @@ rc_is "slice12: a namespace-qualified call on a wrapped line satisfies 'use'" $?
 # ...and the declaration rule is NOT weakened by that: a declarator name is
 # preceded by whitespace, never by '::', so a wrapped bare declaration is still
 # stripped and still fails.
-cat > "$ORD/root/src/app/ui/startup.cpp" <<'EOF'
+cat > "$ORD/root/src/app/ui/engine_session.cpp" <<'EOF'
 void launch() { }
 std::set<std::string>
     loadable_model_files(denso::models::TargetMode m);
@@ -726,7 +743,7 @@ rc_is "slice12: a wrapped bare DECLARATION still does NOT satisfy 'use'" $? 1
 # The one DECLARATION whose declarator-id is legitimately qualified. Admitting it
 # as a call is the dangerous direction — it would authorise shipping a Float
 # engine on the strength of a declaration that calls nothing.
-cat > "$ORD/root/src/app/ui/startup.cpp" <<'EOF'
+cat > "$ORD/root/src/app/ui/engine_session.cpp" <<'EOF'
 class C {
     friend void denso::models::loadable_model_files(TargetMode);
 };
@@ -740,11 +757,11 @@ rc_is "slice12: a QUALIFIED friend declaration does NOT satisfy 'use'" $? 1
 # keyword exclusion. The qualified form is covered by `(?<!:)` either way, so it
 # is general coverage of the return shape, not proof of the exclusion.
 printf 'std::set<std::string> launch(){ return denso::models::loadable_model_files(m,v); }\n' \
-    > "$ORD/root/src/app/ui/startup.cpp"
+    > "$ORD/root/src/app/ui/engine_session.cpp"
 assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
 rc_is "slice12: a qualified call in a return statement satisfies 'use'" $? 0
 printf 'std::set<std::string> launch(){ return loadable_model_files(m,v); }\n' \
-    > "$ORD/root/src/app/ui/startup.cpp"
+    > "$ORD/root/src/app/ui/engine_session.cpp"
 assert_float_seeding_guarded "$ORD/appr" "$ORD/root" >/dev/null 2>&1
 rc_is "slice12: a bare call in a return statement satisfies 'use'" $? 0
 

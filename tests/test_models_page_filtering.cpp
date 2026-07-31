@@ -650,7 +650,7 @@ TEST_CASE("ModelsPage source contains no model or mode token",
 // BALL LEVELER STAYS LOCKED. The repository answers for ball_leveler — that is
 // the seam this slice ships — but the production UI must expose no wizard.
 // ═════════════════════════════════════════════════════════════════════════════
-TEST_CASE("ball_leveler exposes no camera wizard even though the seam answers",
+TEST_CASE("ball_leveler offers exactly the Float models the seam answers",
           "[selectable_models][ui]") {
     Harness h;
     REQUIRE(denso::mode::save(h.h(), TargetMode::BallLeveler));
@@ -664,29 +664,27 @@ TEST_CASE("ball_leveler exposes no camera wizard even though the seam answers",
     CHECK(seam.at(0).metadata.canonical_id == "float-small");
     CHECK(seam.at(1).metadata.canonical_id == "float-big");
 
-    // (2) The PRODUCTION UI exposes none of it.
-    const uint64_t streams_before = CameraStream::constructed_count();
+    // (2) ACTIVATION: the PRODUCTION UI now reaches that seam, and reaching it is
+    // the point — the wizard is how an operator binds one of those Float models.
     const uint64_t procs_before = DetectionProcessor::constructed_count();
 
     auto state = std::make_shared<denso::settings::Settings>();
     MainWindow window(h.h(), state, h.engines, h.warmup.get());
 
-    // Top-bar Camera button is disabled.
+    // Top-bar Camera button is live in ball_leveler.
     const auto buttons = window.findChildren<QPushButton*>(QStringLiteral("cameraButton"));
     REQUIRE(buttons.size() == 1);
-    CHECK_FALSE(buttons.at(0)->isEnabled());
+    CHECK(buttons.at(0)->isEnabled());
 
-    // The gate is an INVARIANT, not just an affordance: calling the slot directly
-    // must still refuse (a disabled button is only the UI half of the rule).
+    // Called twice on purpose: the dialog is created once and REUSED, so a second
+    // call must not build a second one.
     window.open_camera();
     window.open_camera();
+    CHECK(window.findChildren<CameraDialog*>().size() == 1);
 
-    // No dialog, and therefore no ModelsPage, was ever constructed.
-    CHECK(window.findChildren<CameraDialog*>().isEmpty());
-    CHECK(window.findChildren<ModelsPage*>().isEmpty());
-
-    // No pipeline of any kind was built.
-    CHECK(CameraStream::constructed_count() == streams_before);
+    // What has NOT changed is mode purity: opening the ball wizard builds no
+    // digit detection pipeline. Authorization still comes from the one central
+    // policy — this case's part (1) is what pins WHICH models it may offer.
     CHECK(DetectionProcessor::constructed_count() == procs_before);
 }
 

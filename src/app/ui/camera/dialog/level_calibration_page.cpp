@@ -128,7 +128,14 @@ LevelCalibrationPage::LevelCalibrationPage(QWidget* parent) : QWidget(parent) {
     footer->addStretch(1);
     footer->addWidget(save_btn_);
     root->addLayout(footer);
-    connect(back, &QPushButton::clicked, this, &LevelCalibrationPage::back_requested);
+    connect(back, &QPushButton::clicked, this, [this] {
+        // Same safety the Areas step has: leaving with unsaved geometry must ask
+        // first. Without it a mis-tapped Back silently discards a calibration the
+        // operator has just spent time placing.
+        if (confirm_discard(QStringLiteral("Go back"))) {
+            emit back_requested();
+        }
+    });
     connect(save_btn_, &QPushButton::clicked, this,
             [this] { attempt_save(); });
 
@@ -169,6 +176,10 @@ void LevelCalibrationPage::load(
         canvas_->begin_draw();
     }
     sync();
+    // Snapshot for the dirty check, taken AFTER the draft is seeded so it is
+    // exactly what the operator was shown.
+    loaded_ = saved;
+    loaded_had_rect_ = draft_.has_rect();
 }
 
 void LevelCalibrationPage::set_background(const QImage& oriented) {
@@ -232,6 +243,37 @@ void LevelCalibrationPage::show_refusal(const QString& reason_code) {
         QStringLiteral("This calibration was refused and nothing was changed.\n\n"
                        "Reason: %1")
             .arg(reason_code));
+}
+
+bool LevelCalibrationPage::is_dirty() const {
+    if (!draft_.has_rect()) {
+        return false;   // nothing drawn, nothing to lose
+    }
+    if (!loaded_ || !loaded_had_rect_) {
+        return true;    // a rectangle exists that did not exist at load
+    }
+    // Field-by-field against the snapshot. Exact comparison is right here: the
+    // draft holds the stored doubles VERBATIM (from_calibration assigns whole,
+    // precisely so opening the page cannot nudge them), so an untouched resume
+    // compares equal bit for bit.
+    const denso::level::LevelCalibration& c = draft_.draft();
+    const denso::level::LevelCalibration& l = *loaded_;
+    return c.rect_x != l.rect_x || c.rect_y != l.rect_y || c.rect_w != l.rect_w ||
+           c.rect_h != l.rect_h || c.y_100 != l.y_100 || c.y_0 != l.y_0 ||
+           c.conf != l.conf || c.hold_ms != l.hold_ms;
+}
+
+bool LevelCalibrationPage::confirm_discard(const QString& action) {
+    if (!is_dirty()) {
+        return true;
+    }
+    return QMessageBox::question(
+               this, QStringLiteral("Discard changes?"),
+               QStringLiteral("%1 without saving? The level calibration changes "
+                              "on this page will be lost.")
+                   .arg(action),
+               QMessageBox::Discard | QMessageBox::Cancel,
+               QMessageBox::Cancel) == QMessageBox::Discard;
 }
 
 } // namespace denso::ui

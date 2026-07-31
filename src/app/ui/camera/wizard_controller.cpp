@@ -405,7 +405,7 @@ void CameraWizardController::save_models() {
         }
         ball_binding_ = denso::level::LevelBinding{
             sel.front().model_id, {sel.front().classes.front().class_id}};
-        enter_level();
+        enter_level(/*direct=*/false);
         return;
     }
     // "Next: Detection areas" — persist, then advance. NOT a finish: the camera
@@ -430,7 +430,15 @@ void CameraWizardController::begin_areas_direct(const camera::Camera& cam) {
     draft_ = cam;
     last_frame_ = QImage();
     preview_.invalidate();
-    enter_areas(/*direct=*/true);
+    // The fourth step is mode-dependent, and so is this shortcut. In
+    // ball_leveler there ARE no ROI areas - entering the Areas page would offer
+    // the operator a step that governs nothing in the mode they are running, and
+    // saving it would write digit-reader configuration from a Ball appliance.
+    if (ball_mode()) {
+        enter_level(/*direct=*/true);
+    } else {
+        enter_areas(/*direct=*/true);
+    }
     capture_snapshot();
 }
 
@@ -487,7 +495,8 @@ void CameraWizardController::update_level_background() {
     }
 }
 
-void CameraWizardController::enter_level() {
+void CameraWizardController::enter_level(bool direct) {
+    entered_level_directly_ = direct;
     if (pages_.level == nullptr) {
         return;
     }
@@ -544,6 +553,13 @@ void CameraWizardController::save_level_calibration(
 }
 
 void CameraWizardController::level_back() {
+    // Entered straight from a list row: Back belongs to the list, not to a
+    // Models step this run never visited. Mirrors areas_back().
+    if (entered_level_directly_) {
+        entered_level_directly_ = false;
+        emit request_show_list();
+        return;
+    }
     // RE-ENTER, never just show_page_(3), for the same reason areas_back() does:
     // the Models page is created once and reused for the application's lifetime,
     // so raising it without reloading renders whatever the last load_for() left.

@@ -55,6 +55,8 @@ add_library(denso_camera STATIC
     camera/zone_assembly.cpp
     camera/zone_overlay.cpp
     camera/frame_processor.cpp
+    camera/level_overlay.cpp
+    camera/level_processor.cpp
 )
 target_include_directories(denso_camera PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
@@ -85,6 +87,7 @@ add_library(denso_app OBJECT
     ui/warmup_worker.cpp
     ui/warmup_state.cpp
     ui/startup_mode.cpp
+    ui/engine_session.cpp
     ui/startup.cpp
     # platform-information provider: shared normalization + the production seam
     # (the per-platform probe is added in the backend split at the bottom).

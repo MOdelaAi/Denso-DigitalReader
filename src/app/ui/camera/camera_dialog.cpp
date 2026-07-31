@@ -132,6 +132,13 @@ void CameraDialog::reject() {
         !areas_page_->confirm_discard(QStringLiteral("Close"))) {
         return;
     }
+    // The Level calibration step needs the identical guard: showEvent() reopens
+    // on the list, so Escape or the window X would otherwise drop an unsaved
+    // calibration without the page's own Back guard ever running.
+    if (level_page_ && stack_->currentWidget() == level_page_ &&
+        !level_page_->confirm_discard(QStringLiteral("Close"))) {
+        return;
+    }
     QDialog::reject();
 }
 

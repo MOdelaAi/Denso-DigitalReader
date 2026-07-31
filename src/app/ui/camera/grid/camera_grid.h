@@ -15,6 +15,7 @@
 #include "ui/camera/grid/zone_status_publication.h"
 #include "brazing/zone_runtime.h"  // ZoneRuntimeEntry
 #include "health/zone_health.h"   // ZoneHealth, ZoneCause
+#include "level/runtime.h"   // LevelState, LevelRuntimeEntry
 #include "mode/mode.h"            // TargetMode
 #include "models/model_identity.h"  // ManifestView, PlatformInfo
 
@@ -40,6 +41,7 @@ class CameraTile;
 class BrazingReporter;
 class ZoneReporter;
 class WarmupState;
+class BallLevelProcessor;
 
 class CameraGrid : public QWidget {
     Q_OBJECT
@@ -58,6 +60,33 @@ public:
     // clear() — the single teardown sequence — and is NOT a second copy of it. It
     // does NOT re-query runtime() or restart anything (unlike reload()).
     void teardown();
+
+    /// Adopt a NEW inference session after a committed mode switch (spec 3.1,
+    /// and the 9 lifecycle decision).
+    ///
+    /// An EngineRegistry is immutable and mode-pure for its whole life, so a
+    /// switch cannot widen the boot registry - it must replace it. This does not
+    /// weaken that property: the OBJECT is swapped, the allow-list never is, and
+    /// the incoming registry was built for exactly one mode by the ONE builder in
+    /// ui/engine_session.h.
+    ///
+    /// MUST be called only when the grid is torn down (no live stream), because
+    /// a running inference worker holds a raw engine pointer from the OUTGOING
+    /// registry. The existing switch ordering already guarantees this: teardown
+    /// runs, and joins every capture and inference thread, BEFORE the mode
+    /// transaction commits. Refuses (and logs) rather than corrupting a live
+    /// pipeline if that ordering is ever broken.
+    void set_engines(std::shared_ptr<EngineRegistry> engines, WarmupState* warmup);
+
+    /// Release every camera still waiting on a model that will now never warm.
+    ///
+    /// A failed warm-up emits `failed` and never `finished`, so the pending gate
+    /// has no terminating edge of its own. Each waiting camera is rebuilt now
+    /// that WarmupState::is_complete() is true, which makes it fall THROUGH the
+    /// gate and resolve honestly - a ball camera to Unavailable, a digit camera
+    /// to its OrientationProcessor fallback - instead of showing
+    /// "Preparing model..." for the life of the process.
+    void settle_pending_after_warmup();
 
     // The intentionally-idle runtime status writer (spec §9, single-owner rule).
     // Used when the view deliberately avoids the live grid (ball_leveler): computes
@@ -100,6 +129,18 @@ private:
     // as a parameter removes a second full hash per camera from the boot path.
     void start_one(const camera::Camera& cam, CameraTile* tile,
                    const detection::CameraDetection& det);
+    /// The ball_leveler build path, branched at the SUBSYSTEM level rather than
+    /// inside start_one(). reload() builds ZoneHealth and the zone/brazing
+    /// reporters before any per-camera work, and start_one() reads camera_area
+    /// and wires zone plumbing; branching only at processor construction would
+    /// make Ball Leveler inherit digit quarantine and zone-reporting semantics it
+    /// has no use for. This path builds NO ZoneHealth, NO ZoneReporter, NO
+    /// BrazingReporter, reads NO camera_area and constructs NO DetectionProcessor.
+    void reload_ball();
+    /// One ball_leveler camera: resolve its stored configuration, decide its
+    /// state, and build the matching processor. A failure here is confined to
+    /// this camera - siblings are untouched.
+    void start_one_ball(const camera::Camera& cam, CameraTile* tile);
     void on_model_ready(const QString& filename);
     void on_warmup_finished();
     void refresh_tile_inhibit(int64_t camera_id);  // push a camera's causes to its tile
@@ -150,6 +191,21 @@ private:
     std::optional<denso::models::ManifestView> view_;
     denso::models::PlatformInfo platform_;
     std::map<int64_t, CameraTile*> tiles_by_cam_;        // camera id -> its tile
+    // Ball Leveler measuring processors by camera id. NON-OWNING: each is owned
+    // by its CameraStream (as its FrameProcessor), so this map is cleared in
+    // clear() alongside the streams that own them and can never outlive one.
+    // It exists so a GUI-thread availability change (camera offline, a failed
+    // inference streak) can reach the right camera's processor.
+    std::map<int64_t, BallLevelProcessor*> level_procs_;
+    // Ball cameras waiting on their engine to warm, so the tile shows the same
+    // "Preparing model..." state a digit camera does instead of stalling the GUI
+    // thread on a deserialize. Enrolled in the SAME PendingStart gate as the
+    // digit path, so one coordinator decides when anything starts.
+    struct PendingBall {
+        camera::Camera cam;
+        CameraTile* tile;
+    };
+    std::map<int64_t, PendingBall> pending_ball_;
     // Zone housekeeping tick. The VALUES do not travel through here — they are
     // drawn straight into each camera frame by the frame processor's annotation
     // step, which pulls this same projection on the capture thread. What is left

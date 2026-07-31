@@ -535,3 +535,70 @@ Nothing in Phases A-C is implemented yet. Slice 1 delivered PERSISTENCE ONLY:
 schema v14 `ball_level_calibration`, the write chokepoint, mode-scoped integrity,
 and the non-destructive switch. The Ball Leveler operator surface remains
 guarded.
+
+---
+
+## 9. EngineRegistry lifecycle — the Phase-B comparison and decision
+
+The Lean V1 amendment required a SHORT source-based comparison before Phase B of
+(A) replacing `EngineRegistry` + `WarmupState` in-process after a committed
+switch, versus (B) safely re-executing the same application binary. This is that
+comparison. It is deliberately confined to what the source and the device say.
+
+### Evidence
+
+| Dimension | Source | A — in-process replace | B — self-reexec |
+|---|---|---|---|
+| Single-instance lock | `core/instance/single_instance.{h,cpp}`, `app/main.cpp:151-168` | untouched | **disqualifying — measured, not reasoned** (below) |
+| Supervisor | no systemd unit exists on `.15`; `/usr/share/applications/com.denso.DigitalReader.desktop`; `packaging/denso-setup:107-118` (XDG autostart fires only after a graphical *login*) | n/a | nothing restarts a dark appliance |
+| Startup ownership | `ui/startup.cpp:193-215` builds the allow-list + required set + one registry; `launch_warm_ui_first:99-127` holds `WarmupState` and `MainWindow` as **stack locals** | needs an owner for the replacement — a real but bounded refactor | free (boot re-runs verbatim) |
+| Mode-switch flow | `ui/mainwindow.cpp:257-397`: teardown → transaction → adopt mode → reload, all synchronous on the GUI thread | slots in directly after `TransactionCommitted`, before `reload()` | would have to replace steps 4-6 with an exec |
+| Teardown | `CameraView::teardown_for_switch()` → `CameraGrid::teardown()` → `clear()` joins capture **and** inference threads; `~WarmupState` joins the warm-up thread; `~SettingsDialog` `wait()`s the network workers | every destructor runs, in order | `execv` runs **no** destructors and kills every other thread instantly |
+| Unsaved UI state | `settings_->setModal(true)`; a switch is raised from the open Settings modal | preserved | destroyed |
+| Post-commit failure | §7.3-7.5; boot wires `WarmupState::failed` → `app.exit(1)` (`startup.cpp:115-123`) | the NEW session's `failed` must route to a camera-level fault instead — an explicit, testable difference | a re-exec'd boot hits the boot handler → `app.exit(1)` → dark appliance, violating §7.3 and §7.5 |
+| Mode purity | `detection/engine_registry.cpp:42-54` throws outside the allow-list; "immutable after construction" | preserved — we swap the object, never the list | preserved trivially |
+
+### The measured disqualifier for B
+
+`QLockFile` reclaims a lock only when the recorded pid is gone
+(`single_instance.cpp:12-16`). `execv` **keeps the pid** and runs no destructor,
+so the lock file survives holding the re-exec'd process's own live pid. Measured
+on `.15` with a minimal Qt6 program that locks, `execv`s itself, and re-locks:
+
+```text
+PARENT: pid=12510 tryLock=OK   error=0
+CHILD : pid=12510 tryLock=FAIL error=1      # 1 == QLockFile::LockFailedError
+```
+
+Mapped onto `main.cpp:152-159`, the re-exec'd appliance prints "another instance
+is already running", shows a message box and returns 3 — and with no supervisor
+it stays dark. Rescuing B means deliberately releasing the single-instance guard
+before the exec, i.e. opening a window in which two processes may share one
+SQLite file, one camera set and one rotating log — the exact hazard
+`single_instance.h` was written to close. It also would not fix the destructor
+problem: capture threads holding GStreamer/NVDEC pipelines, the inference worker,
+the warm-up thread, in-flight `QProcess` network workers, the WAL connection and
+the log sink's fd are all abandoned mid-flight, and non-`CLOEXEC` descriptors leak
+into the new image.
+
+### Decision — (A) replace `EngineRegistry` + `WarmupState` in-process
+
+B is higher risk on every dimension that matters and its only advantage — mode
+purity by construction — is one A already keeps: each registry instance stays
+immutable and mode-pure for its whole life, because the *object* is swapped and
+the *list* never is.
+
+Implementation obligations that follow, all of them testable:
+
+1. The allow-list + required-set construction gets ONE definition, shared by boot
+   and by the switch, so the two can never build different sets for the same
+   mode. No union allow-list, ever.
+2. The replacement happens **after** `TransactionCommitted` and **after** the
+   existing teardown (which has already joined every capture and inference
+   thread), and before `reload()`.
+3. The new session's `WarmupState::failed` is a **camera-level** fault
+   (§7.3) — it must NOT reach `app.exit(1)`, which is boot-only semantics.
+4. The mode the registry is built from is the committed mode re-read after the
+   transaction, so persisted mode and running mode cannot disagree.
+5. The operator can always switch back (§7.5): a degraded destination mode
+   leaves the mode control live.

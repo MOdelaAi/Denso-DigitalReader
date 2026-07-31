@@ -44,32 +44,22 @@ QString mode_confirm_body(mode::TargetMode target) {
                  .arg(mode_display_name(leaving), mode_display_name(target));
 
     // The one real cost of the switch, stated plainly so it is not a surprise.
-    // Only digit_reader actually RESUMES. Ball Leveler has no processor yet and
-    // lands on the guarded "not available" page, so promising that processing
-    // "starts again on its own" would be a straight falsehood for that target.
-    if (target == mode::TargetMode::DigitReader) {
-        paras << QStringLiteral(
-            "Processing pauses while %1 is prepared, then starts again on its "
-            "own.").arg(mode_display_name(target));
-    } else {
-        paras << QStringLiteral(
-            "Processing stops while %1 is prepared.")
-            .arg(mode_display_name(target));
-    }
+    // Now true for BOTH targets: each mode has a real runtime, and the models for
+    // the destination are loaded after the switch commits, so processing pauses
+    // and then resumes on its own either way.
+    paras << QStringLiteral(
+        "Processing pauses while %1 is prepared, then starts again on its own.")
+        .arg(mode_display_name(target));
 
     // The reporting guarantee (spec §6.6): disabled, address kept, manual re-enable.
     paras << QStringLiteral(
         "Server reporting will be turned off. The server address is kept; you "
         "must re-enable reporting yourself.");
 
-    // GUARD (Slice 1): the destination's unavailability must appear BEFORE the
-    // operator commits. Removing this line would advertise a wizard that
-    // apply_camera_button_gate() still refuses to open.
-    if (target == mode::TargetMode::BallLeveler) {
-        paras << QStringLiteral(
-            "Floating Ball Leveler setup is not available in this release.");
-    }
-
+    // The Slice-1 "not available in this release" paragraph was REMOVED at
+    // activation, together with the other production guards. It must not come
+    // back in isolation: it exists to warn that the destination has no runtime,
+    // and the destination now has one.
     return paras.join(QStringLiteral("\n\n"));
 }
 

@@ -85,6 +85,7 @@ add_executable(denso_tests
     test_mode.cpp
     test_level_edit.cpp
     test_level_measure.cpp
+    test_level_processor.cpp
     test_level_persistence.cpp
     test_mode_confirm_text.cpp
     test_model_empty_state.cpp
@@ -163,6 +164,10 @@ add_executable(denso_integration_tests
     # Artifacts are tiny text files and no camera is contacted, so no engine is
     # ever deserialized.
     test_ball_wizard.cpp
+    # Phase B ball_leveler runtime: drives the REAL CameraGrid ball branch with an
+    # injected counting EngineRegistry factory, so no engine is ever deserialized
+    # and no camera is contacted (every fixture camera points at a dead port).
+    test_ball_runtime.cpp
 )
 target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
 # The platform-provider static test reads the two production call sites to assert
