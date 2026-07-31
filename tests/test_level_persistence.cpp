@@ -674,6 +674,113 @@ TEST_CASE("re-running the migration after a restart adds no second zone",
     }
 }
 
+TEST_CASE("a migration interrupted before the version stamp resumes on restart",
+          "[level][schema][migration][idempotent]") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QString path = QDir(dir.path()).filePath("denso.db");
+
+    // A v11 database on which the upgrade got as far as v12's ALTER and then lost
+    // power. The column is added; `user_version` is still 11, because it is
+    // stamped ONCE at the very end of run_migrations.
+    {
+        auto db = denso::db::Db::open(path);
+        REQUIRE(db.has_value());
+        build_v11_schema(db->handle());
+        const auto run = [&](const char* sql) {
+            QSqlQuery q(db->handle());
+            REQUIRE(q.exec(QString::fromUtf8(sql)));
+        };
+        run("INSERT INTO camera (name, camera_type, active, cam_index, width,"
+            " height, fps, pitch, roll, rotation) VALUES"
+            " ('Survivor', 'usb', 1, 0, 1280, 720, 30, 0.0, 0.0, 0)");
+        run("ALTER TABLE camera ADD COLUMN setup_complete INTEGER NOT NULL DEFAULT 1");
+        run("PRAGMA user_version = 11");
+    }
+
+    // ALTER TABLE ADD COLUMN has no IF NOT EXISTS form, so re-running v12's
+    // statement raises "duplicate column name" and, unguarded, fails the whole
+    // migration — the appliance would refuse to boot on a database that is fine.
+    auto db = denso::db::Db::open(path);
+    REQUIRE(db.has_value());
+    REQUIRE(denso::db::run_migrations(db->handle()));
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+
+    const auto cams = denso::camera::all(db->handle());
+    REQUIRE(cams.size() == 1);
+    CHECK(cams.front().name == "Survivor");
+    CHECK(cams.front().setup_complete);
+}
+
+TEST_CASE("the v15 block repairs the digit zone schema it depends on",
+          "[level][schema][migration]") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QString path = QDir(dir.path()).filePath("denso.db");
+
+    // A v11-stamped database whose camera_area never made it — the shape the
+    // conditional `version < N` blocks can leave behind. The backfill needs
+    // camera_area.zone to know which numbers the digit reader owns, so v15
+    // ENSURES it rather than reading its absence as "nothing is claimed": that
+    // reading would hand migrated Ball cameras numbers digit ROIs may own.
+    {
+        auto db = denso::db::Db::open(path);
+        REQUIRE(db.has_value());
+        const auto run = [&](const char* sql) {
+            QSqlQuery q(db->handle());
+            REQUIRE(q.exec(QString::fromUtf8(sql)));
+        };
+        run("CREATE TABLE camera (id INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+            " camera_type TEXT NOT NULL, active INTEGER NOT NULL,"
+            " cam_index INTEGER, ip TEXT, rtsp TEXT, username TEXT,"
+            " width INTEGER NOT NULL, height INTEGER NOT NULL, fps INTEGER NOT NULL,"
+            " pitch REAL NOT NULL, roll REAL NOT NULL, rotation INTEGER NOT NULL)");
+        run("ALTER TABLE camera ADD COLUMN areas_need_review INTEGER NOT NULL DEFAULT 0");
+        run("PRAGMA user_version = 11");
+    }
+
+    auto db = denso::db::Db::open(path);
+    REQUIRE(db.has_value());
+    REQUIRE(denso::db::run_migrations(db->handle()));
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+
+    // Repaired, not merely tolerated: the table AND its zone column are there,
+    // so the digit reader has somewhere to record a claim after the upgrade.
+    REQUIRE(has_table(db->handle(), "camera_area"));
+    QSqlQuery q(db->handle());
+    REQUIRE(q.exec(QStringLiteral("PRAGMA table_info(camera_area)")));
+    bool has_zone = false;
+    while (q.next()) {
+        if (q.value(1).toString() == QStringLiteral("zone")) has_zone = true;
+    }
+    CHECK(has_zone);
+}
+
+TEST_CASE("a Ball save refuses when the zone-ownership question cannot be answered",
+          "[level][zones][fail-closed]") {
+    Fixture fx;
+    const auto cid = denso::camera::insert(fx.h(), ip_camera("Tank 1"));
+    REQUIRE(cid.has_value());
+
+    // Break the OTHER mode's half of the one ownership query. The picker may
+    // fail open — it only greys out numbers — but a SAVE that reads "nothing is
+    // taken" from a database it could not read would grant a number another
+    // camera already reports, and zone numbers are the backend payload keys.
+    {
+        QSqlQuery q(fx.h());
+        REQUIRE(q.exec(QStringLiteral("DROP TABLE ball_level_zone")));
+    }
+    CHECK_FALSE(denso::camera::try_zones_owned_by_other_cameras(fx.h(), *cid)
+                    .has_value());
+    // The picker overload still answers, so the page can render.
+    CHECK(denso::camera::zones_owned_by_other_cameras(fx.h(), *cid).empty());
+
+    denso::level::SaveRefusal refusal;
+    CHECK_FALSE(save_float(fx, *cid, good_calibration(), &refusal));
+    // A write failure, NOT an invented policy reason.
+    CHECK(refusal.reason_code.empty());
+}
+
 // ─── 3. one Ball Leveler row per camera, enforced by the schema ───────────────
 
 TEST_CASE("ball_level_calibration accepts only one row per camera",

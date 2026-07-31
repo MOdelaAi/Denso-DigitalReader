@@ -127,8 +127,15 @@ bool save_level_configuration(const QSqlDatabase& db, int64_t camera_id,
     // both modes read the same answer. This camera's own rows are excluded (they
     // are replaced wholesale below), which is what stops a re-save of an
     // unchanged set from conflicting with itself.
-    const std::map<int, std::string> taken =
-        denso::camera::zones_owned_by_other_cameras(db, camera_id);
+    // try_ form, NOT the picker's: a database that cannot answer must stop this
+    // save, not be read as "every number is free". Leave `refusal` untouched so
+    // the caller reports a write failure rather than inventing a policy reason.
+    const auto taken_probe =
+        denso::camera::try_zones_owned_by_other_cameras(db, camera_id);
+    if (!taken_probe) {
+        return rollback();
+    }
+    const std::map<int, std::string>& taken = *taken_probe;
     for (const LevelZone& z : zones) {
         if (taken.count(z.zone_no)) {
             conn.rollback();

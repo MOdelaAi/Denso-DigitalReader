@@ -81,6 +81,18 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
 std::map<int, std::string> zones_owned_by_other_cameras(const QSqlDatabase& db,
                                                         int64_t camera_id);
 
+/// The same answer, with READ FAILURE kept distinct from "nothing is taken".
+///
+/// Every write chokepoint must use this form. The overload above cannot express
+/// the difference, so a broken database reaches it as an empty map — and a save
+/// gated on an empty map grants whatever number was asked for. Since zone
+/// numbers are the machine-wide brazing payload keys, that is not a degraded
+/// answer but a silent cross-mode collision: two cameras writing one field.
+/// `nullopt` means the question could not be answered, and a caller that is
+/// about to WRITE must refuse rather than assume.
+std::optional<std::map<int, std::string>> try_zones_owned_by_other_cameras(
+    const QSqlDatabase& db, int64_t camera_id);
+
 /// Set/clear the ROI-review quarantine flag for a camera (see
 /// Camera::areas_need_review). The controller sets it when a view-significant
 /// source/geometry change is saved; replace_areas() clears it on the next save.

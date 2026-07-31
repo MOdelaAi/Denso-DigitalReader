@@ -609,3 +609,48 @@ TEST_CASE("REGRESSION: a zone that merely holds (never times out) then goes "
     REQUIRE(snap.has_value());
     REQUIRE(snap->at(1) == 42);
 }
+
+// ── Ball Leveler: hold_timeout_ms = 0 means NO hold window at all ────────────
+//
+// Ball builds this same aggregator with hold_timeout_ms = 0 because a level
+// measurement that stopped is not evidence of the current level (spec §10.4,
+// and the §10.7 invariant that no old percentage is ever reported as live).
+//
+// The eviction sweep tests `now - base > hold_timeout_ms_`. With a zero timeout
+// that is false while the incomplete reading lands in the SAME millisecond as
+// the last complete one — so the zone stays uninhibited holding its old value,
+// and a sibling's change in that millisecond commits a snapshot carrying the
+// dead percentage as a live one. Zero is not "a one-millisecond window".
+TEST_CASE("zero hold timeout evicts a Ball zone in the same millisecond",
+          "[zone_aggregator][ball]") {
+    ZoneAggregator a(1, 10000, /*hold_timeout_ms=*/0);
+    int64_t t = 1000;
+
+    // Two Ball zones, both measuring and reported.
+    REQUIRE(a.observe({rd(1, 40), rd(2, 70)}, t).has_value());
+
+    // At the SAME timestamp, zone 1 stops producing a value while zone 2 moves.
+    // Zone 2's change is what commits a snapshot; zone 1 must not ride along in
+    // it at its stale 40.
+    const auto snap = a.observe({rd(1, 0, ReadingKind::NoValue), rd(2, 75)}, t);
+    REQUIRE(snap.has_value());
+    CHECK(snap->count(2) == 1);
+    CHECK(snap->at(2) == 75);
+    CHECK(snap->count(1) == 0);   // the dead percentage is NOT republished
+}
+
+TEST_CASE("a 30s digit hold still holds through the same millisecond",
+          "[zone_aggregator]") {
+    // The zero case above must not have been bought by making every hold window
+    // evict immediately: the digit reader's 30s hold is what keeps a briefly
+    // unreadable ROI reporting its last good number.
+    ZoneAggregator a(1, 10000, /*hold_timeout_ms=*/30000);
+    int64_t t = 1000;
+    REQUIRE(a.observe({rd(1, 40), rd(2, 70)}, t).has_value());
+
+    const auto snap = a.observe({rd(1, 0, ReadingKind::Incomplete), rd(2, 75)}, t);
+    REQUIRE(snap.has_value());
+    CHECK(snap->at(2) == 75);
+    CHECK(snap->count(1) == 1);    // still held
+    CHECK(snap->at(1) == 40);
+}

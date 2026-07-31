@@ -78,10 +78,18 @@ std::optional<bool> column_exists(const QSqlDatabase& db, const QString& table,
 /// creates `camera_area.zone`. Reading the version and concluding "v11 >= v10,
 /// therefore the column is there" is an assumption about a step that did not run
 /// in this process; the schema itself is the only authority on whether a
-/// migration completed. Absence is then answered semantically, not defensively:
-/// a database with no `camera_area.zone` has no digit zone claims, and one with
-/// no `ball_level_calibration` has nothing to migrate. Both are correct answers,
-/// not fallbacks.
+/// migration completed.
+///
+/// The two inputs are then treated DIFFERENTLY, because absence means different
+/// things for each:
+///
+///   * `camera_area.zone` is REQUIRED. The v15 block ensures it before calling
+///     this, so absence here means the digit schema is broken. Reading that as
+///     "no zones are claimed" would hand migrated Ball cameras numbers that
+///     digit ROIs may already own — the exact collision the machine-wide rule
+///     exists to prevent — and then stamp v15 over it. It is a hard failure.
+///   * `ball_level_calibration` is OPTIONAL. It first exists at v14, so a
+///     database that never ran v14 legitimately has nothing to migrate.
 ///
 /// The zone number cannot simply be 1 for everyone. Zone numbers are unique
 /// MACHINE-WIDE — across cameras and across BOTH modes — because the brazing
@@ -113,11 +121,22 @@ bool migrate_ball_calibration_to_zones(const QSqlDatabase& db) {
 
     // Digit claims. `camera_area.zone` arrives in v10 over a table created in
     // v4 and rebuilt in v7 — none of which runs on a database entering above
-    // them. No column means no digit zone has ever been claimed.
+    // them, which is why the v15 block ensures it rather than trusting the
+    // version. The caller has just ENSURED this column exists, so its
+    // absence here is a genuine fault, not an empty namespace. Treating "no
+    // column" as "no zones claimed" would stamp v15 over a database whose digit
+    // schema is broken and hand every migrated Ball camera a number that a digit
+    // ROI may in fact already own.
     const auto have_area_zone =
         column_exists(db, QStringLiteral("camera_area"), QStringLiteral("zone"));
     if (!have_area_zone.has_value()) return false;
-    if (*have_area_zone) {
+    if (!*have_area_zone) {
+        qWarning().noquote()
+            << "v15: camera_area.zone is missing after the schema was ensured;"
+            << "refusing to migrate rather than risk a zone-number collision";
+        return false;
+    }
+    {
         QSqlQuery q(db);
         if (!q.exec(QStringLiteral("SELECT zone FROM camera_area "
                                    "WHERE zone IS NOT NULL AND zone != 0"))) {
@@ -209,9 +228,10 @@ bool migrate_ball_calibration_to_zones(const QSqlDatabase& db) {
             if (!taken.count(z)) { zone_no = z; break; }
         }
         if (zone_no == 0) {
-            qWarning().noquote()
+            qCritical().noquote()
                 << "v15: no free zone number for camera" << r.camera_id
-                << "- its v14 calibration is retained but not migrated";
+                << "- its v14 calibration is RETAINED but not migrated; the"
+                << "camera will appear Unconfigured until a number is freed";
             continue;
         }
         taken.insert(zone_no);
@@ -408,6 +428,24 @@ bool run_migrations(const QSqlDatabase& db) {
         return true;
     };
 
+    // ALTER TABLE ADD COLUMN is the one statement in this file with no
+    // IF NOT EXISTS form, which makes it the one statement that cannot be run
+    // twice. That matters because `user_version` is stamped ONCE, at the very
+    // end: a power cut between an ALTER and that stamp leaves the column added
+    // and the version unchanged, so the next boot re-runs the same ALTER, gets
+    // "duplicate column name", and run_migrations returns false — the appliance
+    // then refuses to boot on a database that is in fact fine. Checking the
+    // schema first makes every ADD COLUMN re-runnable and the whole chain
+    // resumable from wherever it stopped.
+    const auto add_column = [&db, &run](const char* table, const char* column,
+                                        const char* ddl) -> bool {
+        const auto have = column_exists(db, QString::fromLatin1(table),
+                                        QString::fromLatin1(column));
+        if (!have.has_value()) return false;   // probe failed: do NOT guess
+        if (*have) return true;                // an interrupted run already added it
+        return run(ddl);
+    };
+
     if (version < 1) {
         if (!run("CREATE TABLE IF NOT EXISTS settings ("
                  "    key   TEXT PRIMARY KEY,"
@@ -502,7 +540,8 @@ bool run_migrations(const QSqlDatabase& db) {
         // IP cameras carry a password (injected into the RTSP URL at capture
         // time). Plaintext in the local DB for now; OS secret store is later
         // hardening. Nullable — USB cameras have none.
-        if (!run("ALTER TABLE camera ADD COLUMN password TEXT")) {
+        if (!add_column("camera", "password",
+                        "ALTER TABLE camera ADD COLUMN password TEXT")) {
             return false;
         }
     }
@@ -513,13 +552,16 @@ bool run_migrations(const QSqlDatabase& db) {
         // URL. All nullable — USB cameras have none. `channel` addresses
         // NVR/DVR streams; `stream` is 0=main / 1=sub; `manufacturer` is the
         // vendor name.
-        if (!run("ALTER TABLE camera ADD COLUMN channel INTEGER")) {
+        if (!add_column("camera", "channel",
+                        "ALTER TABLE camera ADD COLUMN channel INTEGER")) {
             return false;
         }
-        if (!run("ALTER TABLE camera ADD COLUMN stream INTEGER")) {
+        if (!add_column("camera", "stream",
+                        "ALTER TABLE camera ADD COLUMN stream INTEGER")) {
             return false;
         }
-        if (!run("ALTER TABLE camera ADD COLUMN manufacturer TEXT")) {
+        if (!add_column("camera", "manufacturer",
+                        "ALTER TABLE camera ADD COLUMN manufacturer TEXT")) {
             return false;
         }
     }
@@ -612,7 +654,8 @@ bool run_migrations(const QSqlDatabase& db) {
         // Per-ROI reporting zone. A camera_area with a `zone` set is reported to
         // the brazing backend under key "zone<n>"; NULL = ROI-only (confinement,
         // no reporting). Additive; existing areas default to NULL.
-        if (!run("ALTER TABLE camera_area ADD COLUMN zone INTEGER")) {
+        if (!add_column("camera_area", "zone",
+                        "ALTER TABLE camera_area ADD COLUMN zone INTEGER")) {
             return false;
         }
     }
@@ -622,8 +665,9 @@ bool run_migrations(const QSqlDatabase& db) {
         // change is saved; while set, the camera's ROI areas are excluded from
         // detection filtering and zone reporting is paused until the operator
         // re-verifies them (Areas → "Verify & save"). Additive; default 0.
-        if (!run("ALTER TABLE camera ADD COLUMN areas_need_review "
-                 "INTEGER NOT NULL DEFAULT 0")) {
+        if (!add_column("camera", "areas_need_review",
+                        "ALTER TABLE camera ADD COLUMN areas_need_review "
+                        "INTEGER NOT NULL DEFAULT 0")) {
             return false;
         }
     }
@@ -642,8 +686,9 @@ bool run_migrations(const QSqlDatabase& db) {
         // makes this upgrade-safe unconditionally rather than by inference: an
         // old version could not have recorded incompleteness, so there is no
         // signal to recover and every pre-existing row must be treated as done.
-        if (!run("ALTER TABLE camera ADD COLUMN setup_complete "
-                 "INTEGER NOT NULL DEFAULT 1")) {
+        if (!add_column("camera", "setup_complete",
+                        "ALTER TABLE camera ADD COLUMN setup_complete "
+                        "INTEGER NOT NULL DEFAULT 1")) {
             return false;
         }
     }
@@ -726,6 +771,31 @@ bool run_migrations(const QSqlDatabase& db) {
         // deliberately LEFT IN PLACE and untouched: it is the operator's v14
         // work, the backfill below reads it, and dropping it would make this
         // migration lossy in exactly the way the amendment forbids.
+        //
+        // First, ENSURE the prerequisite this block depends on rather than
+        // assuming it. The backfill has to know which zone numbers the digit
+        // reader already owns, and that lives in `camera_area.zone` — created
+        // across v4/v7/v10, none of which executes on a database entering above
+        // them. Every statement here is idempotent and non-destructive (the v7
+        // DROP+recreate is deliberately NOT repeated), so on the overwhelmingly
+        // common path where the schema is already correct this is a no-op; where
+        // it is not, the prerequisite is repaired instead of silently ignored.
+        if (!run("CREATE TABLE IF NOT EXISTS camera_area ("
+                 "    id        INTEGER PRIMARY KEY,"
+                 "    camera_id INTEGER NOT NULL REFERENCES camera(id),"
+                 "    name      TEXT    NOT NULL,"
+                 "    points    TEXT    NOT NULL"
+                 ")")) {
+            return false;
+        }
+        if (!run("CREATE INDEX IF NOT EXISTS idx_camera_area_camera "
+                 "ON camera_area(camera_id)")) {
+            return false;
+        }
+        if (!add_column("camera_area", "zone",
+                        "ALTER TABLE camera_area ADD COLUMN zone INTEGER")) {
+            return false;
+        }
         if (!run("CREATE TABLE IF NOT EXISTS ball_level_binding ("
                  "    camera_id     INTEGER PRIMARY KEY REFERENCES camera(id),"
                  "    model_id      INTEGER NOT NULL REFERENCES model(id),"

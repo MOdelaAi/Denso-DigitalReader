@@ -23,6 +23,11 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
     // still-pending re-announce just because it appears in that snapshot at its
     // held value (see build_snapshot()).
     std::set<int> recovered_this_call;
+    // Zones that produced a COMPLETE reading in this very call. With a non-zero
+    // hold window "measured just now" is implied by `now - last_complete_ms`
+    // being 0, but a ZERO window has no elapsed time to read it from, so the
+    // fact has to be carried explicitly rather than inferred from the clock.
+    std::set<int> complete_this_call;
 
     for (const ZoneReading& z : zones) {
         Debounce& d = zones_[z.zone_no];
@@ -50,6 +55,7 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
         }
 
         d.last_complete_ms = now_ms;
+        complete_this_call.insert(z.zone_no);
         if (z.value == d.candidate) {
             ++d.count;
         } else {
@@ -143,8 +149,25 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
         if (zone_inhibit_.count(zone_no) > 0) {
             continue;   // already inhibited; recovery is handled in the stable branch
         }
+        // A zone measured in THIS call is current by definition and can never be
+        // timed out, whatever the window. Under a non-zero window this is what
+        // `now - last_complete_ms == 0` already expresses; stating it directly
+        // is what lets a ZERO window work at all.
+        if (complete_this_call.count(zone_no) > 0) {
+            continue;
+        }
         const int64_t base = d.has_last_valid ? d.last_complete_ms : d.first_seen_ms;
-        if (now_ms - base > hold_timeout_ms_) {
+        // `== 0` is tested SEPARATELY rather than folded into the comparison.
+        // `now - base > 0` is false while the incomplete reading lands in the
+        // SAME millisecond as the last complete one, which left the zone
+        // uninhibited and its stable value still in `zones_` — so a sibling
+        // zone's change in that same millisecond committed a snapshot carrying
+        // the dead percentage as a live one. Zero does not mean "a window one
+        // millisecond wide"; it means there is no window at all, and the first
+        // reading that is not a measurement evicts. That is what carries Ball
+        // Leveler's no-stale-value invariant (spec §10.4, §10.7) through an
+        // aggregator written to hold digit readings for 30 s.
+        if (hold_timeout_ms_ == 0 || now_ms - base > hold_timeout_ms_) {
             zone_inhibit_.insert(zone_no);
             newly_inhibited_.insert(zone_no);
             if (last_sent_.erase(zone_no) > 0) {

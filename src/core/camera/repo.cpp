@@ -3,6 +3,7 @@
 #include "camera/area_points.h"
 
 #include <QMetaType>
+#include <QSqlError>
 #include <QSqlQuery>
 #include <QString>
 #include <QVariant>
@@ -298,6 +299,12 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
             if (chk.next()) {
                 return rollback();  // already owned by another camera
             }
+            // next() false is end-of-rows OR a fetch error. Untested, a fetch
+            // error reads as "no conflict" and this save takes a number another
+            // camera already reports.
+            if (chk.lastError().isValid()) {
+                return rollback();
+            }
         }
         QSqlQuery ins(db);
         ins.prepare(QStringLiteral(
@@ -326,8 +333,8 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
     return conn.commit() || rollback();
 }
 
-std::map<int, std::string> zones_owned_by_other_cameras(const QSqlDatabase& db,
-                                                        int64_t camera_id) {
+std::optional<std::map<int, std::string>> try_zones_owned_by_other_cameras(
+    const QSqlDatabase& db, int64_t camera_id) {
     std::map<int, std::string> owned;
     QSqlQuery q(db);
     // ONE ownership query over BOTH modes' zone tables — this function is the
@@ -346,12 +353,29 @@ std::map<int, std::string> zones_owned_by_other_cameras(const QSqlDatabase& db,
     q.addBindValue(static_cast<qlonglong>(camera_id));
     q.addBindValue(static_cast<qlonglong>(camera_id));
     if (!q.exec()) {
-        return owned;  // read error → report nothing taken; the repo still gates the save
+        return std::nullopt;
     }
     while (q.next()) {
         owned.emplace(q.value(0).toInt(), q.value(1).toString().toStdString());
     }
+    // next() returns false BOTH at end-of-rows and on a fetch error. Without
+    // this, a mid-scan failure would return a SHORT ownership map that reads as
+    // a complete one — and a number whose row was never fetched would look free.
+    if (q.lastError().isValid()) {
+        return std::nullopt;
+    }
     return owned;
+}
+
+std::map<int, std::string> zones_owned_by_other_cameras(const QSqlDatabase& db,
+                                                        int64_t camera_id) {
+    // Failing OPEN is correct here and only here: this overload exists for the
+    // pickers, which use the answer to grey out taken numbers and name their
+    // owner. A page that cannot read the database shows nothing greyed out and
+    // the save still refuses — whereas a save that cannot read the database must
+    // refuse outright, which is why the write chokepoints take the try_ form.
+    return try_zones_owned_by_other_cameras(db, camera_id)
+        .value_or(std::map<int, std::string>{});
 }
 
 bool set_areas_need_review(const QSqlDatabase& db, int64_t camera_id, bool need) {
