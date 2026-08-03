@@ -62,6 +62,13 @@ signals:
     // handles it (ModeConfirmDialog → teardown → switch_mode → rebuild). This
     // dialog performs none of that.
     void switch_mode_requested(int target);
+    // The Server page's Backend (brazing) configuration was successfully
+    // PERSISTED. Emitted only after brazing::save() reported success, and never
+    // for input the dialog rejected — a listener may therefore treat it as "the
+    // stored config changed, re-read it" with no payload. MainWindow forwards it
+    // to CameraView → CameraGrid::apply_brazing_config(), which swaps only the
+    // reporting stack. This dialog performs none of that.
+    void brazing_config_changed();
 
 private:
     QWidget* build_display();
@@ -70,6 +77,16 @@ private:
     QWidget* build_network();
     QWidget* build_server();
     QWidget* build_about();
+
+    /// Re-seed the Server page's controls from the DATABASE and clear the status
+    /// line. The dialog is created once and reused, so without this a mode switch
+    /// (which writes brazing.enabled = 0 behind its back) would leave a stale
+    /// ticked box the operator could Save straight back.
+    void reload_server_page();
+    /// Validate + persist the Server page. Returns true when the configuration
+    /// actually reached the database; shows an operator-facing reason and returns
+    /// false otherwise. NEVER reports success for input it rejected.
+    bool save_server_settings();
 
     void rebuild_window_sizes();  // filter PRESETS to this dialog's screen
     void sync_size_enabled();     // enable window_size_ only in Windowed
@@ -106,6 +123,7 @@ private:
     // Server (brazing reporter)
     QCheckBox* brazing_enabled_ = nullptr;
     QLineEdit* brazing_url_ = nullptr;
+    QLabel* brazing_status_ = nullptr;   // inline "Saved." / rejection reason
 };
 
 } // namespace denso::ui

@@ -285,6 +285,12 @@ void CameraView::settle_pending_after_warmup() {
     grid_->settle_pending_after_warmup();
 }
 
+void CameraView::apply_brazing_config() {
+    // Straight through to the grid — the view holds no reporting state of its own,
+    // and must not switch pages or reload anything for a Backend settings change.
+    grid_->apply_brazing_config();
+}
+
 int CameraView::current_page_index() const { return stack_->currentIndex(); }
 
 bool CameraView::grid_has_live_streams() const {

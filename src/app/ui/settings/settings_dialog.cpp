@@ -1,6 +1,7 @@
 #include "ui/settings/settings_dialog.h"
 
 #include "brazing/config.h"
+#include "brazing/url.h"
 #include "settings/settings.h"
 #include "ui/common/dialog_chrome.h"
 #include "ui/common/form_widgets.h"
@@ -17,11 +18,30 @@
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QStackedWidget>
+#include <QStyle>
 #include <QVBoxLayout>
 
 #include <vector>
 
 namespace denso::ui {
+namespace {
+
+/// Put one line of feedback on an inline status label. `warn` selects the theme's
+/// `QLabel[warn="true"]` rule — colour is never the only carrier, the text always
+/// says what happened. An empty message hides the label so a page the operator has
+/// not acted on shows nothing.
+void set_status(QLabel* label, const QString& message, bool warn) {
+    if (!label) return;
+    label->setText(message);
+    label->setVisible(!message.isEmpty());
+    label->setProperty("warn", warn);
+    label->setProperty("faint", !warn);
+    // Property-driven QSS is not re-evaluated on its own.
+    label->style()->unpolish(label);
+    label->style()->polish(label);
+}
+
+} // namespace
 
 SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     : QDialog(parent), db_(std::move(db)) {
@@ -223,31 +243,105 @@ QWidget* SettingsDialog::build_server() {
     v->setSpacing(12);
     v->addWidget(common::eyebrow(QStringLiteral("SERVER")));
 
-    const brazing::BrazingConfig cfg = brazing::load(db_);
-
     brazing_enabled_ = new QCheckBox(QStringLiteral("Send zone readings to server"));
-    brazing_enabled_->setChecked(cfg.enabled);
+    brazing_enabled_->setObjectName(QStringLiteral("brazingEnabled"));
     v->addWidget(brazing_enabled_);
 
     auto* url_box = new QVBoxLayout;
     url_box->setSpacing(6);
     url_box->addWidget(common::dim_label(QStringLiteral("Server base URL")));
-    brazing_url_ = new QLineEdit(QString::fromStdString(cfg.base_url));
-    brazing_url_->setPlaceholderText(QStringLiteral("http://192.168.1.50:8098"));
+    brazing_url_ = new QLineEdit;
+    brazing_url_->setObjectName(QStringLiteral("brazingUrl"));
+    brazing_url_->setPlaceholderText(QStringLiteral("http://192.168.1.112:8080"));
     url_box->addWidget(brazing_url_);
+    // Says exactly what the field is NOT: the endpoint is fixed and appended by
+    // the application, so an operator who pastes the whole endpoint can see why
+    // it gets shortened back to the base on Save.
+    auto* hint = common::dim_label(QStringLiteral(
+        "The application automatically sends to /api/brazing/update."));
+    hint->setProperty("faint", true);
+    url_box->addWidget(hint);
     v->addLayout(url_box);
 
     auto* save = new QPushButton(QStringLiteral("Save"));
+    save->setObjectName(QStringLiteral("brazingSave"));
     save->setProperty("gold", true);
     connect(save, &QPushButton::clicked, this, [this] {
-        brazing::BrazingConfig out;
-        out.enabled = brazing_enabled_->isChecked();
-        out.base_url = brazing_url_->text().trimmed().toStdString();
-        brazing::save(db_, out);
+        if (!save_server_settings()) {
+            return;   // the reason is already on screen; nothing was persisted
+        }
+        // AFTER persistence, never before: a listener treats this as "the stored
+        // config changed, re-read it", so emitting on a failed write would make
+        // the running pipeline adopt a configuration the database does not hold.
+        emit brazing_config_changed();
     });
     v->addWidget(save, 0, Qt::AlignLeft);
+
+    brazing_status_ = new QLabel;
+    brazing_status_->setObjectName(QStringLiteral("brazingStatus"));
+    brazing_status_->setWordWrap(true);
+    v->addWidget(brazing_status_);
+
     v->addStretch(1);
+    reload_server_page();   // seed from the database
     return page;
+}
+
+void SettingsDialog::reload_server_page() {
+    const brazing::BrazingConfig cfg = brazing::load(db_);
+    brazing_enabled_->setChecked(cfg.enabled);
+    brazing_url_->setText(QString::fromStdString(cfg.base_url));
+    common::mark_invalid(brazing_url_, false);
+    set_status(brazing_status_, QString(), false);
+}
+
+bool SettingsDialog::save_server_settings() {
+    // ONE normalization authority, shared with the transport and the grid gate —
+    // so the dialog can never accept an address the client would treat as
+    // something else. Whitespace, a trailing slash and a pasted full endpoint are
+    // canonicalized; any other path is REJECTED rather than quietly rewritten.
+    const brazing::BaseUrlResult url =
+        brazing::normalize_base_url(brazing_url_->text().toStdString());
+    if (!url.ok) {
+        common::mark_invalid(brazing_url_, true);
+        set_status(brazing_status_, QString::fromStdString(url.error), true);
+        return false;
+    }
+
+    brazing::BrazingConfig out;
+    out.enabled = brazing_enabled_->isChecked();
+    out.base_url = url.base_url;
+
+    // Reporting cannot be turned ON without somewhere to report to. Refusing here
+    // is what keeps "Saved" honest — the runtime would silently build no sender.
+    if (out.enabled && out.base_url.empty()) {
+        common::mark_invalid(brazing_url_, true);
+        set_status(brazing_status_,
+                   QStringLiteral("Enter the server base URL before enabling "
+                                  "reporting."),
+                   true);
+        return false;
+    }
+
+    if (!brazing::save(db_, out)) {
+        common::mark_invalid(brazing_url_, false);
+        set_status(brazing_status_,
+                   QStringLiteral("Could not save the settings to the database. "
+                                  "Reporting was not reconfigured."),
+                   true);
+        return false;
+    }
+
+    // Show the operator what was actually stored. Silently persisting something
+    // other than what the field displays is how the doubled-path defect stayed
+    // invisible for so long.
+    common::mark_invalid(brazing_url_, false);
+    brazing_url_->setText(QString::fromStdString(out.base_url));
+    set_status(brazing_status_,
+               out.enabled ? QStringLiteral("Saved. Reporting is active.")
+                           : QStringLiteral("Saved. Reporting is off."),
+               false);
+    return true;
 }
 
 QWidget* SettingsDialog::build_about() {
@@ -351,6 +445,11 @@ void SettingsDialog::sync_mode_button() {
 void SettingsDialog::showEvent(QShowEvent* event) {
     nav_->setCurrentRow(0);
     rebuild_window_sizes();  // re-filter to the current screen each open
+    // The dialog is created once and reused, so the Server page must re-read the
+    // database rather than keep whatever was on screen last time. A mode switch
+    // writes brazing.enabled = 0 behind this dialog's back; without this re-seed
+    // the operator would reopen Settings to a stale ticked box.
+    reload_server_page();
     QDialog::showEvent(event);
 }
 

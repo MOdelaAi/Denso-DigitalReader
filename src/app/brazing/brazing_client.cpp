@@ -3,6 +3,7 @@
 #include "logging/redact.h"
 
 #include "brazing/brazing_payload.h"
+#include "brazing/url.h"
 
 #include <QByteArray>
 #include <QDebug>
@@ -20,25 +21,35 @@ constexpr int kBrazingTimeoutMs = 5000;  // abort a stuck POST (soak-safe)
 
 BrazingClient::BrazingClient(std::string base_url, QObject* parent)
     : QObject(parent),
-      base_url_(QString::fromStdString(base_url)),
+      // ONE composition site, and the ONE place the endpoint path is appended.
+      // brazing::endpoint_url() owns both the trailing-slash trim this used to do
+      // inline and the guard against a stored value that already ends in the
+      // endpoint (which would otherwise post to …/update/api/brazing/update).
+      endpoint_(QString::fromStdString(denso::brazing::endpoint_url(base_url))),
       nam_(new QNetworkAccessManager(this)) {
-    // Trim a trailing slash so base_url + path doesn't double up.
-    while (base_url_.endsWith('/')) {
-        base_url_.chop(1);
+    // A non-empty address that yields no endpoint was REFUSED by the shared
+    // normalizer. The grid already declines to build a sender for such a value,
+    // so reaching here means something constructed a client directly — say it
+    // once rather than sit silent for the life of the process.
+    if (endpoint_.isEmpty() && !base_url.empty()) {
+        qWarning().noquote() << "[brazing] unusable server base URL; nothing will"
+                             << "be sent:"
+                             << QString::fromStdString(
+                                    logging::sanitize_url(base_url));
     }
 }
 
 void BrazingClient::post(const std::map<int, ZoneValue>& zones,
                          std::function<void(bool)> done) {
-    if (base_url_.isEmpty()) {
+    if (endpoint_.isEmpty()) {
         if (done) done(false);
         return;
     }
-    const QUrl url(base_url_ + QStringLiteral("/api/brazing/update"));
+    const QUrl url(endpoint_);
     if (!url.isValid()) {
         qWarning().noquote() << "[brazing] invalid base URL:"
                              << QString::fromStdString(
-                                    logging::sanitize_url(base_url_.toStdString()));
+                                    logging::sanitize_url(endpoint_.toStdString()));
         if (done) done(false);
         return;
     }

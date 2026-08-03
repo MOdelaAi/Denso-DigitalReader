@@ -57,6 +57,23 @@ public:
     /// changed, else nullopt. NEVER returns an empty snapshot (spec §3.3).
     std::optional<std::map<int, ZoneValue>> evict_zones(const std::set<int>& zone_nos);
 
+    /// Forget what the backend has already been told, and NOTHING else.
+    ///
+    /// `last_sent_` is the only reason an unchanged stable value is suppressed.
+    /// A backend sender created (or replaced) while the appliance is already
+    /// running inherits none of the delivery history the old sender had, so
+    /// without this the newly configured server would never be told a zone's
+    /// current value — it would wait, possibly forever, for the reading to
+    /// CHANGE. Clearing the baseline makes the next observation that meets the
+    /// existing stable-frame bar compare against an empty baseline and publish
+    /// once; normal unchanged-value suppression resumes from that snapshot.
+    ///
+    /// Deliberately narrow: it touches no debounce counter, no hold/last-valid
+    /// state, no inhibit set, and no runtime projection, so it can neither
+    /// fabricate a value nor let one skip the stability requirement. It emits
+    /// nothing — there is no snapshot to return, only a baseline to drop.
+    void reset_sent_baseline();
+
     /// Zones that escalated from hold to inhibited since the last call. Draining
     /// is destructive so a caller raises each alarm exactly once.
     std::set<int> take_newly_inhibited();

@@ -96,6 +96,19 @@ public:
     // runtime writer of status.json for both the live and idle cases.
     void publish_idle_status();
 
+    /// Re-read the persisted Backend (brazing) configuration and bring ONLY the
+    /// reporting stack into line with it — no restart, no camera or model work.
+    ///
+    /// Called at the end of build_zone_reporting() (so boot and Save share ONE
+    /// sender construction site) and again whenever the operator saves the
+    /// Server settings page. Idempotent: saving an unchanged configuration
+    /// creates no second reporter and disturbs no delivery state.
+    ///
+    /// What it deliberately does NOT do: touch streams_, tiles_, processors,
+    /// engines_, the ZoneReporter or ZoneHealth. Capture and inference keep
+    /// running across a Backend settings change; only the sender is swapped.
+    void apply_brazing_config();
+
     // Test-only: how many times reload()'s build path was ENTERED (monotonic,
     // increment-only, per-grid). Because the reporter, ZoneHealth, every
     // DetectionProcessor and every CameraStream are constructed ONLY inside
@@ -111,6 +124,15 @@ public:
     // Test-only: whether any live capture stream currently exists. Used by the
     // teardown-seam proof to assert nothing streams after teardown().
     bool has_live_streams() const { return !streams_.empty(); }
+
+    // Test-only observers of the Backend sender, so "exactly one sender", "the
+    // sender was destroyed" and "the sender was replaced" are OBSERVED rather
+    // than assumed. No production behavior depends on either.
+    bool has_brazing_sender() const { return brazing_reporter_ != nullptr; }
+    /// Monotonic count of BrazingReporter constructions by this grid.
+    uint64_t brazing_sender_builds() const { return brazing_sender_builds_; }
+    /// The canonical base URL the live sender was built with ("" when none).
+    std::string active_brazing_base_url() const { return active_brazing_url_; }
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -191,6 +213,12 @@ private:
     };
     std::map<int64_t, PendingCam> pending_cams_;
     std::unique_ptr<BrazingReporter> brazing_reporter_;  // GUI-thread reliable sender
+    // The canonical base URL brazing_reporter_ was built with. This — not the raw
+    // stored string — is what apply_brazing_config() compares against, so two
+    // spellings of the same server ("…:8080" and "…:8080/api/brazing/update") are
+    // correctly recognised as NO change and do not churn the sender.
+    std::string active_brazing_url_;
+    uint64_t brazing_sender_builds_ = 0;   // test observable; see the accessor
     std::unique_ptr<ZoneReporter> reporter_;             // shared ZoneSink (machine)
     // Per-camera inhibit cause owner (GUI thread, no mutex). Drives the reporter
     // gate, the tile banners, and status.json. Rebuilt each reload().

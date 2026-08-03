@@ -66,6 +66,26 @@ public:
     /// Forget all display routing (grid teardown / reload).
     void clear_configured_zones();
 
+    /// Open a new delivery epoch for a backend sender that was just created or
+    /// replaced. Called on the GUI thread from CameraGrid::apply_brazing_config.
+    ///
+    /// Two effects, taken together under this reporter's mutex so they cannot be
+    /// split by a concurrent observation:
+    ///   1. the aggregator's last-sent baseline is dropped, so the next snapshot
+    ///      that meets the existing stability requirement is published even at an
+    ///      unchanged value (see ZoneAggregator::reset_sent_baseline);
+    ///   2. the RETURNED value is the sequence number of the last snapshot
+    ///      published before this call — the reload BARRIER.
+    ///
+    /// The barrier is what makes the swap clean. Snapshots travel to the GUI
+    /// thread as queued calls, so one published just before a Settings Save can
+    /// still be sitting in the event queue when the replacement sender is built;
+    /// delivering it would hand the new backend a pre-barrier payload the
+    /// retired sender owned. A caller drops everything with `seq <= barrier`.
+    ///
+    /// Publishes nothing itself and relaxes no debounce.
+    uint64_t reset_delivery_baseline();
+
     /// Camera-keyed projection for the grid overlay, built under the same mutex
     /// as observe(). Returns COPIES, so the caller may use it after the lock is
     /// released. Every entry carries BOTH camera_id and zone_no: joining by zone

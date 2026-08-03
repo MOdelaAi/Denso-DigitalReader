@@ -34,6 +34,7 @@ add_executable(denso_tests
     test_selectable_models.cpp
     test_reading_repo.cpp
     test_brazing_config.cpp
+    test_brazing_url.cpp
     test_area_points.cpp
     test_area_geometry.cpp
     test_area_validation.cpp
@@ -133,6 +134,12 @@ add_executable(denso_integration_tests
     test_settings_mode.cpp
     test_camera_view_states.cpp
     test_brazing_discard.cpp
+    # Live Backend settings: the SettingsDialog → MainWindow → CameraGrid reload
+    # seam, plus the transport's endpoint composition. Drives the REAL dialog and
+    # grid, so it needs denso_app. Every fixture camera is model-less and points at
+    # a closed localhost port, and the reporter cases use a fake transport — no
+    # engine is loaded and nothing is contacted over the network.
+    test_brazing_live_settings.cpp
     # Zone Runtime Overlay: structural guards that aggregation is not gated on
     # backend config and that CameraTile stays rendering-only.
     test_zone_runtime_wiring.cpp

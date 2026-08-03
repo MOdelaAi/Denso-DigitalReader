@@ -656,3 +656,79 @@ TEST_CASE("a 30s digit hold still holds through the same millisecond",
     CHECK(snap->count(1) == 1);    // still held
     CHECK(snap->at(1) == 40);
 }
+
+// ── Delivery baseline (live Backend reconfiguration) ─────────────────────────
+// A backend sender created or replaced while the appliance runs inherits none of
+// the previous sender's delivery history. Without dropping the last-sent
+// baseline the newly configured server would never be told a zone's CURRENT
+// value — it would wait for the reading to change, possibly forever.
+
+TEST_CASE("resetting the sent baseline republishes an unchanged stable value",
+          "[zone_aggregator]") {
+    ZoneAggregator agg(1);
+    REQUIRE(agg.observe(obs(1, 500)).has_value());        // delivered once
+    REQUIRE_FALSE(agg.observe(obs(1, 500)).has_value());  // normally suppressed
+
+    agg.reset_sent_baseline();
+
+    // The next observation that meets the stability bar publishes the SAME value.
+    const auto snap = agg.observe(obs(1, 500));
+    REQUIRE(snap.has_value());
+    CHECK(snap->at(1) == 500);
+
+    // …and normal unchanged-value suppression resumes immediately after.
+    CHECK_FALSE(agg.observe(obs(1, 500)).has_value());
+    CHECK_FALSE(agg.observe(obs(1, 500)).has_value());
+}
+
+TEST_CASE("resetting the sent baseline emits nothing by itself", "[zone_aggregator]") {
+    // It drops a baseline; it does not fabricate a snapshot. Nothing may reach a
+    // backend as a side effect of an operator saving settings.
+    ZoneAggregator agg(1);
+    REQUIRE(agg.observe(obs(1, 500)).has_value());
+    agg.reset_sent_baseline();     // returns void — there is no snapshot to take
+    // Proven by what the aggregator still reports: the value is unchanged and
+    // still healthy, i.e. no eviction or re-acquisition happened.
+    const auto view = agg.runtime_view();
+    REQUIRE(view.size() == 1);
+    CHECK(view.front().zone_no == 1);
+    CHECK(view.front().state == denso::ui::ZoneRuntimeState::Healthy);
+    REQUIRE(view.front().value.has_value());
+    CHECK(*view.front().value == 500);
+}
+
+TEST_CASE("resetting the sent baseline does not bypass the stable-frame bar",
+          "[zone_aggregator]") {
+    // The barrier makes the next STABLE snapshot eligible — it does not let a
+    // half-debounced candidate through.
+    ZoneAggregator agg(3);
+    REQUIRE_FALSE(agg.observe(obs(1, 500)).has_value());
+    REQUIRE_FALSE(agg.observe(obs(1, 500)).has_value());
+    REQUIRE(agg.observe(obs(1, 500)).has_value());   // stable at 3
+
+    agg.reset_sent_baseline();
+
+    // A NEW candidate still has to earn its three frames; the reset gives it
+    // nothing.
+    CHECK_FALSE(agg.observe(obs(1, 600)).has_value());
+    CHECK_FALSE(agg.observe(obs(1, 600)).has_value());
+    const auto snap = agg.observe(obs(1, 600));
+    REQUIRE(snap.has_value());
+    CHECK(snap->at(1) == 600);
+}
+
+TEST_CASE("resetting the sent baseline leaves inhibit state alone",
+          "[zone_aggregator]") {
+    // A delivery-side reconfiguration must not clear a zone's alarm state: the
+    // reading side of the appliance is not what changed.
+    ZoneAggregator agg(1, 10000, /*hold_timeout_ms=*/0);
+    int64_t t = 1000;
+    REQUIRE(agg.observe({ZoneReading{1, denso::ui::ZoneValue{40}, 0.9f}}, t).has_value());
+    // A non-Complete reading with a zero hold window inhibits immediately.
+    agg.observe({ZoneReading{1, denso::ui::ZoneValue{}, 0.0f, ReadingKind::NoValue}}, ++t);
+    REQUIRE(agg.runtime_view().front().state == denso::ui::ZoneRuntimeState::Inhibited);
+
+    agg.reset_sent_baseline();
+
+    CHECK(agg.runtime_view().front().state == denso::ui::ZoneRuntimeState::Inhibited);
+}

@@ -66,6 +66,18 @@ void ZoneReporter::clear_configured_zones() {
     configured_zones_.clear();
 }
 
+uint64_t ZoneReporter::reset_delivery_baseline() {
+    // Same mutex as observe(): a capture thread may be inside the aggregator
+    // right now, and the baseline is aggregator state like any other. Reading
+    // seq_ under the SAME lock is what makes the returned barrier exact — a
+    // snapshot cannot be published between the reset and the read, so every
+    // sequence number at or below it was produced for the retired sender and
+    // every one above it for the new one.
+    std::lock_guard<std::mutex> lock(mutex_);
+    aggregator_.reset_sent_baseline();
+    return seq_;
+}
+
 std::vector<ZoneRuntimeEntry> ZoneReporter::runtime_view() const {
     std::lock_guard<std::mutex> lock(mutex_);
 

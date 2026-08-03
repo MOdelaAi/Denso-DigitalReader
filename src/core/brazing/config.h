@@ -18,8 +18,16 @@ struct BrazingConfig {
 /// Load config, defaulting to {enabled=false, base_url=""} for missing keys.
 BrazingConfig load(const QSqlDatabase& db);
 
-/// Persist both fields. Write errors are silently ignored (a DB hiccup must
-/// never crash the UI).
-void save(const QSqlDatabase& db, const BrazingConfig& cfg);
+/// Persist both fields in ONE checked transaction. Returns false if the
+/// transaction could not be opened or either row failed to write, rolling back
+/// so a false result means nothing changed — a caller can then refuse to report
+/// success and refuse to reconfigure a running pipeline, instead of the old
+/// silent swallow. Modeled on mode::save (checked) and mode::switch_and_reset
+/// (transactional).
+///
+/// The single exception is a driver with no transaction support at all, where
+/// the two upserts are issued directly and the result is best-effort. Every
+/// supported build (QSQLITE) takes the transactional path.
+bool save(const QSqlDatabase& db, const BrazingConfig& cfg);
 
 } // namespace denso::brazing

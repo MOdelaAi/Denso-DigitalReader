@@ -1,6 +1,8 @@
 #include "ui/camera/grid/camera_grid.h"
 
 #include "brazing/config.h"
+#include "brazing/url.h"        // normalize_base_url — ONE URL authority
+#include "logging/redact.h"     // sanitize_url (never log a raw address)
 #include "camera/repo.h"
 #include "detection/repo.h"
 #include "brazing/brazing_client.h"
@@ -201,6 +203,10 @@ void CameraGrid::clear() {
     }
     reporter_.reset();
     brazing_reporter_.reset();
+    // Forget which URL the (now destroyed) sender served, or the next
+    // apply_brazing_config() would see an unchanged URL and decline to rebuild
+    // the sender the rebuilt grid needs.
+    active_brazing_url_.clear();
     // health_ last: its callback references reporter_. No worker can fire it now
     // (workers joined above), and its destructor raises no cause, so this is safe.
     health_.reset();
@@ -439,43 +445,54 @@ void CameraGrid::build_zone_reporting(int stable_frames, int64_t hold_timeout_ms
             refresh_status_file();
         });
 
-    // Brazing zone reporting: when enabled, a single machine-wide ZoneReporter
-    // collects every camera's assembled zones and POSTs the combined snapshot on
-    // change. The reporter is called from capture threads; its callback hops to
-    // the GUI thread (post_to_gui) where the BrazingReporter lives.
-    const brazing::BrazingConfig bcfg = brazing::load(db_);
-    // DELIVERY is optional; AGGREGATION is not. The ZoneReporter is always built
-    // below, so zone values are computed, debounced, held and inhibited even with
-    // no backend configured — the grid overlay is a LOCAL check and must not
-    // depend on the server it exists to cross-check. Only the sender and this
-    // callback are gated on configuration; an empty callback is a supported state
-    // (ZoneReporter guards every publish with `if (snapshot && on_snapshot_)`).
-    std::function<void(const std::map<int, ZoneValue>&, uint64_t)> on_snapshot;
-    if (bcfg.enabled && !bcfg.base_url.empty()) {
-        brazing_reporter_ = std::make_unique<BrazingReporter>(
-            std::make_unique<BrazingClient>(bcfg.base_url));
-        BrazingReporter* reporter = brazing_reporter_.get();
-        on_snapshot =
-            [this, reporter](const std::map<int, ZoneValue>& snap, uint64_t seq) {
-                // Marshal to `reporter` (not `this`) so Qt drops the queued call if
-                // the BrazingReporter is torn down; `reporter` is owned by this
-                // grid, so `this` (for last_applied_seq_) is valid whenever it runs.
-                common::post_to_gui(reporter, [this, reporter, snap, seq] {
-                    // Callbacks fire outside the reporter mutex and marshal from
-                    // several threads, so an older eviction can overtake a newer
-                    // recovery. Drop the stale one rather than let whole-snapshot
-                    // latest-wins clobber the recovery (spec §3.3d).
-                    if (seq <= last_applied_seq_) return;
-                    last_applied_seq_ = seq;
-                    reporter->submit(snap);
-                });
-            };
-    }
-    // ALWAYS constructed — see above. With no backend configured this holds an
-    // empty callback and simply publishes nowhere.
+    // Brazing zone reporting: a single machine-wide ZoneReporter collects every
+    // camera's assembled zones and, when a backend is configured, POSTs the
+    // combined snapshot on change. The reporter is called from capture threads;
+    // its callback hops to the GUI thread (post_to_gui) where the BrazingReporter
+    // lives.
+    //
+    // The callback is installed UNCONDITIONALLY and resolves the sender at
+    // DELIVERY time rather than capturing one at construction. That is what makes
+    // the sender swappable while the appliance runs (apply_brazing_config): the
+    // ZoneReporter — and with it every zone's debounce, hold and overlay state —
+    // survives a Settings Save untouched. Baking the sender in was the reason a
+    // Backend settings change previously needed a restart.
+    //
+    // It marshals to `this` (the grid outlives every sender it owns) and carries
+    // the grid GENERATION it was created in. That generation check replaces the
+    // lifetime guard the old "marshal to the BrazingReporter object" trick got for
+    // free: a snapshot queued by the previous generation's workers must not be
+    // submitted to a sender built by the rebuilt grid.
+    const uint64_t gen = generation_;
+    std::function<void(const std::map<int, ZoneValue>&, uint64_t)> on_snapshot =
+        [this, gen](const std::map<int, ZoneValue>& snap, uint64_t seq) {
+            common::post_to_gui(this, [this, gen, snap, seq] {
+                if (!camera::callback_is_current(gen, generation_)) return;
+                // No backend configured (or one just disabled): aggregation still
+                // ran, there is simply nowhere to publish.
+                if (!brazing_reporter_) return;
+                // Callbacks fire outside the reporter mutex and marshal from
+                // several threads, so an older eviction can overtake a newer
+                // recovery. Drop the stale one rather than let whole-snapshot
+                // latest-wins clobber the recovery (spec §3.3d).
+                if (seq <= last_applied_seq_) return;
+                last_applied_seq_ = seq;
+                brazing_reporter_->submit(snap);
+            });
+        };
+    // DELIVERY is optional; AGGREGATION is not. The ZoneReporter is always built,
+    // so zone values are computed, debounced, held and inhibited even with no
+    // backend configured — the grid overlay is a LOCAL check and must not depend
+    // on the server it exists to cross-check.
     reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot), stable_frames,
                                                std::function<int64_t()>{},
                                                hold_timeout_ms);
+
+    // The sender itself, from the persisted configuration. Built through the SAME
+    // entry point the Settings Save uses, so boot and a live reconfiguration
+    // cannot construct different reporting stacks. Called after reporter_ exists
+    // because a newly built sender resets that reporter's delivery baseline.
+    apply_brazing_config();
 
     // Overlay polling. Parented to `this`, so it dies with the grid even if a
     // teardown path ever forgets it; clear() stops it explicitly BEFORE the
@@ -486,6 +503,83 @@ void CameraGrid::build_zone_reporting(int stable_frames, int64_t hold_timeout_ms
         connect(zone_timer_, &QTimer::timeout, this, &CameraGrid::poll_zone_runtime);
     }
     zone_timer_->start();
+}
+
+void CameraGrid::apply_brazing_config() {
+    // Aggregation must already exist for a sender to be worth anything: with no
+    // ZoneReporter nothing produces snapshots, and a sender built here would just
+    // be destroyed by the next clear(). The rebuilt grid picks the configuration
+    // up itself, because build_zone_reporting() ends by calling this.
+    if (!reporter_) {
+        brazing_reporter_.reset();
+        active_brazing_url_.clear();
+        return;
+    }
+
+    const brazing::BrazingConfig bcfg = brazing::load(db_);
+    // The SAME rule the Settings dialog validates with and the transport composes
+    // with. A rejected address is not repaired here — reporting simply does not
+    // start, loudly, rather than posting somewhere the operator did not ask for.
+    const brazing::BaseUrlResult url = brazing::normalize_base_url(bcfg.base_url);
+    const bool want = bcfg.enabled && url.ok && !url.base_url.empty();
+
+    if (!want) {
+        if (bcfg.enabled && !url.ok) {
+            qWarning().noquote()
+                << "[brazing] reporting is enabled but the stored server address"
+                << "is not usable, so no sender was started:"
+                << QString::fromStdString(logging::sanitize_url(bcfg.base_url))
+                << "-" << QString::fromStdString(url.error);
+        }
+        if (brazing_reporter_) {
+            qInfo().noquote() << "[brazing] backend reporting stopped";
+        }
+        // Destroying the reporter is the whole stop: it deletes its single-shot
+        // retry QTimer (child), the retry policy with every queued/undelivered
+        // snapshot, and the BrazingClient with the QNetworkAccessManager that owns
+        // any in-flight reply. The QPointer in BrazingReporter::apply() already
+        // prevents a late done() from re-entering a destroyed reporter, so no old
+        // callback can start another request.
+        brazing_reporter_.reset();
+        active_brazing_url_.clear();
+        return;
+    }
+
+    if (brazing_reporter_ && active_brazing_url_ == url.base_url) {
+        // Saving an unchanged configuration must be inert: no second reporter, no
+        // duplicate POST, and no reset of retry/delivery state that would re-send
+        // a value the server already has.
+        return;
+    }
+
+    // Retire the OLD sender BEFORE constructing the replacement. Ordering is the
+    // barrier: once this returns there is no timer left to fire, no policy left
+    // holding a pending snapshot, and no QNAM left to carry a request to the old
+    // address — so nothing can be sent to the old URL afterwards.
+    brazing_reporter_.reset();
+    brazing_reporter_ = std::make_unique<BrazingReporter>(
+        std::make_unique<BrazingClient>(url.base_url));
+    active_brazing_url_ = url.base_url;
+    ++brazing_sender_builds_;
+
+    // A fresh sender knows nothing of what the previous one delivered, and the
+    // aggregator would otherwise stay silent until a reading CHANGED. Drop the
+    // last-sent baseline so the next snapshot that earns the existing stable-frame
+    // bar is published once — no value invented, no debounce skipped.
+    //
+    // The returned sequence number is the RELOAD BARRIER, and raising
+    // last_applied_seq_ to it completes the swap. Snapshots reach the GUI thread
+    // as queued calls, so one published moments before this Save can still be in
+    // the event queue; without the barrier it would be delivered to the
+    // replacement sender, handing the new backend a payload that belonged to the
+    // retired one. Reusing the existing drop-stale guard means there is ONE place
+    // a snapshot is judged too old to deliver, not two.
+    last_applied_seq_ =
+        std::max(last_applied_seq_, reporter_->reset_delivery_baseline());
+    qInfo().noquote() << "[brazing] backend reporting active:"
+                      << QString::fromStdString(
+                             logging::sanitize_url(url.base_url +
+                                                   brazing::kEndpointPath));
 }
 
 void CameraGrid::reload_ball() {

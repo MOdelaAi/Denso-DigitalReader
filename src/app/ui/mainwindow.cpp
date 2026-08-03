@@ -142,6 +142,8 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
             &MainWindow::on_reset_defaults);
     connect(settings_, &SettingsDialog::switch_mode_requested, this,
             &MainWindow::on_switch_mode);
+    connect(settings_, &SettingsDialog::brazing_config_changed, this,
+            &MainWindow::on_brazing_config_changed);
 
     // Adopt the COMMITTED mode from the database. Never assume digit_reader: an
     // appliance booting with a stored ball_leveler must come up gated, exactly as
@@ -676,6 +678,15 @@ void MainWindow::on_theme_changed(bool dark) {
     state_->dark = dark;
     settings::save(db_, *state_);
     apply_theme(dark);
+}
+
+void MainWindow::on_brazing_config_changed() {
+    // A pure forward. The dialog already persisted and validated; the grid is the
+    // single owner of the reporting stack and re-reads the config itself, so there
+    // is no payload to carry and nothing for the window to decide.
+    if (camera_view_) {
+        camera_view_->apply_brazing_config();
+    }
 }
 
 void MainWindow::on_reset_defaults() {

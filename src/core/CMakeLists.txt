@@ -32,6 +32,7 @@ add_library(denso_core STATIC
     detection/migrate.cpp
     reading/repo.cpp
     brazing/config.cpp
+    brazing/url.cpp
     level/calibration.cpp
     level/edit.cpp
     level/measure.cpp

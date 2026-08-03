@@ -205,6 +205,13 @@ std::optional<std::map<int, ZoneValue>> ZoneAggregator::evict_zones(
     return build_snapshot();
 }
 
+void ZoneAggregator::reset_sent_baseline() {
+    // ONE container, on purpose — see the header. Not zones_, not zone_inhibit_,
+    // not newly_inhibited_: a backend reconfiguration is a fact about DELIVERY,
+    // and must not disturb what the appliance has read or is showing.
+    last_sent_.clear();
+}
+
 // Build the full snapshot of every zone holding a stable value and commit it.
 // Returns nullopt when the result would be EMPTY: build_brazing_payload({})
 // renders literal "{}" and, under an unverified backend, could clear every zone.

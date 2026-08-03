@@ -38,20 +38,44 @@ TEST_CASE("CameraGrid constructs the zone reporter unconditionally",
         "reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot)")));
 
     // The delivery SENDER is still gated — aggregation must be unconditional,
-    // but a POST with no configured URL would be a regression.
-    CHECK(src.contains(QStringLiteral("bcfg.enabled && !bcfg.base_url.empty()")));
+    // but a POST with no configured URL would be a regression. The gate moved
+    // into apply_brazing_config() when the sender became live-swappable; it is
+    // the SAME gate (enabled + a usable base URL), now also requiring the address
+    // to survive the shared normalizer.
+    CHECK(src.contains(
+        QStringLiteral("bcfg.enabled && url.ok && !url.base_url.empty()")));
     CHECK(src.contains(QStringLiteral("brazing_reporter_ = std::make_unique<BrazingReporter>")));
 
-    // The old defect: the reporter created INSIDE the config branch. If the
-    // construction ever moves back under the condition, the assignment would
-    // have to be re-introduced next to the sender's.
+    // The old defect: the reporter created INSIDE the config branch. The sender
+    // now lives in a DIFFERENT function entirely, which is the strongest form of
+    // that separation — pin it, so moving the sender back beside the reporter
+    // (where it could be re-gated together with it) fails here.
     const int sender_at = src.indexOf(
         QStringLiteral("brazing_reporter_ = std::make_unique<BrazingReporter>"));
     const int reporter_at = src.indexOf(QStringLiteral(
         "reporter_ = std::make_unique<ZoneReporter>(std::move(on_snapshot)"));
+    const int apply_at =
+        src.indexOf(QStringLiteral("void CameraGrid::apply_brazing_config()"));
     REQUIRE(sender_at > 0);
     REQUIRE(reporter_at > 0);
-    CHECK(reporter_at > sender_at);  // built after the branch closes, not within it
+    REQUIRE(apply_at > 0);
+    CHECK(sender_at > apply_at);      // the sender is built inside apply_brazing_config
+    CHECK(reporter_at < apply_at);    // …and the ZoneReporter is not
+
+    // The snapshot callback must NOT capture a sender: resolving it at delivery
+    // time is what lets the sender be swapped without rebuilding aggregation.
+    CHECK(src.contains(QStringLiteral("if (!brazing_reporter_) return;")));
+
+    // MUTATION: "build the replacement sender without raising the barrier" must
+    // die. Resolving the sender at delivery time means a snapshot queued just
+    // before a Settings Save would otherwise be handed to the REPLACEMENT sender.
+    // The barrier returned by reset_delivery_baseline() must feed the same
+    // drop-stale guard the callback already applies.
+    // simplified(): the statement wraps, and this guard is about the statement,
+    // not about where clang-format chose to break it.
+    CHECK(src.simplified().contains(QStringLiteral(
+        "last_applied_seq_ = std::max(last_applied_seq_, "
+        "reporter_->reset_delivery_baseline());")));
 
     // ...and it must be UNGUARDED. Mutation testing showed the substring checks
     // above survive `if (bcfg.enabled) reporter_ = ...` — the exact defect this

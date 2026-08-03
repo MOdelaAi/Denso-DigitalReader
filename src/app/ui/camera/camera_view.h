@@ -51,6 +51,11 @@ public:
     /// Forwards to CameraGrid::settle_pending_after_warmup() - see there.
     void settle_pending_after_warmup();
 
+    /// Forwards to CameraGrid::apply_brazing_config() - see there. Deliberately
+    /// a pass-through and NOT a reload(): a Backend settings change must not
+    /// re-read the camera list, restart capture or reload a model.
+    void apply_brazing_config();
+
     // Test-only observers of the view's non-live state after teardown_for_switch().
     int current_page_index() const;      ///< 0 = empty, 1 = live grid, 2 = retained/unavailable
     bool grid_has_live_streams() const;  ///< whether the grid still holds a stream

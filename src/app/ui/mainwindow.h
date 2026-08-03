@@ -122,6 +122,11 @@ private:
     void run_apply_display(int mode, int width, int height);
     void on_theme_changed(bool dark);
     void on_reset_defaults();
+    /// The Server settings page persisted a new Backend configuration. Forwards
+    /// to CameraView, which swaps ONLY the reporting stack — no teardown, no
+    /// camera reload, no engine work. Deliberately not routed through the mode
+    /// switch machinery: this changes where readings are sent, nothing else.
+    void on_brazing_config_changed();
 
     /// Execute a planned transition against the real window (canonical, ordered:
     /// hide → set absolute flags → clear state → show → re-assert geometry).
