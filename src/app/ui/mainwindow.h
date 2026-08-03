@@ -6,6 +6,7 @@
 // handlers live in the SettingsDialog with the panel they drive.
 #pragma once
 
+#include "brazing/brazing_status.h"   // BrazingStatus
 #include "mode/mode.h"
 #include "settings/settings.h"
 
@@ -13,10 +14,12 @@
 #include <QSqlDatabase>
 #include <QString>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 
+class QLabel;
 class QPushButton;
 
 namespace denso::ui {
@@ -86,6 +89,16 @@ public:
     // what the window actually shows without reaching into private members.
     int camera_view_page_index() const;
     uint64_t camera_view_grid_reload_invocations() const;
+    /// The grid generation. Every authoritative teardown advances it, and
+    /// callback_is_current() drops any worker callback captured before — so an
+    /// advance across a refresh IS the proof that stale callbacks are rejected.
+    uint64_t camera_view_grid_generation() const;
+    /// Live camera runtimes held by the grid — duplicates would show up here.
+    size_t camera_view_stream_count() const;
+    /// The status the top bar is currently REPORTING. Distinct from
+    /// CameraView::brazing_status() on purpose: a test that compares the two
+    /// proves the indicator is showing the authority rather than its own idea.
+    BrazingStatus displayed_brazing_status() const { return shown_brazing_status_; }
 
 public slots:
     /// The Settings intent handler: validate → refuse → real counts → confirm →
@@ -98,6 +111,20 @@ public slots:
     /// gate holds for every caller, not just the button (spec §2.1, §7.2).
     void open_camera();
 
+    /// Rebuild every camera runtime from the CURRENT persisted configuration.
+    ///
+    /// A runtime refresh, never a reset: it writes nothing, so cameras, models,
+    /// areas/zones, decimal formats, Ball calibration, the operating mode and the
+    /// backend configuration are untouched by construction. It delegates to the
+    /// one existing seam (CameraView::reload -> CameraGrid::reload), which bumps
+    /// the grid generation — so every callback the retired workers captured is
+    /// rejected — stops and joins those workers, and rebuilds from the same rows.
+    ///
+    /// Public because it is the top-bar button's handler AND the entry point a
+    /// test drives, so both exercise the same path. Refuses while a refresh, a
+    /// mode switch or a display transaction is already running.
+    void refresh_cameras();
+
     /// Batched display apply from the Settings dialog. Deferred to the next event
     /// tick (run_apply_display) so the Settings modal closes before the confirm
     /// dialog opens, and ignored while a transaction is already pending.
@@ -107,7 +134,18 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
-    void open_settings();
+    /// Show the Settings modal. `server_page` sends the operator straight to the
+    /// Server section — used by the Backend indicator, which reports on exactly
+    /// those settings.
+    void open_settings(bool server_page = false);
+
+    /// Repaint the top-bar Backend indicator from the AUTHORITY (the grid, via
+    /// CameraView). Called on every status signal, once after construction (the
+    /// view reloads inside its own constructor, before this window can connect)
+    /// and after a mode switch (a ball_leveler grid with no camera never enters
+    /// build_zone_reporting, so no signal would arrive).
+    void refresh_brazing_indicator();
+    void on_brazing_status_changed(BrazingStatus status);
 
     /// Enable/disable the top-bar Camera button for the current mode. Called from
     /// the ctor (so a booted ball_leveler appliance is gated too) and after both
@@ -164,8 +202,15 @@ private:
     CameraView* camera_view_ = nullptr;
     WarmupState* warmup_ = nullptr;
     QPushButton* camera_btn_ = nullptr;  // top-bar Camera; gated off in ball_leveler
+    QPushButton* refresh_btn_ = nullptr; // top-bar Refresh Cameras
+    QPushButton* backend_btn_ = nullptr; // top-bar Backend status (opens Server settings)
+    QLabel* refresh_status_ = nullptr;   // non-modal outcome of the last refresh
     bool fitted_ = false;  // first-show re-fit has run
     bool display_txn_active_ = false;  // a confirm/revert transaction is pending
+    bool camera_refresh_active_ = false;  // a Refresh Cameras run is in flight
+    // What the indicator currently SHOWS. Held so the widget is not re-styled on
+    // every repeated status report, and so a test can read it back.
+    BrazingStatus shown_brazing_status_ = BrazingStatus::Off;
 
     // The committed operating mode, adopted from the DB at construction and
     // updated ONLY after a transaction resolves — never optimistically.

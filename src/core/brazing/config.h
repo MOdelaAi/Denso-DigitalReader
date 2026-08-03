@@ -30,4 +30,14 @@ BrazingConfig load(const QSqlDatabase& db);
 /// supported build (QSQLITE) takes the transactional path.
 bool save(const QSqlDatabase& db, const BrazingConfig& cfg);
 
+/// The row writes ALONE, with no transaction control, for a caller that owns an
+/// enclosing transaction and needs these rows to land or roll back together with
+/// its own. save() is exactly this wrapped in a checked transaction. Split out
+/// because SQLite has no nested transactions: a caller inside one cannot go
+/// through save() at all.
+/// NOT a general-purpose save: on its own it is NOT atomic. Call it only
+/// from code that has already opened a transaction and will commit or roll
+/// back around it; everything else must use save().
+bool save_rows(const QSqlDatabase& db, const BrazingConfig& cfg);
+
 } // namespace denso::brazing

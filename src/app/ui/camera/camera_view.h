@@ -5,13 +5,16 @@
 // open, so it can grab the same USB device); the next reload() restarts.
 #pragma once
 
+#include "brazing/brazing_status.h"   // BrazingStatus
 #include "detection/engine_registry.h"
 
 #include <QSqlDatabase>
 #include <QWidget>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 class QLabel;
 class QPushButton;
@@ -56,13 +59,30 @@ public:
     /// re-read the camera list, restart capture or reload a model.
     void apply_brazing_config();
 
+    /// The grid's backend reporting status, forwarded verbatim. The view adds no
+    /// state of its own — it is a pass-through so the window need not reach
+    /// through it into the grid.
+    BrazingStatus brazing_status() const;
+    /// The canonical base URL the live sender was built with ("" when none), from
+    /// the grid. Feeds the Backend indicator's tooltip; it can carry no
+    /// credentials because normalize_base_url refuses userinfo.
+    std::string active_brazing_base_url() const;
+    /// How many camera runtimes the grid holds — see CameraGrid::stream_count().
+    size_t grid_stream_count() const;
+    /// How many cameras the grid admitted — see CameraGrid::admitted_count().
+    size_t grid_admitted_count() const;
+
     // Test-only observers of the view's non-live state after teardown_for_switch().
     int current_page_index() const;      ///< 0 = empty, 1 = live grid, 2 = retained/unavailable
     bool grid_has_live_streams() const;  ///< whether the grid still holds a stream
     uint64_t grid_reload_invocations() const;  ///< delegate to CameraGrid::reload_invocations()
+    uint64_t grid_generation() const;     ///< delegate to CameraGrid::generation()
 
 signals:
     void add_camera_requested();
+    /// Re-emitted from CameraGrid, unchanged, so the window connects to the view
+    /// it already owns instead of to a grid it would have to reach through.
+    void brazing_status_changed(BrazingStatus status);
 
 private:
     // (Re)build page 2's retained-connection list + mode-specific header/message/

@@ -174,6 +174,14 @@ CameraView::CameraView(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
     rv->addStretch(1);
     stack_->addWidget(retained);  // index 2
 
+    // Connected BEFORE the first reload, so a grid that builds a sender during
+    // construction still announces it. The window connects to this view after the
+    // constructor returns and therefore misses that first edge — which is why
+    // MainWindow seeds its indicator from brazing_status() once, rather than
+    // relying on the signal alone.
+    connect(grid_, &CameraGrid::brazing_status_changed, this,
+            &CameraView::brazing_status_changed);
+
     reload();
 }
 
@@ -291,11 +299,23 @@ void CameraView::apply_brazing_config() {
     grid_->apply_brazing_config();
 }
 
+BrazingStatus CameraView::brazing_status() const { return grid_->brazing_status(); }
+
+std::string CameraView::active_brazing_base_url() const {
+    return grid_->active_brazing_base_url();
+}
+
+size_t CameraView::grid_stream_count() const { return grid_->stream_count(); }
+
+size_t CameraView::grid_admitted_count() const { return grid_->admitted_count(); }
+
 int CameraView::current_page_index() const { return stack_->currentIndex(); }
 
 bool CameraView::grid_has_live_streams() const {
     return grid_->has_live_streams();
 }
+
+uint64_t CameraView::grid_generation() const { return grid_->generation(); }
 
 uint64_t CameraView::grid_reload_invocations() const {
     return grid_->reload_invocations();

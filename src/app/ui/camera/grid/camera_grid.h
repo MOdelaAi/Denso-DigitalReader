@@ -13,6 +13,7 @@
 #include "health/integrity.h"     // IntegrityVerdict
 #include "health/status_file.h"   // ZoneInhibitRecord
 #include "ui/camera/grid/zone_status_publication.h"
+#include "brazing/brazing_status.h"  // BrazingStatus
 #include "brazing/zone_runtime.h"  // ZoneRuntimeEntry
 #include "health/zone_health.h"   // ZoneHealth, ZoneCause
 #include "level/runtime.h"   // LevelState, LevelRuntimeEntry
@@ -109,6 +110,21 @@ public:
     /// running across a Backend settings change; only the sender is swapped.
     void apply_brazing_config();
 
+    /// What backend reporting is actually doing right now. THE authority for the
+    /// top-bar indicator: this object owns the sender, so asking it is the only
+    /// way the bar and the pipeline cannot disagree. A second read of
+    /// brazing.enabled somewhere else would be exactly that disagreement — the
+    /// database can say "enabled" while no sender exists (unusable URL, no live
+    /// pipeline yet), and the operator must be told what is HAPPENING.
+    BrazingStatus brazing_status() const { return brazing_status_; }
+
+signals:
+    /// Emitted only when brazing_status() actually changes value, so a listener
+    /// may connect once and never de-duplicate. Repeated Saves of an unchanged
+    /// configuration are silent here, exactly as they are silent in the pipeline.
+    void brazing_status_changed(BrazingStatus status);
+
+public:
     // Test-only: how many times reload()'s build path was ENTERED (monotonic,
     // increment-only, per-grid). Because the reporter, ZoneHealth, every
     // DetectionProcessor and every CameraStream are constructed ONLY inside
@@ -124,6 +140,20 @@ public:
     // Test-only: whether any live capture stream currently exists. Used by the
     // teardown-seam proof to assert nothing streams after teardown().
     bool has_live_streams() const { return !streams_.empty(); }
+
+    /// How many camera runtimes this grid currently holds. Compared against the
+    /// number of ADMITTED cameras to tell an operator that a refresh came up
+    /// short — a camera whose configuration cannot build a pipeline never becomes
+    /// a stream. Says nothing about whether a stream CONNECTED; that is the
+    /// tile's job.
+    size_t stream_count() const { return streams_.size(); }
+
+    /// How many cameras the last build ADMITTED — after the mode's own filter
+    /// (runtime() vs active()) and after the four-tile cap. Compared against
+    /// stream_count() this is the honest "did every camera the grid was going to
+    /// show actually come up" test; deriving it outside the grid would duplicate
+    /// the admission rule and mistake the deliberate tile cap for a failure.
+    size_t admitted_count() const { return admitted_count_; }
 
     // Test-only observers of the Backend sender, so "exactly one sender", "the
     // sender was destroyed" and "the sender was replaced" are OBSERVED rather
@@ -195,6 +225,9 @@ private:
     // is judged against the SAME facts — the readiness verdict, the runtime
     // resolution and the engine requests cannot drift apart mid-reload.
     void refresh_compatibility_inputs();
+    /// Move the reported status and emit ONLY on a real transition. One writer
+    /// for the member, so "changed" cannot be announced for a value that did not.
+    void set_brazing_status(BrazingStatus status);
 
     QSqlDatabase db_;
     QGridLayout* grid_ = nullptr;
@@ -219,6 +252,11 @@ private:
     // correctly recognised as NO change and do not churn the sender.
     std::string active_brazing_url_;
     uint64_t brazing_sender_builds_ = 0;   // test observable; see the accessor
+    size_t admitted_count_ = 0;            // cameras the last build admitted
+    // Derived state, never a second configuration read: set to On/Off by
+    // apply_brazing_config() (which already decided whether a sender exists) and
+    // moved between On and Error by the sender's own delivery outcomes.
+    BrazingStatus brazing_status_ = BrazingStatus::Off;
     std::unique_ptr<ZoneReporter> reporter_;             // shared ZoneSink (machine)
     // Per-camera inhibit cause owner (GUI thread, no mutex). Drives the reporter
     // gate, the tile banners, and status.json. Rebuilt each reload().

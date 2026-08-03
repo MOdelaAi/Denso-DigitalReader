@@ -34,6 +34,7 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QResizeEvent>
+#include <QSignalBlocker>
 #include <QString>
 #include <QTimer>
 
@@ -65,7 +66,14 @@ CameraGrid::CameraGrid(QSqlDatabase db, std::shared_ptr<EngineRegistry> engines,
     }
 }
 
-CameraGrid::~CameraGrid() { clear(); }
+CameraGrid::~CameraGrid() {
+    // clear() now reports a status transition, and a listener reached during our
+    // own destruction would be handed a half-destroyed grid (and, in the widget
+    // hierarchy, a half-destroyed parent). A status nobody can act on is worth
+    // nothing at teardown, so drop it rather than deliver it late.
+    const QSignalBlocker block(this);
+    clear();
+}
 
 void CameraGrid::poll_zone_runtime() {
     if (!reporter_) {
@@ -202,15 +210,22 @@ void CameraGrid::clear() {
         refresh_status_file();
     }
     reporter_.reset();
-    brazing_reporter_.reset();
-    // Forget which URL the (now destroyed) sender served, or the next
-    // apply_brazing_config() would see an unchanged URL and decline to rebuild
-    // the sender the rebuilt grid needs.
-    active_brazing_url_.clear();
+    // The BACKEND SENDER deliberately survives this. clear() is the teardown of
+    // the CAMERA pipeline, and a camera rebuild (closing the wizard, Refresh
+    // Cameras) is not a reason to throw away a snapshot the server has not acked
+    // yet, nor to churn the top-bar indicator. Retiring the sender is a
+    // MODE-SWITCH act, so it lives in teardown() — the only caller that must not
+    // rebuild — which keeps this the one camera-teardown sequence while letting
+    // the two callers differ where they genuinely differ (spec 6.6).
+    //
+    // Nothing can submit in the gap: every capture and inference worker was
+    // joined above, and reload() re-runs apply_brazing_config() before any new
+    // worker starts.
     // health_ last: its callback references reporter_. No worker can fire it now
     // (workers joined above), and its destructor raises no cause, so this is safe.
     health_.reset();
     last_applied_seq_ = 0;
+    admitted_count_ = 0;
     verdict_ = health::IntegrityVerdict{};
     rows_ = 0;
     cols_ = 0;
@@ -227,6 +242,13 @@ void CameraGrid::teardown() {
     // pipeline down BEFORE the reset transaction and must not rebuild anything, so
     // this is clear() with no reload() — one sequence, defined once (spec §6.2).
     clear();
+    // …and THEN retire the backend sender, which clear() deliberately leaves
+    // alone. This is the one path that must destroy it: the old mode's readings
+    // must never reach the server after the switch (spec §6.6), so an un-acked
+    // snapshot dies here — logged by ~BrazingReporter, as it always was.
+    brazing_reporter_.reset();
+    active_brazing_url_.clear();
+    set_brazing_status(BrazingStatus::Off);
 }
 
 void CameraGrid::publish_idle_status() {
@@ -293,7 +315,11 @@ void CameraGrid::reload() {
     if (cams.size() > static_cast<size_t>(kMaxTiles)) {
         cams.resize(kMaxTiles);  // first four by id
     }
+    admitted_count_ = cams.size();
     if (cams.empty()) {
+        // No pipeline to feed, so no sender may survive the rebuild. This is the
+        // branch apply_brazing_config() handles first (`!reporter_`).
+        apply_brazing_config();
         return;
     }
 
@@ -505,6 +531,14 @@ void CameraGrid::build_zone_reporting(int stable_frames, int64_t hold_timeout_ms
     zone_timer_->start();
 }
 
+void CameraGrid::set_brazing_status(BrazingStatus status) {
+    if (brazing_status_ == status) {
+        return;   // no transition: repeated Saves and repeated acks stay silent
+    }
+    brazing_status_ = status;
+    emit brazing_status_changed(brazing_status_);
+}
+
 void CameraGrid::apply_brazing_config() {
     // Aggregation must already exist for a sender to be worth anything: with no
     // ZoneReporter nothing produces snapshots, and a sender built here would just
@@ -513,6 +547,11 @@ void CameraGrid::apply_brazing_config() {
     if (!reporter_) {
         brazing_reporter_.reset();
         active_brazing_url_.clear();
+        // …and SAY so. clear() no longer reports Off (the sender now survives an
+        // ordinary rebuild), so this branch is the only thing standing between a
+        // grid that ended up with no pipeline — every camera removed or disabled —
+        // and a top bar still claiming readings are going out.
+        set_brazing_status(BrazingStatus::Off);
         return;
     }
 
@@ -542,6 +581,7 @@ void CameraGrid::apply_brazing_config() {
         // callback can start another request.
         brazing_reporter_.reset();
         active_brazing_url_.clear();
+        set_brazing_status(BrazingStatus::Off);
         return;
     }
 
@@ -561,6 +601,19 @@ void CameraGrid::apply_brazing_config() {
         std::make_unique<BrazingClient>(url.base_url));
     active_brazing_url_ = url.base_url;
     ++brazing_sender_builds_;
+
+    // The indicator's Error state comes from the SENDER's own attempts, not from
+    // any probe of our own: the backend exposes only POST /api/brazing/update, so
+    // the outcome of a real report is the only evidence there is. Connected to
+    // the reporter we just built, so a retired sender's late outcome cannot move
+    // the indicator (its connections die with it).
+    connect(brazing_reporter_.get(), &BrazingReporter::delivery_succeeded, this,
+            [this] { set_brazing_status(BrazingStatus::On); });
+    connect(brazing_reporter_.get(), &BrazingReporter::delivery_failed, this,
+            [this] { set_brazing_status(BrazingStatus::Error); });
+    // A freshly built sender has attempted nothing, so it is On (running), never
+    // "Connected" — nothing has been proved about the server yet.
+    set_brazing_status(BrazingStatus::On);
 
     // A fresh sender knows nothing of what the previous one delivered, and the
     // aggregator would otherwise stay silent until a reading CHANGED. Drop the
@@ -597,7 +650,9 @@ void CameraGrid::reload_ball() {
     if (cams.size() > static_cast<size_t>(kMaxTiles)) {
         cams.resize(kMaxTiles);   // first four by id
     }
+    admitted_count_ = cams.size();
     if (cams.empty()) {
+        apply_brazing_config();   // no pipeline -> no surviving sender
         publish_idle_status();
         return;
     }

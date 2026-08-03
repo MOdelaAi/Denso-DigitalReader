@@ -29,6 +29,8 @@
 #include <QScreen>
 #include <QShortcut>
 #include <QShowEvent>
+#include <QStringList>
+#include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -94,11 +96,38 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     camera_btn_ = new QPushButton(QStringLiteral("Camera"));
     camera_btn_->setObjectName(QStringLiteral("cameraButton"));
     connect(camera_btn_, &QPushButton::clicked, this, &MainWindow::open_camera);
+    // Non-modal outcome of the last refresh. A message box would steal focus on a
+    // panel an operator may be watching from across the cell, and per-camera
+    // connection faults already surface on the tile that owns them; this line is
+    // for the one thing a tile cannot say — that the REBUILD itself came up short.
+    refresh_status_ = new QLabel;
+    refresh_status_->setObjectName(QStringLiteral("refreshStatus"));
+    refresh_status_->setProperty("faint", true);
+    refresh_status_->setVisible(false);
+    refresh_btn_ = new QPushButton(QStringLiteral("Refresh Cameras"));
+    refresh_btn_->setObjectName(QStringLiteral("refreshCamerasButton"));
+    refresh_btn_->setToolTip(
+        QStringLiteral("Reconnect and reload all configured cameras"));
+    refresh_btn_->setAccessibleName(QStringLiteral("Refresh cameras"));
+    connect(refresh_btn_, &QPushButton::clicked, this, &MainWindow::refresh_cameras);
     auto* settings_btn = new QPushButton(QStringLiteral("Settings"));
     settings_btn->setObjectName(QStringLiteral("settingsButton"));
-    connect(settings_btn, &QPushButton::clicked, this, &MainWindow::open_settings);
+    connect(settings_btn, &QPushButton::clicked, this,
+            [this] { open_settings(/*server_page*/ false); });
+    // Backend status sits furthest right, away from the actions, because it is a
+    // STATE the operator reads — not another thing to press by reflex. Clicking it
+    // opens the settings it reports on; it deliberately does NOT toggle reporting,
+    // so a stray touch on a production panel cannot stop delivery.
+    backend_btn_ = new QPushButton;
+    backend_btn_->setObjectName(QStringLiteral("backendStatus"));
+    backend_btn_->setProperty("flatText", true);
+    connect(backend_btn_, &QPushButton::clicked, this,
+            [this] { open_settings(/*server_page*/ true); });
+    bar->addWidget(refresh_status_, 0);
+    bar->addWidget(refresh_btn_, 0);
     bar->addWidget(camera_btn_, 0);
     bar->addWidget(settings_btn, 0);
+    bar->addWidget(backend_btn_, 0);
     col->addWidget(top);
 
     // Fullscreen shortcuts: F11 toggles Fullscreen<->Windowed, Esc leaves
@@ -126,6 +155,8 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     // Main content area: the camera view (empty state / configured count).
     camera_view_ = new CameraView(db_, engines, warmup_);
     connect(camera_view_, &CameraView::add_camera_requested, this, &MainWindow::open_camera);
+    connect(camera_view_, &CameraView::brazing_status_changed, this,
+            &MainWindow::on_brazing_status_changed);
     col->addWidget(camera_view_, 1);
 
     setCentralWidget(central);
@@ -138,12 +169,37 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
             &MainWindow::on_apply_display);
     connect(settings_, &SettingsDialog::theme_changed, this,
             &MainWindow::on_theme_changed);
+    // PREVIEW: repaint only. Persisting here would make the dialog's Cancel
+    // unable to undo anything, which is exactly the behaviour being removed.
+    connect(settings_, &SettingsDialog::theme_preview_requested, this,
+            [this](bool dark) { apply_theme(dark); });
     connect(settings_, &SettingsDialog::reset_defaults_requested, this,
             &MainWindow::on_reset_defaults);
     connect(settings_, &SettingsDialog::switch_mode_requested, this,
             &MainWindow::on_switch_mode);
     connect(settings_, &SettingsDialog::brazing_config_changed, this,
             &MainWindow::on_brazing_config_changed);
+    // The theme's PERSISTENCE step, handed to the dialog so it can run inside its
+    // write phase and refuse to apply anything if the write fails. A signal could
+    // not do this: it cannot report failure back to the sender.
+    settings_->set_theme_committer([this](bool dark) {
+        // Rows only: the dialog owns the transaction spanning this and the
+        // brazing write, so the two land or roll back together.
+        //
+        // A COPY, deliberately: `state_` is not touched here. If the transaction
+        // later fails to commit, the database is rolled back and the in-memory
+        // struct must not be left claiming the new value. The apply step
+        // (on_theme_changed) updates state_, and it only runs after the commit.
+        settings::Settings staged = *state_;
+        staged.dark = dark;
+        if (settings::save_rows(db_, staged)) {
+            return true;
+        }
+        qWarning().noquote()
+            << "[settings] could not write the display settings; the Save was"
+            << "abandoned and nothing was changed";
+        return false;
+    });
 
     // Adopt the COMMITTED mode from the database. Never assume digit_reader: an
     // appliance booting with a stored ball_leveler must come up gated, exactly as
@@ -152,6 +208,10 @@ MainWindow::MainWindow(QSqlDatabase db, std::shared_ptr<settings::Settings> stat
     current_mode_ = mode::load(db_);
     settings_->set_current_mode(current_mode_);
     apply_camera_button_gate();
+    // CameraView reloads inside its own constructor, so any status edge it
+    // produced happened before the connect above existed. Seed from the authority
+    // rather than waiting for a signal that has already been and gone.
+    refresh_brazing_indicator();
 }
 
 void MainWindow::apply_startup() {
@@ -205,14 +265,120 @@ void MainWindow::resize_within_screen(int w, int h) {
          avail.top() + (avail.height() - frame.height()) / 2);
 }
 
-void MainWindow::open_settings() {
+void MainWindow::open_settings(bool server_page) {
     // Re-seed from current state, reset to the first tab, then show modally.
     settings_->set_display_mode(state_->mode);
     settings_->set_window_size(state_->width, state_->height);
     settings_->set_theme_dark(state_->dark);
     settings_->show();
+    // AFTER show(): showEvent resets the nav to the first page, so selecting the
+    // Server section any earlier would be undone.
+    if (server_page) {
+        settings_->select_server_page();
+    }
     settings_->raise();
     settings_->activateWindow();
+}
+
+void MainWindow::on_brazing_status_changed(BrazingStatus status) {
+    if (!backend_btn_) return;
+    shown_brazing_status_ = status;
+
+    // Deliberately NOT "Connected". The backend exposes only
+    // POST /api/brazing/update — no health endpoint, no persistent connection —
+    // so the strongest true claim is that the reporting stack is running. ERROR
+    // is the only state here that reflects the server at all, and it does so from
+    // a real delivery attempt.
+    QString text;
+    QString state_prop;
+    QString detail;
+    switch (status) {
+        case BrazingStatus::Off:
+            text = QStringLiteral("Backend: OFF");
+            state_prop = QStringLiteral("off");
+            detail = QStringLiteral("Zone reporting is off.");
+            break;
+        case BrazingStatus::On:
+            text = QStringLiteral("Backend: ON");
+            state_prop = QStringLiteral("on");
+            detail = QStringLiteral("Zone reporting is enabled and running.");
+            break;
+        case BrazingStatus::Error:
+            text = QStringLiteral("Backend: ERROR");
+            state_prop = QStringLiteral("error");
+            detail = QStringLiteral(
+                "Zone reporting is enabled, but the last delivery failed.");
+            break;
+    }
+    backend_btn_->setText(text);
+    backend_btn_->setAccessibleName(text);
+    backend_btn_->setProperty("backendState", state_prop);
+    // Property-driven QSS is not re-evaluated on its own.
+    backend_btn_->style()->unpolish(backend_btn_);
+    backend_btn_->style()->polish(backend_btn_);
+
+    // The canonical base URL, straight from the object that owns the sender. It
+    // can carry no credentials — normalize_base_url rejects userinfo outright —
+    // and no reading value goes anywhere near a tooltip.
+    QStringList lines{detail};
+    if (camera_view_) {
+        const std::string base = camera_view_->active_brazing_base_url();
+        if (!base.empty()) {
+            lines << QStringLiteral("Server: %1").arg(QString::fromStdString(base));
+        }
+    }
+    lines << QStringLiteral("Click to open Server settings.");
+    backend_btn_->setToolTip(lines.join(QLatin1Char('\n')));
+}
+
+void MainWindow::refresh_brazing_indicator() {
+    on_brazing_status_changed(camera_view_ ? camera_view_->brazing_status()
+                                           : BrazingStatus::Off);
+}
+
+void MainWindow::refresh_cameras() {
+    // One refresh at a time, and never against a pipeline another lifecycle owns:
+    // a mode switch is already tearing down and rebuilding, and a display
+    // transaction holds a modal confirm over the window.
+    if (camera_refresh_active_ || switch_active_ || display_txn_active_) {
+        return;
+    }
+    if (!camera_view_) {
+        return;
+    }
+    camera_refresh_active_ = true;
+    refresh_btn_->setEnabled(false);
+    refresh_btn_->setText(QStringLiteral("Refreshing cameras…"));
+    refresh_status_->setVisible(false);
+
+    // Defer one tick so the busy state actually reaches the screen before the
+    // rebuild — which stops and JOINS every capture/inference worker and is
+    // therefore synchronous by nature. Same idiom as on_apply_display.
+    QTimer::singleShot(0, this, [this] {
+        // THE seam. Not a re-implementation of startup: CameraGrid::reload()
+        // advances the grid generation (retiring every callback the old workers
+        // captured), stops and joins those workers, deletes the tiles, and
+        // rebuilds from the same persisted rows. It writes nothing.
+        camera_view_->reload();
+
+        // Both numbers come from the GRID, never re-derived here: it alone knows
+        // which cameras it ADMITTED (the mode's runtime()/active() filter, then
+        // the deliberate four-tile cap). Counting DB rows instead would report
+        // "4 of 5 cameras started" for a five-camera appliance that is behaving
+        // exactly as designed.
+        const size_t admitted = camera_view_->grid_admitted_count();
+        const size_t started = camera_view_->grid_stream_count();
+        if (started < admitted) {
+            // A camera that built no runtime at all — an unusable model binding,
+            // an invalid calibration. Say so plainly; the tile carries the reason.
+            refresh_status_->setText(
+                QStringLiteral("%1 of %2 cameras started").arg(started).arg(admitted));
+            refresh_status_->setVisible(true);
+        }
+        refresh_btn_->setText(QStringLiteral("Refresh Cameras"));
+        refresh_btn_->setEnabled(true);
+        camera_refresh_active_ = false;
+    });
 }
 
 void MainWindow::apply_camera_button_gate() {
@@ -234,6 +400,14 @@ int MainWindow::camera_view_page_index() const {
 
 uint64_t MainWindow::camera_view_grid_reload_invocations() const {
     return camera_view_->grid_reload_invocations();
+}
+
+uint64_t MainWindow::camera_view_grid_generation() const {
+    return camera_view_->grid_generation();
+}
+
+size_t MainWindow::camera_view_stream_count() const {
+    return camera_view_->grid_stream_count();
 }
 
 void MainWindow::on_switch_mode(int target) {
@@ -399,11 +573,38 @@ mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
     } catch (...) {
         note(QStringLiteral("could not determine the mode now in effect"));
     }
+    // Three INDEPENDENT recovery steps, each with its own guard. Sharing one try
+    // block would let a throw in the first silently skip the others — and the
+    // last of them is the fix for exactly that class of staleness, so hiding it
+    // behind an unrelated failure would reintroduce the defect it exists to
+    // prevent. Every one records its own note(), so a partial update is reported
+    // for what it actually was.
     try {
         apply_camera_button_gate();
         settings_->set_current_mode(current_mode_);
     } catch (...) {
         note(QStringLiteral("could not update the window for the new mode"));
+    }
+    try {
+        // A switch writes brazing.enabled = 0, so the indicator MUST move. Read
+        // the authority rather than assume Off: a rolled-back switch changed
+        // nothing, and a ball_leveler grid with no camera never enters
+        // build_zone_reporting(), so no status signal would arrive either way.
+        refresh_brazing_indicator();
+    } catch (...) {
+        note(QStringLiteral("could not update the backend status indicator"));
+    }
+    try {
+        // …and so must the Settings dialog, which is very likely still on screen:
+        // the Switch button lives on ITS Mode page, so showEvent will not fire
+        // again and the Server checkbox would sit there ticked while the database,
+        // the grid and the top bar all say OFF. Passive — it re-reads the same
+        // configuration, writes nothing and emits nothing (see the header). Also
+        // run for a ROLLED-BACK switch: re-reading truth is right either way, and
+        // guessing the outcome here would be a second authority.
+        settings_->refresh_backend_state();
+    } catch (...) {
+        note(QStringLiteral("could not refresh the Server settings page"));
     }
     last_switch_error_ = failure;
 
@@ -511,6 +712,42 @@ mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
         // otherwise leave a lone "switched to ..." info line and no critical record.
         qCritical().noquote() << "[mode] the camera view could not be rebuilt after"
                               << "the switch:" << failure;
+    }
+
+    // ── The switch is over. A COMMIT dismisses Settings ───────────────────────
+    //
+    // The operator pressed Switch from this dialog's Mode page, so it is still on
+    // screen showing a form that describes the appliance as it was before a
+    // destructive reset. Once the transaction has committed, that form is wrong —
+    // both modes' configured setup is gone — so put them back on the main screen.
+    //
+    // The gate is the COMMIT and nothing else. A cancel, a same-mode refusal, a
+    // failed transaction, a rollback and an unresolved outcome all leave the
+    // dialog exactly where the operator left it, because nothing changed for them
+    // to be returned to. But a commit that could not finish updating the window is
+    // still a commit: the form is just as invalid, and — because this dialog is
+    // application-MODAL while the warning below is deliberately not — leaving it
+    // up would put a critical "restart the application" message behind something
+    // the operator has to dismiss first.
+    //
+    // Which is also why this runs BEFORE that message box rather than after it:
+    // the warning should appear over the main window, immediately usable. It
+    // still says exactly what went wrong, so a degraded switch cannot be mistaken
+    // for an ordinary success.
+    //
+    // Last among the state updates, though: the dialog is dismissed only once
+    // every resynchronisation step and the camera reload have had their turn.
+    if (outcome == Outcome::Committed) {
+        try {
+            settings_->close_after_mode_switch();
+        } catch (...) {
+            // Deliberately NOT note()d: `failure` has already decided what the
+            // operator is about to be told, and a dialog that would not close is a
+            // cosmetic leftover, not a reason to retro-report the switch as more
+            // broken than it was.
+            qWarning().noquote()
+                << "[mode] the Settings dialog could not be closed after the switch";
+        }
     }
 
     // Report only after the pipeline is back, so the operator is not reading a
@@ -675,8 +912,11 @@ void MainWindow::run_apply_display(int mode, int width, int height) {
 }
 
 void MainWindow::on_theme_changed(bool dark) {
+    // APPLY only. The dialog persisted this through the theme committer during
+    // its write phase, before emitting — so writing again here would be a second,
+    // unchecked write of a value already on disk, and would put the persistence
+    // back AFTER the apply, which is exactly the ordering this change removes.
     state_->dark = dark;
-    settings::save(db_, *state_);
     apply_theme(dark);
 }
 

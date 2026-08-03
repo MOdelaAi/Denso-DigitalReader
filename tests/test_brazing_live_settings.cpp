@@ -3,7 +3,9 @@
 //
 // Three layers, each proving the part only it can see:
 //   • SettingsDialog — validates, persists the CANONICAL base URL, and emits its
-//     config-changed signal ONLY after the write succeeded;
+//     config-changed signal ONLY after the write succeeded. Driven through the
+//     dialog's ONE primary action ("Save changes"): the Server page no longer
+//     carries a commit button of its own;
 //   • CameraGrid     — swaps only the reporting stack: one sender when enabled,
 //     none when disabled, a replacement (not a duplicate) on a URL change, and a
 //     no-op for an unchanged Save. Capture/inference are observably untouched;
@@ -186,10 +188,10 @@ TEST_CASE("Settings Save normalizes a pasted endpoint and reports the base URL",
     SettingsDialog dlg(db->handle());
     auto* url = dlg.findChild<QLineEdit*>(QStringLiteral("brazingUrl"));
     auto* on = dlg.findChild<QCheckBox*>(QStringLiteral("brazingEnabled"));
-    auto* save = dlg.findChild<QPushButton*>(QStringLiteral("brazingSave"));
+    auto* save = dlg.findChild<QPushButton*>(QStringLiteral("saveChangesButton"));
+    REQUIRE(save != nullptr);
     REQUIRE(url != nullptr);
     REQUIRE(on != nullptr);
-    REQUIRE(save != nullptr);
 
     int emitted = 0;
     QObject::connect(&dlg, &SettingsDialog::brazing_config_changed,
@@ -220,7 +222,8 @@ TEST_CASE("Settings Save refuses an arbitrary path and persists nothing",
     SettingsDialog dlg(db->handle());
     auto* url = dlg.findChild<QLineEdit*>(QStringLiteral("brazingUrl"));
     auto* on = dlg.findChild<QCheckBox*>(QStringLiteral("brazingEnabled"));
-    auto* save = dlg.findChild<QPushButton*>(QStringLiteral("brazingSave"));
+    auto* save = dlg.findChild<QPushButton*>(QStringLiteral("saveChangesButton"));
+    REQUIRE(save != nullptr);
     REQUIRE(url != nullptr);
 
     int emitted = 0;
@@ -249,7 +252,8 @@ TEST_CASE("Settings Save refuses to enable reporting with no address",
 
     SettingsDialog dlg(db->handle());
     auto* on = dlg.findChild<QCheckBox*>(QStringLiteral("brazingEnabled"));
-    auto* save = dlg.findChild<QPushButton*>(QStringLiteral("brazingSave"));
+    auto* save = dlg.findChild<QPushButton*>(QStringLiteral("saveChangesButton"));
+    REQUIRE(save != nullptr);
     int emitted = 0;
     QObject::connect(&dlg, &SettingsDialog::brazing_config_changed,
                      [&] { ++emitted; });
@@ -274,7 +278,8 @@ TEST_CASE("Settings Save emits nothing when the write fails", "[brazing_live]") 
     SettingsDialog dlg(db->handle());
     auto* url = dlg.findChild<QLineEdit*>(QStringLiteral("brazingUrl"));
     auto* on = dlg.findChild<QCheckBox*>(QStringLiteral("brazingEnabled"));
-    auto* save = dlg.findChild<QPushButton*>(QStringLiteral("brazingSave"));
+    auto* save = dlg.findChild<QPushButton*>(QStringLiteral("saveChangesButton"));
+    REQUIRE(save != nullptr);
 
     QSqlQuery drop(db->handle());
     REQUIRE(drop.exec(QStringLiteral("DROP TABLE settings")));

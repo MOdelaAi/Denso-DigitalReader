@@ -140,6 +140,12 @@ add_executable(denso_integration_tests
     # a closed localhost port, and the reporter cases use a fake transport — no
     # engine is loaded and nothing is contacted over the network.
     test_brazing_live_settings.cpp
+    # Main-UI usability: the single Save-changes action, the top-bar Backend
+    # indicator and Refresh Cameras. Drives the REAL SettingsDialog, MainWindow
+    # and CameraGrid, so it needs denso_app. Model-less cameras on a closed
+    # localhost port + an empty engine allow-list: no engine loads and nothing
+    # is contacted.
+    test_ui_controls.cpp
     # Zone Runtime Overlay: structural guards that aggregation is not gated on
     # backend config and that CameraTile stays rendering-only.
     test_zone_runtime_wiring.cpp

@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
+#include <QSqlDriver>
 #include <QSqlQuery>
 #include <QVariant>
 
@@ -73,14 +74,10 @@ Settings load(const QSqlDatabase& db) {
     return out;
 }
 
-void save(const QSqlDatabase& db, const Settings& settings) {
-    // Dual-write display_mode + the legacy fullscreen bool so an older binary
-    // opening the same DB degrades safely (Borderless→Windowed). When the
-    // transaction starts, the two keys stay consistent (all-or-nothing); if it
-    // can't start we fall back to best-effort autocommit writes. transaction()/
-    // commit() are non-const, so operate on a copy of the handle (same connection).
-    QSqlDatabase wdb = db;
-    const bool tx = wdb.transaction();
+bool save_rows(const QSqlDatabase& db, const Settings& settings) {
+    // Dual-write display_mode + the legacy `fullscreen` bool so an older binary
+    // opening the same DB degrades safely (Borderless -> Windowed). Every row is
+    // attempted so the caller learns the full outcome, not just the first fault.
     bool ok = true;
     ok = set(db, QStringLiteral("width"), QString::number(settings.width)) && ok;
     ok = set(db, QStringLiteral("height"), QString::number(settings.height)) && ok;
@@ -91,14 +88,42 @@ void save(const QSqlDatabase& db, const Settings& settings) {
     ok = set(db, QStringLiteral("fullscreen"),
              settings.mode == DisplayMode::Fullscreen ? QStringLiteral("1")
                                                       : QStringLiteral("0")) && ok;
-    // Commit only a fully-successful batch; roll back a partial one (or a failed
-    // commit) so within a working transaction display_mode and the legacy
-    // fullscreen key stay consistent. If the transaction couldn't even start we
-    // fall back to best-effort autocommit writes (non-atomic) rather than lose
-    // the setting — load() prefers display_mode and self-heals on the next save.
-    if (tx) {
-        if (!ok || !wdb.commit()) wdb.rollback();
+    return ok;
+}
+
+bool save(const QSqlDatabase& db, const Settings& settings) {
+    // The rows above, wrapped in a checked transaction so display_mode and the
+    // legacy `fullscreen` key can never disagree. transaction()/commit() are
+    // non-const, so operate on a copy of the handle (the same connection).
+    QSqlDatabase wdb = db;
+    // Two DISTINCT reasons transaction() can fail, needing opposite handling. A
+    // driver with no transaction support was never going to be atomic, so fall
+    // back to best-effort writes rather than lose the setting entirely. But a
+    // driver that DOES support them and still could not BEGIN is a connection in
+    // an unknown state: writing anyway is how a caller gets `false` back AFTER
+    // some rows have already landed, which is exactly what a checked caller must
+    // never be told. Write nothing.
+    const QSqlDriver* driver = wdb.driver();
+    const bool supported =
+        driver != nullptr && driver->hasFeature(QSqlDriver::Transactions);
+    if (supported && !wdb.transaction()) {
+        return false;
     }
+    const bool tx = supported;
+    const bool ok = save_rows(db, settings);
+    // Commit only a fully-successful batch; roll back a partial one, or a failed
+    // commit. The non-transactional path below is reached ONLY on a driver with
+    // no transaction support at all (never QSQLITE) — a supported driver that
+    // could not BEGIN already returned above, having written nothing.
+    if (tx) {
+        if (!ok || !wdb.commit()) {
+            wdb.rollback();
+            return false;
+        }
+        return true;
+    }
+    // No transaction was available, so `ok` is the best-effort per-row result.
+    return ok;
 }
 
 void import_legacy(const QSqlDatabase& db, const QString& json_path) {

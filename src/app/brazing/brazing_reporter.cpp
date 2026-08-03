@@ -20,11 +20,15 @@ BrazingReporter::BrazingReporter(std::unique_ptr<BrazingTransport> transport,
 }
 
 BrazingReporter::~BrazingReporter() {
-    // The reporter is destroyed by CameraGrid::clear() — on an ordinary grid
-    // rebuild, and on the pre-transaction teardown of a mode switch. If the server
-    // never acked the last snapshot, that snapshot dies here. Dropping it is
-    // CORRECT (the old mode's readings must not be posted after a switch, spec
-    // §6.6) but must not be silent, so record what was lost.
+    // The reporter is destroyed by CameraGrid::teardown() — the pre-transaction
+    // teardown of a MODE SWITCH — and when a Settings save retires it in favour of
+    // a differently-configured one. An ordinary camera rebuild (the wizard
+    // closing, Refresh Cameras) deliberately does NOT destroy it, precisely so a
+    // pending snapshot survives that. If the server never acked the last
+    // snapshot, that snapshot dies here. Dropping it is CORRECT on the paths that
+    // do reach here (the old mode's readings must not be posted after a switch,
+    // spec §6.6; the old server's must not be posted to the new one) but must not
+    // be silent, so record what was lost.
     //
     // Zone NUMBERS and their count only — never a reading value (spec §11-R4).
     // This is a log line, not a report: it neither retries nor re-sends anything.
@@ -63,7 +67,17 @@ void BrazingReporter::apply(const RetryAction& action) {
             // don't rely on transitive QNAM/reply ownership for lifetime safety.
             QPointer<BrazingReporter> self(this);
             transport_->post(action.snapshot, [self](bool ok) {
-                if (self) self->apply(self->policy_.on_result(ok));
+                if (!self) return;
+                // Announce BEFORE driving the policy, so the observable outcome
+                // of this attempt cannot be pre-empted by whatever the policy
+                // decides to do next (an immediate re-send would otherwise
+                // report its own result first).
+                if (ok) {
+                    emit self->delivery_succeeded();
+                } else {
+                    emit self->delivery_failed();
+                }
+                self->apply(self->policy_.on_result(ok));
             });
             return;
         }

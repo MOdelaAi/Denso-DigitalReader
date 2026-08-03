@@ -17,6 +17,7 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QShowEvent>
+#include <QSqlDriver>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QVBoxLayout>
@@ -25,6 +26,11 @@
 
 namespace denso::ui {
 namespace {
+
+/// Row of "Server" in the left nav. Named so the Backend indicator's "open
+/// Server settings" and the validation jump both point at ONE place; the
+/// addItems() call below is written against it so the two cannot drift.
+constexpr int kServerNavRow = 4;
 
 /// Put one line of feedback on an inline status label. `warn` selects the theme's
 /// `QLabel[warn="true"]` rule — colour is never the only carrier, the text always
@@ -65,6 +71,7 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     nav_->addItems({QStringLiteral("Display"), QStringLiteral("Mode"),
                     QStringLiteral("System"), QStringLiteral("Network"),
                     QStringLiteral("Server"), QStringLiteral("About")});
+    Q_ASSERT(nav_->item(kServerNavRow)->text() == QStringLiteral("Server"));
     body->addWidget(nav_, 0);
 
     stack_ = new QStackedWidget;
@@ -92,35 +99,191 @@ SettingsDialog::SettingsDialog(QSqlDatabase db, QWidget* parent)
     });
 
     // ── Footer ──
+    //
+    // EXACTLY ONE primary action. The dialog used to carry a gold "Apply" that
+    // committed the display page only, next to a gold "Save" on the Server page
+    // that committed brazing only — two primaries with disjoint, invisible
+    // scopes. There is now one "Save changes" that owns every page, and a
+    // "Cancel" that owns none. "Reset to defaults" stays a flat tertiary action:
+    // it is a recovery path, not a competing way to commit the form.
     outer->addWidget(common::hline());
     auto* footer = new QHBoxLayout;
     footer->setSpacing(8);
     auto* reset = new QPushButton(QStringLiteral("Reset to defaults"));
+    reset->setObjectName(QStringLiteral("resetDefaultsButton"));
     reset->setProperty("flatText", true);
     connect(reset, &QPushButton::clicked, this,
             [this] { emit reset_defaults_requested(); });
-    auto* close_btn = new QPushButton(QStringLiteral("Close"));
-    connect(close_btn, &QPushButton::clicked, this, &QDialog::reject);
-    auto* apply = new QPushButton(QStringLiteral("Apply"));
-    apply->setProperty("gold", true);
-    connect(apply, &QPushButton::clicked, this, [this] {
-        int w = 1600, h = 900;
-        const int id = window_size_->currentData().toInt();
-        if (id >= 0) {
-            const auto [pw, ph] = settings::PRESETS[static_cast<size_t>(id)];
-            w = static_cast<int>(pw);
-            h = static_cast<int>(ph);
-        }
-        emit apply_display_requested(display_mode_->currentData().toInt(), w, h);
-        accept();
-    });
+    auto* cancel_btn = new QPushButton(QStringLiteral("Cancel"));
+    cancel_btn->setObjectName(QStringLiteral("cancelButton"));
+    // reject(), not a bespoke handler: the override below is the ONE discard
+    // path, shared with Esc, the header close glyph and the window manager.
+    connect(cancel_btn, &QPushButton::clicked, this, &QDialog::reject);
+    save_btn_ = new QPushButton(QStringLiteral("Save changes"));
+    save_btn_->setObjectName(QStringLiteral("saveChangesButton"));
+    save_btn_->setProperty("gold", true);
+    connect(save_btn_, &QPushButton::clicked, this, &SettingsDialog::save_changes);
     footer->addWidget(reset, 0);
     footer->addStretch(1);
-    footer->addWidget(close_btn, 0);
-    footer->addWidget(apply, 0);
+    footer->addWidget(cancel_btn, 0);
+    footer->addWidget(save_btn_, 0);
     outer->addLayout(footer);
 
+    capture_baseline();    // nothing edited yet
     nav_->setCurrentRow(0);
+}
+
+SettingsDialog::FormState SettingsDialog::current_form() const {
+    FormState f;
+    f.display_mode = display_mode_ ? display_mode_->currentData().toInt() : -1;
+    f.window_size = window_size_ ? window_size_->currentData().toInt() : -1;
+    f.dark = dark_switch_ && dark_switch_->isChecked();
+    f.brazing_enabled = brazing_enabled_ && brazing_enabled_->isChecked();
+    f.brazing_url = brazing_url_ ? brazing_url_->text() : QString();
+    return f;
+}
+
+void SettingsDialog::capture_baseline() {
+    baseline_ = current_form();
+    dirty_ = false;
+    sync_save_enabled();
+}
+
+void SettingsDialog::recompute_dirty() {
+    if (suppress_signals_) {
+        return;   // seeding is not an edit; the seeding path re-captures instead
+    }
+    dirty_ = current_form() != baseline_;
+    sync_save_enabled();
+}
+
+void SettingsDialog::sync_save_enabled() {
+    if (save_btn_) save_btn_->setEnabled(dirty_);
+}
+
+void SettingsDialog::set_theme_committer(std::function<bool(bool)> commit) {
+    theme_committer_ = std::move(commit);
+}
+
+void SettingsDialog::select_server_page() {
+    const int row = nav_->count() > kServerNavRow ? kServerNavRow : 0;
+    nav_->setCurrentRow(row);
+}
+
+void SettingsDialog::save_changes() {
+    // ── PHASE 1: validate, then persist EVERYTHING in ONE transaction ────────
+    //
+    // Every write happens before any apply, and all of them land or none do. Two
+    // separate checked saves would leave a window where the Server page is on
+    // disk, the display page is not, and the operator has been told the Save
+    // failed — a restart would then come up half-configured. So this owns the
+    // transaction and the two modules contribute rows to it (SQLite has no
+    // nested transactions, which is why *_rows exists at all).
+    QSqlDatabase conn = db_;
+    const QSqlDriver* driver = conn.driver();
+    const bool txn_supported =
+        driver != nullptr && driver->hasFeature(QSqlDriver::Transactions);
+    if (txn_supported && !conn.transaction()) {
+        // The connection is in an unknown state; writing anyway is how a caller
+        // ends up told "failed" after some rows have already landed.
+        select_server_page();
+        set_status(brazing_status_,
+                   QStringLiteral("Could not save: the database is busy. "
+                                  "Nothing was changed."),
+                   true);
+        return;
+    }
+    const auto abandon = [&](const QString& why) {
+        if (txn_supported) conn.rollback();
+        select_server_page();   // put the operator where the problem is
+        set_status(brazing_status_, why, true);
+    };
+
+    // The Server page is the only one with input that can be wrong. Its own
+    // message is more specific than anything here, so on a validation failure it
+    // has already written the status line — do not overwrite it.
+    if (!save_server_settings()) {
+        if (txn_supported) conn.rollback();
+        select_server_page();
+        return;
+    }
+    // The theme has been PREVIEWED live since the toggle moved; this persists it.
+    // A functor, not a signal, because a signal cannot tell us it failed.
+    const bool dark = dark_switch_->isChecked();
+    if (theme_committer_ && !theme_committer_(dark)) {
+        abandon(QStringLiteral("Could not save the display settings to the "
+                               "database. Nothing was changed."));
+        return;
+    }
+    if (txn_supported && !conn.commit()) {
+        // SQLite can leave the transaction open when a commit fails on a busy
+        // connection, and this handle is shared — close it out explicitly.
+        abandon(QStringLiteral("Could not save the settings to the database. "
+                               "Nothing was changed."));
+        return;
+    }
+
+    // ── PHASE 2: runtime effects, only now that every write landed ───────────
+    // Backend first: it is the cheapest and the one the operator most likely
+    // came here for, and the display transaction below can open a modal.
+    emit brazing_config_changed();
+
+    // Apply the theme that was just persisted.
+    emit theme_changed(dark);
+
+    // Display last. MainWindow defers this a tick precisely so this dialog is
+    // closed before its confirm/revert dialog opens, and it persists the mode
+    // only once the operator confirms the window is still usable — apply-then-
+    // confirm-then-persist is deliberate here and is NOT the Save/Apply
+    // ambiguity this change removes: the operator sees one action.
+    int w = 1600, h = 900;
+    const int id = window_size_->currentData().toInt();
+    if (id >= 0) {
+        const auto [pw, ph] = settings::PRESETS[static_cast<size_t>(id)];
+        w = static_cast<int>(pw);
+        h = static_cast<int>(ph);
+    }
+    emit apply_display_requested(display_mode_->currentData().toInt(), w, h);
+
+    // The form now IS what is stored, so it becomes the new reference.
+    capture_baseline();
+    accept();
+}
+
+void SettingsDialog::reject() {
+    // The ONE discard path. Cancel, Esc, the header's close glyph and the window
+    // manager's close box all arrive here, which is why the restoration lives in
+    // the override and not in the button's handler: wiring only the button would
+    // leave an Esc-dismissed dialog with its theme preview still applied and
+    // nothing persisted — the running app disagreeing with the database.
+    //
+    // Undo that preview; everything else on this dialog is staged in widgets and
+    // dies with the edit. Nothing is written and no commit signal is emitted.
+    if (dark_switch_ && dark_switch_->isChecked() != entry_dark_) {
+        emit theme_preview_requested(entry_dark_);
+        // Put the widget back in step with the theme now in effect, so re-opening
+        // the dialog cannot show a toggle that disagrees with the running app.
+        const bool prev = suppress_signals_;
+        suppress_signals_ = true;
+        dark_switch_->setChecked(entry_dark_);
+        suppress_signals_ = prev;
+    }
+    // Discarded: whatever is on screen is no longer an unsaved edit. The next
+    // open re-seeds from the database and re-captures anyway.
+    capture_baseline();
+    QDialog::reject();
+}
+
+void SettingsDialog::close_after_mode_switch() {
+    if (!isVisible()) {
+        return;   // nothing to close; see the header
+    }
+    // reject(), NOT a second discard implementation. Everything this needs — undo
+    // the theme preview, re-capture the baseline, write nothing, emit no commit —
+    // is already the contract of the dialog's one discard path, and a private copy
+    // of it here would be a second place for those rules to drift. The NAME at the
+    // call site carries the intent that reject() alone would not.
+    reject();
 }
 
 QWidget* SettingsDialog::build_display() {
@@ -153,16 +316,27 @@ QWidget* SettingsDialog::build_display() {
     size_box->addWidget(window_size_hint_);
     v->addLayout(size_box);
 
-    connect(display_mode_, &QComboBox::currentIndexChanged, this,
-            [this](int) { sync_size_enabled(); });
+    connect(display_mode_, &QComboBox::currentIndexChanged, this, [this](int) {
+        sync_size_enabled();
+        recompute_dirty();
+    });
+    connect(window_size_, &QComboBox::currentIndexChanged, this,
+            [this](int) { recompute_dirty(); });
 
     // Dark mode lives here too (the old standalone Appearance tab held only this).
     v->addWidget(common::hline());
     auto* dark_row = new QHBoxLayout;
     dark_row->addWidget(new QLabel(QStringLiteral("Dark mode")), 1);
     dark_switch_ = new QCheckBox;
+    dark_switch_->setObjectName(QStringLiteral("darkModeSwitch"));
     connect(dark_switch_, &QCheckBox::toggled, this, [this](bool on) {
-        if (!suppress_signals_) emit theme_changed(on);
+        if (suppress_signals_) return;
+        // PREVIEW only. Committing here is what made the old dialog's Cancel a
+        // lie: the theme was persisted the instant the switch moved, so there was
+        // nothing left to cancel. Save changes commits it; Cancel restores
+        // entry_dark_.
+        emit theme_preview_requested(on);
+        recompute_dirty();
     });
     dark_row->addWidget(dark_switch_, 0);
     v->addLayout(dark_row);
@@ -245,6 +419,8 @@ QWidget* SettingsDialog::build_server() {
 
     brazing_enabled_ = new QCheckBox(QStringLiteral("Send zone readings to server"));
     brazing_enabled_->setObjectName(QStringLiteral("brazingEnabled"));
+    connect(brazing_enabled_, &QCheckBox::toggled, this,
+            [this](bool) { recompute_dirty(); });
     v->addWidget(brazing_enabled_);
 
     auto* url_box = new QVBoxLayout;
@@ -253,6 +429,11 @@ QWidget* SettingsDialog::build_server() {
     brazing_url_ = new QLineEdit;
     brazing_url_->setObjectName(QStringLiteral("brazingUrl"));
     brazing_url_->setPlaceholderText(QStringLiteral("http://192.168.1.112:8080"));
+    // textChanged, not textEdited: setText() during seeding runs under
+    // suppress_signals_, which recompute_dirty() already ignores, and this way a
+    // programmatic edit from anywhere else still arms the primary action.
+    connect(brazing_url_, &QLineEdit::textChanged, this,
+            [this](const QString&) { recompute_dirty(); });
     url_box->addWidget(brazing_url_);
     // Says exactly what the field is NOT: the endpoint is fixed and appended by
     // the application, so an operator who pastes the whole endpoint can see why
@@ -263,20 +444,11 @@ QWidget* SettingsDialog::build_server() {
     url_box->addWidget(hint);
     v->addLayout(url_box);
 
-    auto* save = new QPushButton(QStringLiteral("Save"));
-    save->setObjectName(QStringLiteral("brazingSave"));
-    save->setProperty("gold", true);
-    connect(save, &QPushButton::clicked, this, [this] {
-        if (!save_server_settings()) {
-            return;   // the reason is already on screen; nothing was persisted
-        }
-        // AFTER persistence, never before: a listener treats this as "the stored
-        // config changed, re-read it", so emitting on a failed write would make
-        // the running pipeline adopt a configuration the database does not hold.
-        emit brazing_config_changed();
-    });
-    v->addWidget(save, 0, Qt::AlignLeft);
-
+    // NO page-level Save button. This page used to carry its own gold Save while
+    // the footer carried a gold Apply that meant something else entirely; the
+    // footer's "Save changes" now owns this page too. What stays is the inline
+    // status line below, because a validation message belongs beside the field
+    // that failed, not in a dialog footer.
     brazing_status_ = new QLabel;
     brazing_status_->setObjectName(QStringLiteral("brazingStatus"));
     brazing_status_->setWordWrap(true);
@@ -288,11 +460,46 @@ QWidget* SettingsDialog::build_server() {
 }
 
 void SettingsDialog::reload_server_page() {
+    // The ONE place the Server page is filled in, used by construction, by every
+    // open (showEvent) and by refresh_backend_state(). It READS the authoritative
+    // configuration and writes nothing back: the checkbox and the field are an
+    // editor view of that state, never a second copy of it.
+    //
+    // Seeding, not editing: without the guard, merely opening Settings — or a
+    // passive re-sync — would arm "Save changes" via the checkbox/line-edit
+    // change signals.
+    const bool prev = suppress_signals_;
+    suppress_signals_ = true;
     const brazing::BrazingConfig cfg = brazing::load(db_);
     brazing_enabled_->setChecked(cfg.enabled);
+    // The base URL is preserved by a mode switch on purpose, so re-seeding shows
+    // the operator the address they still have — only the enabled flag moved.
     brazing_url_->setText(QString::fromStdString(cfg.base_url));
+    suppress_signals_ = prev;
     common::mark_invalid(brazing_url_, false);
     set_status(brazing_status_, QString(), false);
+}
+
+void SettingsDialog::refresh_backend_state() {
+    // Re-seed the widgets from the authority — see the header for why this stays
+    // passive.
+    reload_server_page();
+
+    // …then RETIRE the Server page's contribution to the dirty comparison, and
+    // only that. The operator's unsaved tick has just been overwritten by a
+    // committed switch, so it no longer exists and must not keep "Save changes"
+    // armed: pressing it would run the whole persist-and-apply sequence — up to
+    // and including a display confirm/revert — for a form that already matches
+    // what is stored.
+    //
+    // Rebasing ONLY these two fields is what keeps an unsaved edit on another
+    // page (a display mode, the theme) armed, which a blanket `dirty_ = false`
+    // would silently throw away. This is precisely why dirty is a comparison
+    // against baseline_ rather than a sticky flag.
+    baseline_.brazing_enabled = brazing_enabled_->isChecked();
+    baseline_.brazing_url = brazing_url_->text();
+    dirty_ = current_form() != baseline_;
+    sync_save_enabled();
 }
 
 bool SettingsDialog::save_server_settings() {
@@ -323,7 +530,10 @@ bool SettingsDialog::save_server_settings() {
         return false;
     }
 
-    if (!brazing::save(db_, out)) {
+    // save_ROWS: save_changes() owns the transaction, so this must not open one
+    // of its own — SQLite has no nested transactions, and a second BEGIN here
+    // would fail and take an otherwise-good Save down with it.
+    if (!brazing::save_rows(db_, out)) {
         common::mark_invalid(brazing_url_, false);
         set_status(brazing_status_,
                    QStringLiteral("Could not save the settings to the database. "
@@ -336,7 +546,10 @@ bool SettingsDialog::save_server_settings() {
     // other than what the field displays is how the doubled-path defect stayed
     // invisible for so long.
     common::mark_invalid(brazing_url_, false);
+    const bool prev = suppress_signals_;
+    suppress_signals_ = true;
     brazing_url_->setText(QString::fromStdString(out.base_url));
+    suppress_signals_ = prev;
     set_status(brazing_status_,
                out.enabled ? QStringLiteral("Saved. Reporting is active.")
                            : QStringLiteral("Saved. Reporting is off."),
@@ -407,6 +620,9 @@ void SettingsDialog::set_display_mode(settings::DisplayMode mode) {
     if (i >= 0) display_mode_->setCurrentIndex(i);
     sync_size_enabled();
     suppress_signals_ = false;
+    // Seeded values ARE the reference: what the window just pushed in is, by
+    // definition, what is stored.
+    capture_baseline();
 }
 
 void SettingsDialog::set_window_size(uint32_t width, uint32_t height) {
@@ -417,12 +633,19 @@ void SettingsDialog::set_window_size(uint32_t width, uint32_t height) {
     if (at >= 0) window_size_->setCurrentIndex(at);
     else if (window_size_->count() > 0) window_size_->setCurrentIndex(window_size_->count() - 1);
     suppress_signals_ = false;
+    capture_baseline();
 }
 
 void SettingsDialog::set_theme_dark(bool dark) {
     suppress_signals_ = true;
     dark_switch_->setChecked(dark);
     suppress_signals_ = false;
+    capture_baseline();
+    // The theme Cancel restores. Recorded HERE because this is the one place
+    // the window tells the dialog what theme is actually committed — deriving it
+    // from the checkbox later would just re-read whatever the operator changed it
+    // to.
+    entry_dark_ = dark;
 }
 
 void SettingsDialog::set_current_mode(mode::TargetMode mode) {
@@ -444,12 +667,19 @@ void SettingsDialog::sync_mode_button() {
 
 void SettingsDialog::showEvent(QShowEvent* event) {
     nav_->setCurrentRow(0);
+    const bool prev = suppress_signals_;
+    suppress_signals_ = true;
     rebuild_window_sizes();  // re-filter to the current screen each open
+    suppress_signals_ = prev;
     // The dialog is created once and reused, so the Server page must re-read the
     // database rather than keep whatever was on screen last time. A mode switch
     // writes brazing.enabled = 0 behind this dialog's back; without this re-seed
     // the operator would reopen Settings to a stale ticked box.
     reload_server_page();
+    // A freshly opened dialog has no unsaved edits, whatever the last visit left
+    // behind — so the primary action starts disabled and only the operator can
+    // arm it.
+    capture_baseline();
     QDialog::showEvent(event);
 }
 

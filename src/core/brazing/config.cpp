@@ -44,6 +44,13 @@ BrazingConfig load(const QSqlDatabase& db) {
     return out;
 }
 
+bool save_rows(const QSqlDatabase& db, const BrazingConfig& cfg) {
+    return set(db, QStringLiteral("brazing.enabled"),
+               cfg.enabled ? QStringLiteral("1") : QStringLiteral("0")) &&
+           set(db, QStringLiteral("brazing.base_url"),
+               QString::fromStdString(cfg.base_url));
+}
+
 bool save(const QSqlDatabase& db, const BrazingConfig& cfg) {
     // ONE transaction over both rows, so the checked result is atomic: a caller
     // told "false" can state that nothing was applied, and a restart can never
@@ -73,10 +80,7 @@ bool save(const QSqlDatabase& db, const BrazingConfig& cfg) {
         return false;
     }
 
-    const bool ok = set(conn, QStringLiteral("brazing.enabled"),
-                        cfg.enabled ? QStringLiteral("1") : QStringLiteral("0")) &&
-                    set(conn, QStringLiteral("brazing.base_url"),
-                        QString::fromStdString(cfg.base_url));
+    const bool ok = save_rows(conn, cfg);
 
     if (!supported) {
         // No transaction was opened, so there is nothing to commit or roll back.

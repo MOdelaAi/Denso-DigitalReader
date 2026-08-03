@@ -110,6 +110,22 @@ QString style_sheet(const Palette& p) {
         QPushButton[flatText="true"]:disabled {
             background: transparent; color: %(txtFaint);
         }
+        /* Top-bar backend status. Colours come from the palette's status entries,
+           which are identical in both themes and chosen to read on either panel —
+           never a literal here, or dark mode would lose it. Colour is a SECOND
+           channel only: the button always spells out OFF / ON / ERROR. */
+        QPushButton[backendState="off"] {
+            background: transparent; color: %(statusNeutral); font-weight: 600;
+        }
+        QPushButton[backendState="on"] {
+            background: transparent; color: %(statusOk); font-weight: 600;
+        }
+        QPushButton[backendState="error"] {
+            background: transparent; color: %(statusBad); font-weight: 600;
+        }
+        QPushButton[backendState="off"]:hover,
+        QPushButton[backendState="on"]:hover,
+        QPushButton[backendState="error"]:hover { background: %(panel3); }
 
         QLineEdit {
             background: %(panel);  /* color via palette (Text/PlaceholderText) */
@@ -180,6 +196,9 @@ QString style_sheet(const Palette& p) {
         .replace(QStringLiteral("%(gold300)"), css(p.gold_300))
         .replace(QStringLiteral("%(gold500)"), css(p.gold_500))
         .replace(QStringLiteral("%(warn)"), css(p.status_warning))
+        .replace(QStringLiteral("%(statusOk)"), css(p.status_ok))
+        .replace(QStringLiteral("%(statusBad)"), css(p.status_bad))
+        .replace(QStringLiteral("%(statusNeutral)"), css(p.status_neutral))
         .replace(QStringLiteral("%(gold)"), css(p.gold));
 }
 

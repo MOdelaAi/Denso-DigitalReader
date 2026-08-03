@@ -10,6 +10,8 @@
 #include "settings/display.h"
 
 #include <QDialog>
+
+#include <functional>
 #include <QSqlDatabase>
 #include <QString>
 
@@ -45,6 +47,89 @@ public:
     // switch request (seeding is not an intent).
     void set_current_mode(mode::TargetMode mode);
 
+    /// Install the theme COMMITTER: persist `dark` and report whether the write
+    /// landed. Called during Save changes' persistence phase, BEFORE any runtime
+    /// signal, so a failed theme write cannot leave half the form applied.
+    ///
+    /// A functor rather than a signal because a signal cannot report failure, and
+    /// the whole point of the phase split is that this one can. MainWindow owns
+    /// the settings struct, so it owns the write; the dialog owns the ordering.
+    /// Left unset (in tests that drive the dialog alone) it is treated as
+    /// "nothing to persist", never as a failure.
+    void set_theme_committer(std::function<bool(bool)> commit);
+
+    /// Select the Server page. Called after show() (showEvent resets the nav to
+    /// the first page), so the top-bar Backend indicator can take the operator
+    /// straight to the settings it reports on.
+    void select_server_page();
+
+    /// PASSIVE re-sync of the Server page to the authoritative stored Backend
+    /// configuration. Call it when something OUTSIDE this dialog has changed that
+    /// configuration while the dialog is alive — today, a committed mode switch,
+    /// which writes `brazing.enabled = 0`.
+    ///
+    /// Needed because the Switch button lives on this dialog's Mode page, so a
+    /// switch happens with the dialog still VISIBLE: showEvent never fires again,
+    /// and the Server page would keep showing the ticked box the operator opened
+    /// it with. The database, the grid and the top-bar indicator would all say
+    /// OFF while this checkbox said ON.
+    ///
+    /// PASSIVE means exactly that. It re-reads the same configuration everything
+    /// else reads — it holds no state of its own — and it:
+    ///   • writes NOTHING to the database (it is a reader);
+    ///   • emits NO brazing_config_changed (nothing asked for a reconfiguration —
+    ///     the runtime already followed the switch through its own path, and
+    ///     re-emitting would make a passive redisplay look like an operator
+    ///     action);
+    ///   • never ARMS "Save changes" (the widgets move under suppress_signals_),
+    ///     so an authoritative refresh cannot masquerade as an unsaved edit.
+    ///
+    /// A committed switch outranks an unsaved tick of the box: the operator's
+    /// pending intent is overwritten, because the appliance has since been told
+    /// something authoritative about what it is doing.
+    void refresh_backend_state();
+
+    /// Close the dialog because a mode switch COMMITTED. Call only after the
+    /// switch has genuinely succeeded and the window has finished resynchronising
+    /// — never on a cancel, a refusal, a rollback or an unresolved transaction.
+    ///
+    /// A committed switch is a DISCARD, not a Save. It has just destroyed the
+    /// configured setup of both modes, so leaving the operator on a form whose
+    /// staged fields describe the world before that is worse than useless; and
+    /// saving those fields on their behalf would persist edits they never
+    /// confirmed. So this deliberately routes through reject() — the dialog's ONE
+    /// discard path — rather than accept():
+    ///   • the unsaved theme PREVIEW is restored to the persisted theme (a
+    ///     preview left applied would leave the running app disagreeing with the
+    ///     database, and there is no dialog left to undo it from);
+    ///   • the dirty baseline is re-captured, so the reused dialog reopens clean;
+    ///   • nothing is written and no Save/apply signal is emitted.
+    ///
+    /// It asks for no discard confirmation: the operator has just confirmed a
+    /// destructive switch, and a second "are you sure?" over the top of that would
+    /// be asking again about a decision already made.
+    ///
+    /// A no-op when the dialog is not visible — there is nothing to close, and a
+    /// hidden dialog holds no live preview (every path that hides it already
+    /// resolved one).
+    void close_after_mode_switch();
+
+    // Test-only observers of the single-primary-action contract, so a case can
+    // assert what the operator can actually do without re-deriving it from the
+    // widget tree.
+    bool is_dirty() const { return dirty_; }
+
+public slots:
+    /// EVERY dismissal that is not a successful save funnels through here: the
+    /// Cancel button, Esc, the header's close glyph and the window manager's
+    /// close box all end in QDialog::reject(). Overriding it — rather than wiring
+    /// only the button — is what makes "Cancel applies nothing" true for all of
+    /// them, because the live theme preview has to be undone whichever way the
+    /// operator leaves. Public, like the base-class slot it replaces.
+    void reject() override;
+
+public:
+
 protected:
     // The Slint modal is recreated on each open, so it always starts on the
     // first tab — reset the nav to match when the reused dialog is shown.
@@ -53,8 +138,17 @@ protected:
 signals:
     // Batched display apply: mode is static_cast<int>(DisplayMode); width/height
     // are the windowed size. The window runs the confirm/revert transaction.
+    // Emitted ONLY from Save changes — never from a bare selector change.
     void apply_display_requested(int mode, int width, int height);
+    // COMMIT the theme: persist it and apply it. Emitted only from Save changes.
     void theme_changed(bool dark);
+    // PREVIEW the theme: apply it to the running app WITHOUT persisting.
+    //
+    // Split from theme_changed so the toggle can keep its immediate visual
+    // feedback while Cancel stays honest — the dialog re-emits this with the
+    // theme it opened on, so a cancelled edit leaves nothing behind in the
+    // window or in the database. A listener MUST NOT persist on this signal.
+    void theme_preview_requested(bool dark);
     void reset_defaults_requested();
     // Application-wide operating-mode switch INTENT (spec §5/§7). `target` is
     // static_cast<int>(mode::TargetMode). Emitted only when the operator clicks
@@ -88,6 +182,41 @@ private:
     /// false otherwise. NEVER reports success for input it rejected.
     bool save_server_settings();
 
+    /// The ONE primary action. Validates every dirty page, persists what needs
+    /// persisting, emits the runtime-apply signals in that order, and closes.
+    /// Keeps the dialog open (and persists/emits nothing) on a validation or
+    /// write failure.
+    void save_changes();
+    /// Every value on this form that the operator can edit, as one comparable
+    /// snapshot. Dirty is a COMPARISON against the baseline, not a sticky flag:
+    /// a flag cannot express "this page was re-synced to authoritative state, so
+    /// its edit no longer exists" without also discarding an unsaved edit on some
+    /// other page.
+    struct FormState {
+        int     display_mode = -1;
+        int     window_size = -1;
+        bool    dark = true;
+        bool    brazing_enabled = false;
+        QString brazing_url;
+
+        friend bool operator==(const FormState& a, const FormState& b) {
+            return a.display_mode == b.display_mode && a.window_size == b.window_size &&
+                   a.dark == b.dark && a.brazing_enabled == b.brazing_enabled &&
+                   a.brazing_url == b.brazing_url;
+        }
+        friend bool operator!=(const FormState& a, const FormState& b) {
+            return !(a == b);
+        }
+    };
+    FormState current_form() const;
+    /// Adopt the form as it stands as the new "nothing to save" reference.
+    void capture_baseline();
+    /// Re-derive dirty_ from baseline_ and repaint the primary action. Called
+    /// from every edit signal; a no-op while seeding (suppress_signals_), because
+    /// the seeding path re-captures the baseline itself.
+    void recompute_dirty();
+    void sync_save_enabled();  // Save changes follows dirty_
+
     void rebuild_window_sizes();  // filter PRESETS to this dialog's screen
     void sync_size_enabled();     // enable window_size_ only in Windowed
     void sync_mode_button();      // disable Switch-and-Reset when selected == current
@@ -95,6 +224,21 @@ private:
 
     QSqlDatabase db_;
     bool suppress_signals_ = false;
+    // Has the operator changed anything since this dialog was opened/seeded?
+    // DERIVED from baseline_, so it answers the real question ("does the form
+    // still differ from what is stored?") rather than "did anything ever move?".
+    // Gates the single primary action, so "Save changes" cannot claim to have
+    // done something when there was nothing to do.
+    bool dirty_ = false;
+    FormState baseline_;
+    // The theme in effect when the dialog was opened. The toggle PREVIEWS live,
+    // so Cancel needs the value to restore — without it, "Cancel applies nothing"
+    // would be false the moment anyone flicked dark mode.
+    bool entry_dark_ = true;
+    QPushButton* save_btn_ = nullptr;   // the ONE primary action
+    // Installed by MainWindow; see set_theme_committer. Empty in dialog-only
+    // tests, where there is no settings struct to write.
+    std::function<bool(bool)> theme_committer_;
 
     QListWidget* nav_ = nullptr;
     QStackedWidget* stack_ = nullptr;

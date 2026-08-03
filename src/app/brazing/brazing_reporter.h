@@ -29,6 +29,20 @@ public:
     /// Hand in the latest full zone snapshot to (eventually) deliver.
     void submit(const std::map<int, ZoneValue>& snapshot);
 
+signals:
+    /// The outcome of ONE delivery attempt, reported from the same
+    /// QPointer-guarded result callback the retry policy is driven from — so a
+    /// listener sees exactly what the policy saw, and a reply landing after this
+    /// reporter is destroyed emits nothing.
+    ///
+    /// These exist for the top-bar status indicator. They carry no payload: a
+    /// reading value must never travel to a widget that only needs to know
+    /// whether the last POST worked, and the failure detail is already in the
+    /// bounded log. Retry scheduling needs no separate signal — a failure is what
+    /// arms the retry, so `delivery_failed` already marks "failing or retrying".
+    void delivery_succeeded();
+    void delivery_failed();
+
 private:
     void apply(const RetryAction& action);  // execute one policy instruction
 
