@@ -18,7 +18,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 15;
+constexpr int SCHEMA_VERSION = 16;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -829,6 +829,32 @@ bool run_migrations(const QSqlDatabase& db) {
             return false;
         }
         if (!migrate_ball_calibration_to_zones(db)) {
+            return false;
+        }
+    }
+
+    if (version < 16) {
+        // Per-ZONE decimal format for the Digital Number reader. The reader always
+        // reads four raw digit positions; this column says only where the point
+        // sits among them (0 = 0000, 1 = 000.0, 2 = 00.00, 3 = 0.000). Storing the
+        // POSITION rather than a format string keeps the set of legal formats
+        // closed — there is no way to persist a format the reader cannot render.
+        //
+        // It belongs to the AREA, not to the camera and not to the model: one
+        // camera can own several zones reading different instruments, and one
+        // model reads all of them.
+        //
+        // DEFAULT 0 is what makes this migration behaviour-preserving. Every area
+        // that exists today keeps reporting the plain four-digit integer it
+        // reports now, so an upgrade changes no operator's readings until they
+        // choose a format themselves.
+        //
+        // Ball Leveler zones do not use this column: their geometry lives in
+        // ball_level_zone and their value is a whole percent.
+        if (!add_column("camera_area", "decimal_places",
+                        "ALTER TABLE camera_area ADD COLUMN decimal_places "
+                        "INTEGER NOT NULL DEFAULT 0 "
+                        "CHECK (decimal_places BETWEEN 0 AND 3)")) {
             return false;
         }
     }

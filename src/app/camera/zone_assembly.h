@@ -19,6 +19,14 @@ namespace denso::ui {
 constexpr float kPitchPerHeight = 0.70f;
 constexpr float kGapFactor      = 1.60f;
 
+/// The instrument face the digit reader reads: FOUR digit positions, always.
+/// The zone's decimal_places says only where the point sits among them, so the
+/// accepted WIDTH is a property of the reader and the format is a property of
+/// the zone. Raising this from the three positions the reader originally
+/// accepted is what makes the 0000 / 000.0 / 00.00 / 0.000 formats readable at
+/// all — every one of them is four positions wide.
+constexpr int kDigitPositions = 4;
+
 struct ZoneAssembly {
     ReadingKind kind  = ReadingKind::NoValue;
     int         value = 0;   // meaningful ONLY when kind == Complete

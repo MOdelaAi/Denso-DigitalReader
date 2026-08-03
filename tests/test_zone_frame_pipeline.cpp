@@ -22,6 +22,7 @@
 
 #include <optional>
 #include <vector>
+#include "zone_value_compat.h"
 
 using denso::ui::DetectionProcessor;
 using denso::ui::OrientationProcessor;
@@ -33,7 +34,7 @@ using denso::ui::ZoneViewFn;
 namespace {
 
 ZoneRuntimeEntry entry(int64_t cam, int zone_no, ZoneDisplayState state,
-                       std::optional<int> value = std::nullopt) {
+                       std::optional<denso::ui::ZoneValue> value = std::nullopt) {
     ZoneRuntimeEntry e;
     e.camera_id = cam;
     e.zone_no = zone_no;
@@ -77,8 +78,8 @@ TEST_CASE("the orientation path delivers an annotated frame", "[zone_pipeline]")
     OrientationProcessor plain(0, 0.0, 0.0);
     OrientationProcessor annotated(
         0, 0.0, 0.0,
-        fixed_view({entry(1, 1, ZoneDisplayState::Healthy, 128),
-                    entry(1, 2, ZoneDisplayState::HoldingLastValid, 95)}));
+        fixed_view({entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128}),
+                    entry(1, 2, ZoneDisplayState::HoldingLastValid, denso::ui::ZoneValue{95})}));
 
     const QImage src = grey_frame();
     const QImage bare = plain.process(src);
@@ -110,9 +111,9 @@ TEST_CASE("no zones means the frame is passed through untouched",
 TEST_CASE("two cameras sharing zone 1 deliver different frames",
           "[zone_pipeline]") {
     OrientationProcessor cam1(
-        0, 0.0, 0.0, fixed_view({entry(1, 1, ZoneDisplayState::Healthy, 128)}));
+        0, 0.0, 0.0, fixed_view({entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})}));
     OrientationProcessor cam2(
-        0, 0.0, 0.0, fixed_view({entry(2, 1, ZoneDisplayState::HoldingLastValid, 64)}));
+        0, 0.0, 0.0, fixed_view({entry(2, 1, ZoneDisplayState::HoldingLastValid, denso::ui::ZoneValue{64})}));
 
     const QImage src = grey_frame();
     CHECK(differing(cam1.process(src), cam2.process(src)) > 0);
@@ -125,12 +126,12 @@ namespace {
 // Drive a real ZoneReporter to an accepted value and annotate a frame from its
 // projection, exactly as the grid's ZoneViewFn does.
 QImage frame_from_reporter(
-    std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot,
+    std::function<void(const std::map<int, denso::ui::ZoneValue>&, uint64_t)> on_snapshot,
     int* calls = nullptr) {
     ZoneReporter rep(std::move(on_snapshot), 3);
     rep.set_configured_zones(1, {1});
     for (int i = 0; i < 3; ++i) {
-        rep.on_zones(1, {denso::ui::ZoneReading{1, 128, 0.9f,
+        rep.on_zones(1, {denso::ui::ZoneReading{1, {128}, 0.9f,
                                                 denso::ui::ReadingKind::Complete}});
     }
     (void)calls;
@@ -156,7 +157,7 @@ TEST_CASE("backend offline does not remove the annotation", "[zone_pipeline]") {
     int calls = 0;
     // A downed server: the transport takes the snapshot and never acknowledges.
     const QImage failing = frame_from_reporter(
-        [&calls](const std::map<int, int>&, uint64_t) { ++calls; });
+        [&calls](const std::map<int, denso::ui::ZoneValue>&, uint64_t) { ++calls; });
     const QImage bare = OrientationProcessor(0, 0.0, 0.0).process(grey_frame());
 
     CHECK(calls > 0);                        // delivery was attempted
@@ -165,7 +166,7 @@ TEST_CASE("backend offline does not remove the annotation", "[zone_pipeline]") {
 
 TEST_CASE("backend enabled and disabled annotate identically", "[zone_pipeline]") {
     const QImage off = frame_from_reporter({});
-    const QImage on = frame_from_reporter([](const std::map<int, int>&, uint64_t) {});
+    const QImage on = frame_from_reporter([](const std::map<int, denso::ui::ZoneValue>&, uint64_t) {});
     CHECK(differing(off, on) == 0);
 }
 
@@ -227,7 +228,7 @@ TEST_CASE("CameraTile no longer paints a zone panel of its own",
 TEST_CASE("a tile renders the frame it is handed, zone text included",
           "[zone_pipeline]") {
     OrientationProcessor annotated(
-        0, 0.0, 0.0, fixed_view({entry(1, 1, ZoneDisplayState::Healthy, 128)}));
+        0, 0.0, 0.0, fixed_view({entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})}));
     const QImage annotated_frame = annotated.process(grey_frame(1280, 720));
     const QImage plain_frame = OrientationProcessor(0, 0.0, 0.0).process(grey_frame(1280, 720));
 
@@ -250,7 +251,7 @@ TEST_CASE("a tile renders the frame it is handed, zone text included",
 // the move into the frame introduces, and it must be closed.
 TEST_CASE("an offline camera drops its burned-in zone values", "[zone_pipeline]") {
     OrientationProcessor p(
-        0, 0.0, 0.0, fixed_view({entry(1, 1, ZoneDisplayState::Healthy, 128)}));
+        0, 0.0, 0.0, fixed_view({entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})}));
 
     denso::ui::CameraTile tile(QStringLiteral("cam"));
     tile.resize(640, 360);

@@ -12,6 +12,7 @@
 #include <functional>
 #include <optional>
 #include <vector>
+#include "zone_value_compat.h"
 
 using denso::ui::kHoldTimeoutMs;
 using denso::ui::ReadingKind;
@@ -24,11 +25,11 @@ using denso::ui::ZoneRuntimeState;
 namespace {
 
 std::vector<ZoneReading> complete(int zone, int value) {
-    return {ZoneReading{zone, value, 0.9f, ReadingKind::Complete}};
+    return {ZoneReading{zone, {value}, 0.9f, ReadingKind::Complete}};
 }
 
 std::vector<ZoneReading> incomplete(int zone) {
-    return {ZoneReading{zone, 0, 0.0f, ReadingKind::Incomplete}};
+    return {ZoneReading{zone, {0}, 0.0f, ReadingKind::Incomplete}};
 }
 
 // Drive a zone to an accepted (stable) value at time `t`.
@@ -235,7 +236,7 @@ TEST_CASE("zone values are projected with no delivery callback at all",
 TEST_CASE("a failing delivery callback does not disturb the projection",
           "[zone_runtime]") {
     int calls = 0;
-    ZoneReporter rep([&calls](const std::map<int, int>&, uint64_t) { ++calls; }, 3);
+    ZoneReporter rep([&calls](const std::map<int, denso::ui::ZoneValue>&, uint64_t) { ++calls; }, 3);
     rep.set_configured_zones(1, {1});
     for (int i = 0; i < 3; ++i) rep.on_zones(1, complete(1, 128));
 
@@ -251,7 +252,7 @@ TEST_CASE("a failing delivery callback does not disturb the projection",
 TEST_CASE("projection is identical with delivery enabled and disabled",
           "[zone_runtime]") {
     ZoneReporter off({}, 3);
-    ZoneReporter on([](const std::map<int, int>&, uint64_t) {}, 3);
+    ZoneReporter on([](const std::map<int, denso::ui::ZoneValue>&, uint64_t) {}, 3);
     off.set_configured_zones(1, {1});
     on.set_configured_zones(1, {1});
     for (int i = 0; i < 3; ++i) {
@@ -370,12 +371,12 @@ TEST_CASE("two inhibited zones produce two distinct onsets", "[zone_runtime][ons
     rep.set_configured_zones(7, {1, 2});
     clk.t = 0;
     for (int i = 0; i < 3; ++i) {
-        rep.on_zones(7, {ZoneReading{1, 101, 0.9f, ReadingKind::Complete},
-                         ZoneReading{2, 102, 0.9f, ReadingKind::Complete}});
+        rep.on_zones(7, {ZoneReading{1, {101}, 0.9f, ReadingKind::Complete},
+                         ZoneReading{2, {102}, 0.9f, ReadingKind::Complete}});
     }
     clk.t = kHoldTimeoutMs + 1;
-    rep.on_zones(7, {ZoneReading{1, 0, 0.0f, ReadingKind::Incomplete},
-                     ZoneReading{2, 0, 0.0f, ReadingKind::Incomplete}});
+    rep.on_zones(7, {ZoneReading{1, {0}, 0.0f, ReadingKind::Incomplete},
+                     ZoneReading{2, {0}, 0.0f, ReadingKind::Incomplete}});
 
     const auto out = rep.take_newly_inhibited();
     REQUIRE(out.size() == 2);
@@ -466,7 +467,7 @@ TEST_CASE("backend offline does not suppress the onset", "[zone_runtime][onset]"
     int calls = 0;
     // Stands in for a downed server: the transport accepts the snapshot and
     // never acknowledges it. The reporter has no delivery state to consult.
-    ZoneReporter rep([&calls](const std::map<int, int>&, uint64_t) { ++calls; }, 3,
+    ZoneReporter rep([&calls](const std::map<int, denso::ui::ZoneValue>&, uint64_t) { ++calls; }, 3,
                      clk.fn());
     rep.set_configured_zones(7, {1});
     escalate(rep, clk, 7, 1);

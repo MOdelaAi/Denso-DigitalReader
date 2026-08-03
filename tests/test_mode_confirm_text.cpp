@@ -18,18 +18,20 @@
 
 using denso::mode::TargetMode;
 
-TEST_CASE("the confirmation promises no deletion and no irreversibility",
+TEST_CASE("the confirmation states deletion and irreversibility",
           "[mode_confirm]") {
-    // MUTATION GUARD: this is the assertion that fails if the destructive copy is
-    // ever restored. Both directions are checked, for both targets.
+    // MUTATION GUARD, inverted at the operator decision of 2026-07-31: the switch
+    // IS destructive again, so the copy that must never come back is the
+    // reassuring one. Both directions are checked, for both targets.
     for (auto target : {TargetMode::BallLeveler, TargetMode::DigitReader}) {
         const QString body = denso::ui::mode_confirm_body(target);
-        CHECK_FALSE(body.contains(QStringLiteral("cannot be undone")));
-        CHECK_FALSE(body.contains(QStringLiteral("will be deleted")));
-        CHECK_FALSE(body.contains(QStringLiteral("destroy"), Qt::CaseInsensitive));
-        CHECK_FALSE(body.contains(QStringLiteral("erase"), Qt::CaseInsensitive));
-        CHECK_FALSE(body.contains(QStringLiteral("permanent"), Qt::CaseInsensitive));
-        CHECK_FALSE(body.contains(QStringLiteral("setup again"), Qt::CaseInsensitive));
+        CHECK(body.contains(QStringLiteral("cannot be undone")));
+        CHECK(body.contains(QStringLiteral("will be deleted")));
+        CHECK(body.contains(QStringLiteral("start unconfigured")));
+        // The superseded promises must be gone, not merely outweighed: an
+        // operator who reads "Nothing is deleted" stops reading.
+        CHECK_FALSE(body.contains(QStringLiteral("Nothing is deleted")));
+        CHECK_FALSE(body.contains(QStringLiteral("kept exactly as")));
     }
 }
 
@@ -40,45 +42,50 @@ TEST_CASE("the confirmation states camera connections are preserved",
     CHECK(body.contains(QStringLiteral("credentials")));
 }
 
-TEST_CASE("the confirmation states BOTH modes' configuration is preserved",
+TEST_CASE("the confirmation names what the leaving mode loses",
           "[mode_confirm]") {
-    // Leaving digit_reader: the digit workspace is named as kept, and so is any
-    // Ball work already done. Naming BOTH matters — "nothing is deleted" alone
-    // reads as "nothing happens".
+    // Leaving digit_reader: the digit workspace is named as DELETED, in the
+    // operator's own nouns. Naming it matters — "the configured setup" is not a
+    // phrase anyone recognises as the areas they drew.
     const QString to_ball = denso::ui::mode_confirm_body(TargetMode::BallLeveler);
-    CHECK(to_ball.contains(QStringLiteral("Nothing is deleted")));
     CHECK(to_ball.contains(QStringLiteral("Digital Number Reader setup")));
-    CHECK(to_ball.contains(QStringLiteral("Floating Ball Leveler setup you have")));
-    CHECK(to_ball.contains(QStringLiteral("switch back")));
+    CHECK(to_ball.contains(QStringLiteral("detection areas")));
+    CHECK(to_ball.contains(QStringLiteral("number format")));
+    CHECK(to_ball.contains(QStringLiteral("will be deleted")));
+    CHECK(to_ball.contains(QStringLiteral("up again from the beginning")));
 
-    // …and the mirror image on the way back.
+    // …and the mirror image on the way back: Ball loses its zones and calibration.
     const QString to_digit = denso::ui::mode_confirm_body(TargetMode::DigitReader);
     CHECK(to_digit.contains(QStringLiteral("Floating Ball Leveler setup")));
-    CHECK(to_digit.contains(QStringLiteral("Digital Number Reader setup you have")));
+    CHECK(to_digit.contains(QStringLiteral("level zones")));
+    CHECK(to_digit.contains(QStringLiteral("calibration")));
+    CHECK(to_digit.contains(QStringLiteral("will be deleted")));
 }
 
-TEST_CASE("the confirmation discloses the processing pause honestly per target",
+TEST_CASE("the confirmation never promises processing resumes on its own",
           "[mode_confirm]") {
-    // Both modes now have a real runtime, so both genuinely resume once the
-    // destination's models are loaded — and the copy may say so for either.
-    // Before activation only digit_reader could make that promise.
-    const QString to_digit = denso::ui::mode_confirm_body(TargetMode::DigitReader);
-    CHECK(to_digit.contains(QStringLiteral("Processing pauses")));
-    CHECK(to_digit.contains(QStringLiteral("starts again on its own")));
-    CHECK(to_digit.contains(QStringLiteral("Digital Number Reader is prepared")));
-
-    const QString to_ball = denso::ui::mode_confirm_body(TargetMode::BallLeveler);
-    CHECK(to_ball.contains(QStringLiteral("Processing pauses")));
-    CHECK(to_ball.contains(QStringLiteral("starts again on its own")));
-    CHECK(to_ball.contains(QStringLiteral("Floating Ball Leveler is prepared")));
+    // The destination opens UNCONFIGURED, so processing cannot resume by itself —
+    // there is nothing left for it to run. The old copy promised exactly that,
+    // and repeating it under a destructive switch would be the most damaging
+    // sentence in the dialog: the operator would wait for a recovery that never
+    // comes instead of setting the mode up.
+    for (auto target : {TargetMode::BallLeveler, TargetMode::DigitReader}) {
+        const QString body = denso::ui::mode_confirm_body(target);
+        CHECK_FALSE(body.contains(QStringLiteral("starts again on its own")));
+        CHECK_FALSE(body.contains(QStringLiteral("Processing pauses")));
+        CHECK(body.contains(QStringLiteral("start unconfigured")));
+    }
 }
 
 TEST_CASE("the confirmation states reporting is disabled and the address kept",
           "[mode_confirm]") {
     const QString body = denso::ui::mode_confirm_body(TargetMode::DigitReader);
     CHECK(body.contains(QStringLiteral("reporting will be turned off")));
-    CHECK(body.contains(QStringLiteral("server address is kept")));
-    CHECK(body.contains(QStringLiteral("re-enable reporting yourself")));
+    CHECK(body.contains(QStringLiteral("server address")));
+    CHECK(body.contains(QStringLiteral("re-enable it yourself")));
+    // The address surviving is the ONE reassurance the copy still makes, and it
+    // must not be allowed to grow into a general one.
+    CHECK(body.contains(QStringLiteral("Nothing else is")));
 }
 
 TEST_CASE("the confirmation no longer calls any mode unavailable",

@@ -31,6 +31,7 @@ target_link_libraries(denso_detection PUBLIC denso_core Qt6::Core ${OpenCV_LIBS}
 #    Qt-Network transport (brazing_client/reporter) stays in `denso`.
 add_library(denso_brazing STATIC
     brazing/brazing_payload.cpp
+    brazing/zone_reading.cpp
     brazing/brazing_retry_policy.cpp
     brazing/zone_aggregator.cpp
     brazing/zone_reporter.cpp

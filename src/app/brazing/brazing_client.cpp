@@ -28,7 +28,7 @@ BrazingClient::BrazingClient(std::string base_url, QObject* parent)
     }
 }
 
-void BrazingClient::post(const std::map<int, int>& zones,
+void BrazingClient::post(const std::map<int, ZoneValue>& zones,
                          std::function<void(bool)> done) {
     if (base_url_.isEmpty()) {
         if (done) done(false);

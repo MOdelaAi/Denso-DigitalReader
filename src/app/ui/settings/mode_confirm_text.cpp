@@ -15,6 +15,21 @@ QString mode_display_name(mode::TargetMode m) {
     return QStringLiteral("Digital Number Reader");
 }
 
+// What the mode being LEFT actually loses, named concretely. An operator does
+// not recognise their work as "processing configuration"; they recognise it as
+// the areas they drew and the formats they picked.
+QString setup_nouns(mode::TargetMode m) {
+    switch (m) {
+        case mode::TargetMode::DigitReader:
+            return QStringLiteral("model bindings, detection areas, reported zones "
+                                  "and the number format of every zone");
+        case mode::TargetMode::BallLeveler:
+            return QStringLiteral("model bindings, level zones and their "
+                                  "0% / 100% calibration");
+    }
+    return QStringLiteral("the configured camera setup");
+}
+
 } // namespace
 
 QString mode_confirm_body(mode::TargetMode target) {
@@ -26,40 +41,34 @@ QString mode_confirm_body(mode::TargetMode target) {
     QStringList paras;
     paras << QStringLiteral("Switch to %1?").arg(mode_display_name(target));
 
-    // Connections first - this was true under the destructive switch too, and
-    // stays first because it is what an operator worries about most.
+    // The destructive warning comes FIRST and in the operator's own terms. The
+    // previous copy led with what was preserved and promised "Nothing is
+    // deleted"; that promise is now false, and a warning placed after a
+    // reassurance is a warning most people never reach.
     paras << QStringLiteral(
-        "Your camera connections are kept - sources, credentials, resolution "
-        "and orientation are all preserved.");
+                 "Switching operating mode stops reporting and clears the current "
+                 "camera setup, zones, formats and calibration. The destination "
+                 "mode will start unconfigured. This cannot be undone.");
 
-    // The sentence that REPLACES the deletion warning. It names the mode being
-    // left explicitly, because "nothing is deleted" is easy to read as "nothing
-    // happens": the old mode's work is retained and will still be there on the
-    // way back.
+    // Name the losses concretely, for the mode being left.
     paras << QStringLiteral(
-                 "Nothing is deleted. Your %1 setup - model bindings, detection "
-                 "areas, reported zones and stored readings - is kept exactly as "
-                 "it is, and will still be there if you switch back. Any %2 setup "
-                 "you have already done is kept too.")
-                 .arg(mode_display_name(leaving), mode_display_name(target));
+                 "Your %1 setup - %2 - will be deleted, along with any stored "
+                 "readings. Switching back later will NOT bring it back: you will "
+                 "set that mode up again from the beginning.")
+                 .arg(mode_display_name(leaving), setup_nouns(leaving));
 
-    // The one real cost of the switch, stated plainly so it is not a surprise.
-    // Now true for BOTH targets: each mode has a real runtime, and the models for
-    // the destination are loaded after the switch commits, so processing pauses
-    // and then resumes on its own either way.
+    // The two things that DO survive. Stated last and stated narrowly, so it
+    // cannot be misread as "my setup is safe" - it is deliberately a short list
+    // of connection details, not of work.
     paras << QStringLiteral(
-        "Processing pauses while %1 is prepared, then starts again on its own.")
-        .arg(mode_display_name(target));
+        "Your camera connections are kept - sources, credentials, resolution and "
+        "orientation - and so is the server address. Nothing else is.");
 
-    // The reporting guarantee (spec §6.6): disabled, address kept, manual re-enable.
+    // The reporting guarantee: disabled, address kept, manual re-enable.
     paras << QStringLiteral(
-        "Server reporting will be turned off. The server address is kept; you "
-        "must re-enable reporting yourself.");
+        "Server reporting will be turned off. You must re-enable it yourself "
+        "once %1 is set up.").arg(mode_display_name(target));
 
-    // The Slice-1 "not available in this release" paragraph was REMOVED at
-    // activation, together with the other production guards. It must not come
-    // back in isolation: it exists to warn that the destination has no runtime,
-    // and the destination now has one.
     return paras.join(QStringLiteral("\n\n"));
 }
 

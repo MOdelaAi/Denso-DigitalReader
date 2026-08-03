@@ -49,13 +49,13 @@ public:
     /// the last sent snapshot, OR when a previously sent zone expired (so the
     /// backend stops seeing a dead zone), else nullopt. Zones absent from a call
     /// are retained until their expiry window elapses (occlusion tolerance).
-    std::optional<std::map<int, int>> observe(const std::vector<ZoneReading>& zones,
+    std::optional<std::map<int, ZoneValue>> observe(const std::vector<ZoneReading>& zones,
                                               int64_t now_ms = 0);
 
     /// Drop these zones from both the debounce state and the last-sent payload,
     /// as an inhibit does. Returns the shrunk snapshot when the payload actually
     /// changed, else nullopt. NEVER returns an empty snapshot (spec §3.3).
-    std::optional<std::map<int, int>> evict_zones(const std::set<int>& zone_nos);
+    std::optional<std::map<int, ZoneValue>> evict_zones(const std::set<int>& zone_nos);
 
     /// Zones that escalated from hold to inhibited since the last call. Draining
     /// is destructive so a caller raises each alarm exactly once.
@@ -70,14 +70,14 @@ public:
 
 private:
     struct Debounce {
-        int     candidate = 0;
+        ZoneValue candidate;
         int     count = 0;
         bool    has_stable = false;
-        int     stable = 0;
+        ZoneValue stable;
         int64_t last_seen_ms = 0;      // ANY frame, incl. incomplete — liveness
         // ── Hold state (spec §5.3) ──
         bool    has_last_valid = false;
-        int     last_valid = 0;
+        ZoneValue last_valid;
         int64_t last_complete_ms = 0;  // ONLY complete readings — hold timeout base
         bool    has_first_seen = false; // false until first_seen_ms is set (t=0 is a
                                          // valid timestamp, so it can't be its own sentinel)
@@ -100,14 +100,14 @@ private:
     // those zones' needs_reannounce may be consumed by this commit. Passing an
     // empty set (as evict_zones() does) means no zone's re-announce is consumed,
     // since merely carrying a sibling's held value in the snapshot must not count.
-    std::optional<std::map<int, int>> build_snapshot(
+    std::optional<std::map<int, ZoneValue>> build_snapshot(
         const std::set<int>& recovered_zone_nos = {});
 
     int stable_frames_;
     int64_t expiry_ms_;
     int64_t hold_timeout_ms_;
     std::map<int, Debounce> zones_;   // zone_no -> debounce state
-    std::map<int, int> last_sent_;    // zone_no -> value in the last snapshot
+    std::map<int, ZoneValue> last_sent_;    // zone_no -> value in the last snapshot
     std::set<int> zone_inhibit_;      // publication suppressed; debounce continues
     std::set<int> newly_inhibited_;   // drained by take_newly_inhibited()
 };

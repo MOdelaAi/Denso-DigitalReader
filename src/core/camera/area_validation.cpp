@@ -117,7 +117,11 @@ bool areas_equal(const std::vector<CameraArea>& a,
         return false;
     }
     for (size_t i = 0; i < a.size(); ++i) {
+        // decimal_places participates: changing a zone's number format IS an
+        // edit, and leaving it out would let the Areas step discard one
+        // silently on the way out.
         if (a[i].name != b[i].name || a[i].zone != b[i].zone ||
+            a[i].decimal_places != b[i].decimal_places ||
             a[i].points.size() != b[i].points.size()) {
             return false;
         }

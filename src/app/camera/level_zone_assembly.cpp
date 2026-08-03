@@ -61,7 +61,10 @@ std::vector<ZoneReading> level_zone_readings(
         zr.zone_no = r.zone_no;
         if (r.percent) {
             zr.kind = ReadingKind::Complete;
-            zr.value = quantize_level_percent(*r.percent);
+            // dp 0 and no fixed display width: a level is a whole percent, so
+            // it serializes and renders exactly as it did before the digit
+            // reader gained decimal formats.
+            zr.value = ZoneValue{quantize_level_percent(*r.percent), 0, 0};
             // The selected ball's own confidence. The both-or-neither invariant
             // means `ball` is engaged wherever `percent` is, so this is not a
             // conditional read dressed up as an unconditional one.
@@ -70,7 +73,7 @@ std::vector<ZoneReading> level_zone_readings(
             // NOT Incomplete: a percentage is whole or absent. Ball has no
             // partial reading, and claiming one would misreport the diagnostic.
             zr.kind = ReadingKind::NoValue;
-            zr.value = 0;
+            zr.value = ZoneValue{};
             zr.conf = 0.0f;
         }
         out.push_back(zr);

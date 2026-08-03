@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "zone_value_compat.h"
 
 using denso::ui::draw_zone_runtime_overlay;
 using denso::ui::ZoneDisplayState;
@@ -25,7 +26,7 @@ using denso::ui::ZoneRuntimeEntry;
 namespace {
 
 ZoneRuntimeEntry entry(int64_t cam, int zone_no, ZoneDisplayState state,
-                       std::optional<int> value = std::nullopt) {
+                       std::optional<denso::ui::ZoneValue> value = std::nullopt) {
     ZoneRuntimeEntry e;
     e.camera_id = cam;
     e.zone_no = zone_no;
@@ -64,14 +65,14 @@ bool has_digit_after_label(const std::string& row) {
 // ── Row content: which states may show a number ──────────────────────────────
 
 TEST_CASE("Healthy row carries its accepted value and OK", "[zone_draw]") {
-    const std::string row = zone_row_text(entry(1, 1, ZoneDisplayState::Healthy, 128));
+    const std::string row = zone_row_text(entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128}));
     CHECK(row.find("128") != std::string::npos);
     CHECK(row.find("OK") != std::string::npos);
 }
 
 TEST_CASE("Hold row carries the last valid value and HOLD", "[zone_draw]") {
     const std::string row =
-        zone_row_text(entry(1, 2, ZoneDisplayState::HoldingLastValid, 95));
+        zone_row_text(entry(1, 2, ZoneDisplayState::HoldingLastValid, denso::ui::ZoneValue{95}));
     CHECK(row.find("95") != std::string::npos);
     CHECK(row.find("HOLD") != std::string::npos);
     CHECK(row.find("INHIBITED") == std::string::npos);
@@ -97,7 +98,7 @@ TEST_CASE("no backend delivery vocabulary can reach a row", "[zone_draw]") {
          {ZoneDisplayState::Healthy, ZoneDisplayState::HoldingLastValid,
           ZoneDisplayState::Acquiring, ZoneDisplayState::Inhibited,
           ZoneDisplayState::Paused, ZoneDisplayState::Conflict}) {
-        const std::string row = zone_row_text(entry(1, 1, s, 7));
+        const std::string row = zone_row_text(entry(1, 1, s, denso::ui::ZoneValue{7}));
         for (const char* bad : {"SENT", "PENDING", "OFFLINE", "FAILED", "REPORTED"}) {
             INFO(row << " contained " << bad);
             CHECK(row.find(bad) == std::string::npos);
@@ -109,8 +110,8 @@ TEST_CASE("no backend delivery vocabulary can reach a row", "[zone_draw]") {
 
 TEST_CASE("a Healthy value is drawn into the frame", "[zone_draw]") {
     cv::Mat a = black(), b = black();
-    draw_zone_runtime_overlay(a, {entry(1, 1, ZoneDisplayState::Healthy, 128)});
-    draw_zone_runtime_overlay(b, {entry(1, 1, ZoneDisplayState::Healthy, 999)});
+    draw_zone_runtime_overlay(a, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})});
+    draw_zone_runtime_overlay(b, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{999})});
 
     CHECK(painted(a) > 0);                       // something was drawn
     CHECK(cv::norm(a, b, cv::NORM_L1) > 0.0);    // and the NUMBER is part of it
@@ -133,7 +134,7 @@ TEST_CASE("clearing the zones leaves the next frame unannotated", "[zone_draw]")
     // Each frame is drawn from scratch, so "clearing" is simply an empty
     // projection on the following frame — no state persists in the drawing code.
     cv::Mat f1 = black();
-    draw_zone_runtime_overlay(f1, {entry(1, 1, ZoneDisplayState::Healthy, 128)});
+    draw_zone_runtime_overlay(f1, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})});
     REQUIRE(painted(f1) > 0);
 
     cv::Mat f2(480, 640, CV_8UC3, cv::Scalar(128, 128, 128));
@@ -146,8 +147,8 @@ TEST_CASE("the annotation stays inside a 640x480 frame", "[zone_draw]") {
     cv::Mat frame = black(640, 480);
     const cv::Mat before = frame.clone();
     draw_zone_runtime_overlay(
-        frame, {entry(1, 1, ZoneDisplayState::Healthy, 128),
-                entry(1, 2, ZoneDisplayState::HoldingLastValid, 95),
+        frame, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128}),
+                entry(1, 2, ZoneDisplayState::HoldingLastValid, denso::ui::ZoneValue{95}),
                 entry(1, 3, ZoneDisplayState::Acquiring),
                 entry(1, 4, ZoneDisplayState::Inhibited)});
 
@@ -168,7 +169,7 @@ TEST_CASE("the annotation is contained at many frame resolutions", "[zone_draw]"
         cv::Mat frame = black(s.w, s.h);
         const cv::Mat before = frame.clone();
         draw_zone_runtime_overlay(
-            frame, {entry(1, 1, ZoneDisplayState::Healthy, 128),
+            frame, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128}),
                     entry(1, 4, ZoneDisplayState::Conflict)});
         const cv::Rect b = changed_bbox(before, frame);
         INFO("frame " << s.w << "x" << s.h);
@@ -192,7 +193,7 @@ TEST_CASE("the smallest supported grid frame still gets a readable annotation",
 
     cv::Mat frame = black(240, 160);
     const cv::Mat before = frame.clone();
-    draw_zone_runtime_overlay(frame, {entry(1, 1, ZoneDisplayState::Healthy, 128)});
+    draw_zone_runtime_overlay(frame, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})});
     const cv::Rect b = changed_bbox(before, frame);
     CHECK(b.area() > 0);
     CHECK(b.x + b.width <= 240);
@@ -206,7 +207,7 @@ TEST_CASE("detection boxes and zone values coexist on one frame", "[zone_draw]")
     cv::rectangle(frame, cv::Rect(200, 100, 120, 80), box_bgr, 2);
     const cv::Mat with_box = frame.clone();
 
-    draw_zone_runtime_overlay(frame, {entry(1, 1, ZoneDisplayState::Healthy, 128)});
+    draw_zone_runtime_overlay(frame, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})});
 
     // The zone panel added pixels...
     CHECK(cv::norm(with_box, frame, cv::NORM_L1) > 0.0);
@@ -227,13 +228,13 @@ TEST_CASE("two cameras sharing zone number 1 get their OWN values", "[zone_draw]
     // The caller hands each frame only its own camera's rows; the same zone
     // NUMBER must therefore render two different readings.
     cv::Mat cam1 = black(), cam2 = black();
-    draw_zone_runtime_overlay(cam1, {entry(1, 1, ZoneDisplayState::Healthy, 128)});
-    draw_zone_runtime_overlay(cam2, {entry(2, 1, ZoneDisplayState::HoldingLastValid, 64)});
+    draw_zone_runtime_overlay(cam1, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})});
+    draw_zone_runtime_overlay(cam2, {entry(2, 1, ZoneDisplayState::HoldingLastValid, denso::ui::ZoneValue{64})});
 
     CHECK(cv::norm(cam1, cam2, cv::NORM_L1) > 0.0);
-    CHECK(zone_row_text(entry(1, 1, ZoneDisplayState::Healthy, 128)).find("128") !=
+    CHECK(zone_row_text(entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})).find("128") !=
           std::string::npos);
-    CHECK(zone_row_text(entry(2, 1, ZoneDisplayState::HoldingLastValid, 64)).find("64") !=
+    CHECK(zone_row_text(entry(2, 1, ZoneDisplayState::HoldingLastValid, denso::ui::ZoneValue{64})).find("64") !=
           std::string::npos);
 }
 
@@ -248,7 +249,7 @@ TEST_CASE("drawing touches only the frame it is given", "[zone_draw]") {
     // caller that must protect a shared source clones first. Prove the clone is
     // genuinely independent — drawing on it must not reach `source`.
     cv::Mat display = source.clone();
-    draw_zone_runtime_overlay(display, {entry(1, 1, ZoneDisplayState::Healthy, 128)});
+    draw_zone_runtime_overlay(display, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})});
 
     CHECK(cv::norm(pristine, source, cv::NORM_L1) == 0.0);   // source untouched
     CHECK(cv::norm(display, source, cv::NORM_L1) > 0.0);     // display annotated
@@ -257,7 +258,7 @@ TEST_CASE("drawing touches only the frame it is given", "[zone_draw]") {
 TEST_CASE("an empty frame is handled safely", "[zone_draw]") {
     cv::Mat empty;
     // Must not throw or write through a null buffer.
-    draw_zone_runtime_overlay(empty, {entry(1, 1, ZoneDisplayState::Healthy, 128)});
+    draw_zone_runtime_overlay(empty, {entry(1, 1, ZoneDisplayState::Healthy, denso::ui::ZoneValue{128})});
     CHECK(empty.empty());
 }
 
@@ -298,7 +299,7 @@ TEST_CASE("HOLD is drawn in its own colour", "[zone_draw]") {
     };
 
     cv::Mat hold = black();
-    draw_zone_runtime_overlay(hold, {entry(1, 2, ZoneDisplayState::HoldingLastValid, 95)});
+    draw_zone_runtime_overlay(hold, {entry(1, 2, ZoneDisplayState::HoldingLastValid, denso::ui::ZoneValue{95})});
     cv::Mat stopped = black();
     draw_zone_runtime_overlay(stopped, {entry(1, 2, ZoneDisplayState::Inhibited)});
 

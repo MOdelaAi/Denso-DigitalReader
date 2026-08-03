@@ -48,7 +48,7 @@ BrazingReporter::~BrazingReporter() {
     }
 }
 
-void BrazingReporter::submit(const std::map<int, int>& snapshot) {
+void BrazingReporter::submit(const std::map<int, ZoneValue>& snapshot) {
     apply(policy_.submit(snapshot));
 }
 

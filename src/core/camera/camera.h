@@ -98,6 +98,12 @@ struct CameraArea {
     int64_t camera_id = 0;  // FK → camera.id
     std::string name;
     std::optional<int> zone;  // 1..kMaxZone reporting zone, or nullopt (ROI-only)
+    // Where the decimal point sits among the reader's four digit positions:
+    // 0 = 0000, 1 = 000.0, 2 = 00.00, 3 = 0.000. Per AREA, because one camera
+    // can own several zones reading different instruments through one model.
+    // 0 is the pre-v16 behaviour, so an untouched area reports as it always did.
+    // Ball Leveler zones do not use this - their value is a whole percent.
+    int decimal_places = 0;
     std::vector<Point> points;
 };
 

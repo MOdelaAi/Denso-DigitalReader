@@ -44,7 +44,7 @@ public:
     /// identical between the modes, which is why there is one reporter and not
     /// two.
     explicit ZoneReporter(
-        std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot,
+        std::function<void(const std::map<int, ZoneValue>&, uint64_t)> on_snapshot,
         int stable_frames = kStableFrames,
         std::function<int64_t()> clock = {},
         int64_t hold_timeout_ms = kHoldTimeoutMs);
@@ -99,7 +99,7 @@ private:
     /// Monotonic now in ms: the injected clock when present, else steady_clock.
     int64_t now_ms() const;
 
-    std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot_;
+    std::function<void(const std::map<int, ZoneValue>&, uint64_t)> on_snapshot_;
     std::function<int64_t()> clock_;
     mutable std::mutex mutex_;   // mutable: runtime_view() is a const read
     ZoneAggregator  aggregator_;

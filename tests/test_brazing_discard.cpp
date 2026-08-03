@@ -73,14 +73,14 @@ ScopedLogCapture* ScopedLogCapture::active_ = nullptr;
 // a QPointer to the reporter alive past the point this test destroys it.
 class NeverAcksTransport : public BrazingTransport {
 public:
-    void post(const std::map<int, int>& zones, std::function<void(bool)> done) override {
+    void post(const std::map<int, denso::ui::ZoneValue>& zones, std::function<void(bool)> done) override {
         ++posts;
         last = zones;
         (void)done;  // never invoked — no ack ever arrives
     }
 
     int posts = 0;
-    std::map<int, int> last;
+    std::map<int, denso::ui::ZoneValue> last;
 };
 
 }  // namespace
@@ -95,9 +95,9 @@ TEST_CASE("destroying a reporter with an undelivered snapshot logs the zones, ne
         BrazingReporter reporter(std::move(transport));
 
         // Zone 3 reads 120, zone 4 reads 35. The POST is issued and never acked.
-        reporter.submit(std::map<int, int>{{3, 120}, {4, 35}});
+        reporter.submit(std::map<int, denso::ui::ZoneValue>{{3, {120}}, {4, {35}}});
         REQUIRE(raw->posts == 1);
-        REQUIRE(raw->last == std::map<int, int>({{3, 120}, {4, 35}}));
+        REQUIRE(raw->last == std::map<int, denso::ui::ZoneValue>({{3, {120}}, {4, {35}}}));
     }  // ~BrazingReporter — the discard is logged here.
 
     const QString out = log.text();
@@ -131,12 +131,12 @@ TEST_CASE("destroying a reporter whose snapshot was acked logs nothing", "[brazi
         // reporter's own contract is that done() runs on the GUI thread).
         class AcksTransport : public BrazingTransport {
         public:
-            void post(const std::map<int, int>&, std::function<void(bool)> done) override {
+            void post(const std::map<int, denso::ui::ZoneValue>&, std::function<void(bool)> done) override {
                 done(true);
             }
         };
         BrazingReporter reporter(std::make_unique<AcksTransport>());
-        reporter.submit(std::map<int, int>{{3, 120}, {4, 35}});
+        reporter.submit(std::map<int, denso::ui::ZoneValue>{{3, {120}}, {4, {35}}});
     }  // ~BrazingReporter — nothing pending, so nothing logged.
 
     CHECK(log.text().isEmpty());

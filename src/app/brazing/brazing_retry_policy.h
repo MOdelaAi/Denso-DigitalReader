@@ -5,6 +5,8 @@
 // unit-tested like ZoneAggregator. Single-flight + latest-value-wins live here.
 #pragma once
 
+#include "brazing/zone_reading.h"   // ZoneValue
+
 #include <map>
 #include <optional>
 #include <vector>
@@ -15,7 +17,7 @@ namespace denso::ui {
 struct RetryAction {
     enum class Kind { None, Send, ArmRetry };
     Kind kind = Kind::None;
-    std::map<int, int> snapshot;  // the payload to POST, when kind == Send
+    std::map<int, ZoneValue> snapshot;  // the payload to POST, when kind == Send
     int delay_ms = 0;             // retry delay, when kind == ArmRetry
 };
 
@@ -25,7 +27,7 @@ public:
     explicit BrazingRetryPolicy(int start_ms = 1000, int cap_ms = 30000);
 
     /// A new full snapshot to deliver. Resets backoff; sends now if idle.
-    RetryAction submit(const std::map<int, int>& snapshot);
+    RetryAction submit(const std::map<int, ZoneValue>& snapshot);
 
     /// Result of the in-flight POST. ok == true iff HTTP 2xx received.
     RetryAction on_result(bool ok);
@@ -56,9 +58,9 @@ private:
     int cap_ms_;
     int backoff_ms_ = 0;       // 0 = not backing off; last delay otherwise
     bool in_flight_ = false;
-    std::map<int, int> pending_;
-    std::map<int, int> delivered_;
-    std::map<int, int> in_flight_snap_;
+    std::map<int, ZoneValue> pending_;
+    std::map<int, ZoneValue> delivered_;
+    std::map<int, ZoneValue> in_flight_snap_;
 };
 
 } // namespace denso::ui

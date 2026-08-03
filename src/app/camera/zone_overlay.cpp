@@ -52,15 +52,19 @@ std::string zone_row_text(const ZoneRuntimeEntry& z) {
     // A number ONLY where the projection carries one — Acquiring, Inhibited,
     // Paused and Conflict all render "--" because `value` is nullopt for every
     // one of them, not because this function knows their meaning.
+    // zone_value_display, not "%d": a digit-reader value is a fixed-point
+    // reading off a four-position instrument face, so 12 with two decimals
+    // must read "00.12" here — the leading zeros ARE the operator's reading.
+    // A Ball Leveler percent sets no fixed width and renders plainly.
     char num[16];
     if (z.value) {
-        std::snprintf(num, sizeof(num), "%d", *z.value);
+        std::snprintf(num, sizeof(num), "%s", zone_value_display(*z.value).c_str());
     } else {
         std::snprintf(num, sizeof(num), "--");
     }
     char row[64];
     // Fixed columns so the digits line up down the panel.
-    std::snprintf(row, sizeof(row), "Z%-2d %5s  %s", z.zone_no, num,
+    std::snprintf(row, sizeof(row), "Z%-2d %6s  %s", z.zone_no, num,
                   state_label(z.state));
     return std::string(row);
 }

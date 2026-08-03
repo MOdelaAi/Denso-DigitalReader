@@ -450,13 +450,13 @@ void CameraGrid::build_zone_reporting(int stable_frames, int64_t hold_timeout_ms
     // depend on the server it exists to cross-check. Only the sender and this
     // callback are gated on configuration; an empty callback is a supported state
     // (ZoneReporter guards every publish with `if (snapshot && on_snapshot_)`).
-    std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot;
+    std::function<void(const std::map<int, ZoneValue>&, uint64_t)> on_snapshot;
     if (bcfg.enabled && !bcfg.base_url.empty()) {
         brazing_reporter_ = std::make_unique<BrazingReporter>(
             std::make_unique<BrazingClient>(bcfg.base_url));
         BrazingReporter* reporter = brazing_reporter_.get();
         on_snapshot =
-            [this, reporter](const std::map<int, int>& snap, uint64_t seq) {
+            [this, reporter](const std::map<int, ZoneValue>& snap, uint64_t seq) {
                 // Marshal to `reporter` (not `this`) so Qt drops the queued call if
                 // the BrazingReporter is torn down; `reporter` is owned by this
                 // grid, so `this` (for last_applied_seq_) is valid whenever it runs.

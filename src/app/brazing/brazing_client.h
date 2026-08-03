@@ -25,7 +25,7 @@ public:
 
     /// POST {"zone<n>": value, ...}. Calls done(false) immediately if base_url
     /// is empty. done(ok): ok == HTTP 2xx.
-    void post(const std::map<int, int>& zones,
+    void post(const std::map<int, ZoneValue>& zones,
               std::function<void(bool)> done) override;
 
 private:

@@ -64,6 +64,10 @@ private:
     void apply_edited_polygon(const std::vector<camera::Point>& pts);
     void rebuild_zone_choices();
     void sync_zone_combo(std::optional<int> zone);
+    // Takes no argument on purpose: it reads whichever of the selected area or
+    // the in-progress draft is current, so no call site can pass the wrong one.
+    void sync_format_combo();
+    void update_format_preview();
     void push_context_areas();  // the non-selected areas, for canvas context
     void update_status();
     void update_controls();
@@ -89,6 +93,7 @@ private:
     QListWidget* list_ = nullptr;
     QLineEdit* name_edit_ = nullptr;
     QComboBox* zone_combo_ = nullptr;
+    QComboBox* format_combo_ = nullptr;
     QPushButton* new_btn_ = nullptr;
     QPushButton* redraw_btn_ = nullptr;
     QPushButton* delete_btn_ = nullptr;
@@ -102,6 +107,7 @@ private:
     bool unfinished_ = false;
     QLabel* status_ = nullptr;
     QLabel* hint_ = nullptr;
+    QLabel* format_preview_ = nullptr;
     QLabel* review_banner_ = nullptr;  // "re-verify after source change" notice
 
     std::vector<camera::CameraArea> areas_;        // the working set
@@ -110,6 +116,7 @@ private:
     bool drafting_ = false;        // a new area is being drawn but not yet added
     std::string draft_name_;       // its name, typed BEFORE the shape exists
     std::optional<int> draft_zone_;
+    int draft_decimal_places_ = 0;   // new zones default to 0000
     int redrawing_row_ = -1;  // row whose shape is being replaced, or -1
     bool review_required_ = false;
 };

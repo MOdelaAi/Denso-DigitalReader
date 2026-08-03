@@ -1,13 +1,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "brazing/zone_aggregator.h"
+#include "zone_value_compat.h"
 
 using denso::ui::ZoneAggregator;
 using denso::ui::ZoneReading;
 using denso::ui::ReadingKind;
 
 static std::vector<ZoneReading> obs(int zone, int value) {
-    return {ZoneReading{zone, value, 0.9f}};
+    return {ZoneReading{zone, denso::ui::ZoneValue{value}, 0.9f}};
 }
 
 TEST_CASE("value sends only after it is stable for kStableFrames", "[zone_aggregator]") {
@@ -96,13 +97,14 @@ TEST_CASE("an expired zone is sent again when it reappears", "[zone_aggregator]"
 }
 
 static ZoneReading rd(int zone, int value, ReadingKind k = ReadingKind::Complete) {
-    ZoneReading r; r.zone_no = zone; r.value = value; r.conf = 0.9f; r.kind = k;
+    ZoneReading r; r.zone_no = zone; r.value = denso::ui::ZoneValue{value};
+    r.conf = 0.9f; r.kind = k;
     return r;
 }
 // Drive `n` identical complete frames; returns the last snapshot emitted.
-static std::optional<std::map<int,int>> feed(ZoneAggregator& a, int zone, int value,
+static std::optional<std::map<int, denso::ui::ZoneValue>> feed(ZoneAggregator& a, int zone, int value,
                                              int n, int64_t& t) {
-    std::optional<std::map<int,int>> last;
+    std::optional<std::map<int, denso::ui::ZoneValue>> last;
     for (int i = 0; i < n; ++i) { t += 100; if (auto s = a.observe({rd(zone, value)}, t)) last = s; }
     return last;
 }
@@ -188,7 +190,7 @@ TEST_CASE("hold: a sibling zone on the same camera keeps reporting",
     int64_t t = 0;
     for (int i = 0; i < 5; ++i) { t += 100; a.observe({rd(1, 11), rd(2, 22)}, t); }
     // Zone 1 goes incomplete; zone 2 changes and must still be reported.
-    std::optional<std::map<int,int>> snap;
+    std::optional<std::map<int, denso::ui::ZoneValue>> snap;
     for (int i = 0; i < 5; ++i) {
         t += 100;
         if (auto s = a.observe({rd(1, 0, ReadingKind::Incomplete), rd(2, 33)}, t)) snap = s;
@@ -226,7 +228,7 @@ TEST_CASE("hold: a sibling's snapshot commit must not swallow this zone's "
     // it needs to recover -- NOT yet stable again. B's new-value run reaches its
     // 5th consecutive frame on the last of these, so IT commits a full snapshot
     // that carries A's still-held value (42) while A has not completed recovery.
-    std::optional<std::map<int, int>> sibling_commit;
+    std::optional<std::map<int, denso::ui::ZoneValue>> sibling_commit;
     for (int i = 0; i < 4; ++i) {
         t += 100;
         if (auto s = a.observe({rd(1, 42), rd(2, 200)}, t)) sibling_commit = s;

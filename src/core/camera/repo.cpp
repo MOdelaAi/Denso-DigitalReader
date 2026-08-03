@@ -2,6 +2,8 @@
 
 #include "camera/area_points.h"
 
+#include <algorithm>
+
 #include <QMetaType>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -223,7 +225,7 @@ std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id) {
     std::vector<CameraArea> out;
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "SELECT id, camera_id, name, points, zone FROM camera_area "
+        "SELECT id, camera_id, name, points, zone, decimal_places FROM camera_area "
         "WHERE camera_id = ? ORDER BY id"));
     q.addBindValue(static_cast<qlonglong>(camera_id));
     if (!q.exec()) {
@@ -239,6 +241,10 @@ std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id) {
         if (!zv.isNull()) {
             a.zone = zv.toInt();
         }
+        // Clamped on the way OUT as well as on the way in. The column has a
+        // CHECK, but a database can also arrive from a backup or a hand edit,
+        // and an out-of-range format would otherwise reach the renderer.
+        a.decimal_places = std::clamp(q.value(5).toInt(), 0, 3);
         out.push_back(std::move(a));
     }
     return out;
@@ -308,13 +314,17 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
         }
         QSqlQuery ins(db);
         ins.prepare(QStringLiteral(
-            "INSERT INTO camera_area (camera_id, name, points, zone) "
-            "VALUES (?, ?, ?, ?)"));
+            "INSERT INTO camera_area (camera_id, name, points, zone, decimal_places) "
+            "VALUES (?, ?, ?, ?, ?)"));
         ins.addBindValue(static_cast<qlonglong>(camera_id));
         ins.addBindValue(QString::fromStdString(a.name));
         ins.addBindValue(QString::fromStdString(serialize_points(a.points)));
         ins.addBindValue(a.zone ? QVariant(*a.zone)
                                 : QVariant(QMetaType(QMetaType::Int)));
+        // Out-of-range never reaches persistence: the column CHECK would reject
+        // the row and fail the whole save, so an invalid in-memory value is
+        // normalised to the behaviour-preserving 0 rather than losing the set.
+        ins.addBindValue(std::clamp(a.decimal_places, 0, 3));
         if (!ins.exec()) {
             return rollback();
         }

@@ -193,7 +193,7 @@ struct EventLog {
 // 1. Successful switch
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("a committed switch keeps every row, disables reporting, and gates the wizard",
+TEST_CASE("a committed switch keeps the camera row, clears its setup, disables reporting",
           "[mode_switch_flow]") {
     Harness h;
     h.enable_reporting();
@@ -212,16 +212,16 @@ TEST_CASE("a committed switch keeps every row, disables reporting, and gates the
     CHECK(win->current_mode() == TargetMode::BallLeveler);
     CHECK(denso::mode::load(h.handle()) == TargetMode::BallLeveler);
 
-    // NON-DESTRUCTIVE: the camera keeps its id, its name AND its setup_complete
-    // flag, so it stays admissible to runtime(). The destructive switch used to
-    // zero that flag; preserving it is the whole point of the supersession, and
-    // what makes switching back a no-op rather than a re-setup.
-    CHECK_FALSE(denso::camera::runtime(h.handle()).empty());
+    // DESTRUCTIVE: the camera keeps its id and its name - the CONNECTION
+    // survives - but setup_complete is zeroed, so it is no longer admissible to
+    // runtime() and the destination opens unconfigured. Keeping the row while
+    // clearing the flag is exactly the line the operator decision drew.
+    CHECK(denso::camera::runtime(h.handle()).empty());
     const auto rows = denso::camera::all(h.handle());
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].id == *cam_id);
     CHECK(rows[0].name == "Line A");
-    CHECK(rows[0].setup_complete);
+    CHECK_FALSE(rows[0].setup_complete);
 
     // Reporting is disabled in configuration, and the address is kept (A2).
     const auto bcfg = denso::brazing::load(h.handle());
@@ -261,7 +261,7 @@ TEST_CASE("a rolled-back switch keeps the OLD mode in memory and in the DB",
     const auto cam_id = denso::camera::insert(
         h.handle(), model_less_cam("Line A", /*active*/ true, /*setup*/ true));
     REQUIRE(cam_id);
-    // Inject a failure INSIDE the switch transaction. switch_mode deletes nothing,
+    // Inject a failure INSIDE the switch transaction. switch_and_reset deletes,
     // so the only writes it makes are the two `settings` upserts — aborting one of
     // those is now the only way to exercise the rollback path.
     // Both triggers: the settings write is an upsert, so it INSERTs when the
@@ -787,7 +787,7 @@ private:
 
 }  // namespace
 
-TEST_CASE("a broken count query no longer blocks switching",
+TEST_CASE("an unrelated broken table does not block switching",
           "[mode_switch_flow]") {
     // The INVERSE of the behaviour this file used to pin. The destructive switch
     // refused to proceed when it could not count what it was about to delete —
@@ -804,7 +804,10 @@ TEST_CASE("a broken count query no longer blocks switching",
     EventLog log;
     log.install(*win);
 
-    exec_sql(h.handle(), QStringLiteral("DROP TABLE reading"));
+    // net_config, NOT reading: the destructive reset clears `reading`, so
+    // dropping THAT would (correctly) roll the transaction back and would be
+    // testing the rollback path instead of this one.
+    exec_sql(h.handle(), QStringLiteral("DROP TABLE net_config"));
 
     ModalClicker clicker{QStringLiteral("Switch")};
     win->on_switch_mode(static_cast<int>(TargetMode::BallLeveler));
@@ -847,18 +850,18 @@ TEST_CASE("the confirmation states what is preserved and Cancel changes nothing"
     win->on_switch_mode(static_cast<int>(TargetMode::BallLeveler));
 
     REQUIRE(clicker.clicked);  // the real dialog was shown and really was dismissed
-    // The copy states what is PRESERVED, and promises no deletion of any kind.
+    // The copy states the DESTRUCTION plainly, and still names what survives.
     CHECK(clicker.body.contains(QStringLiteral("camera connections are kept")));
-    CHECK(clicker.body.contains(QStringLiteral("Nothing is deleted")));
-    CHECK(clicker.body.contains(QStringLiteral("Processing pauses")));
+    CHECK(clicker.body.contains(QStringLiteral("start unconfigured")));
     CHECK(clicker.body.contains(QStringLiteral("reporting will be turned off")));
     // ACTIVATION: the destination is available, so the copy must NOT say
     // otherwise. Asserted negatively here so the removed paragraph cannot
     // reappear through this path either.
     CHECK_FALSE(clicker.body.contains(QStringLiteral("not available in this release")));
-    // MUTATION GUARD: the dialog must never again promise deletion or finality.
-    CHECK_FALSE(clicker.body.contains(QStringLiteral("cannot be undone")));
-    CHECK_FALSE(clicker.body.contains(QStringLiteral("will be deleted")));
+    // MUTATION GUARD, inverted: the dialog must never again promise preservation.
+    CHECK(clicker.body.contains(QStringLiteral("cannot be undone")));
+    CHECK(clicker.body.contains(QStringLiteral("will be deleted")));
+    CHECK_FALSE(clicker.body.contains(QStringLiteral("Nothing is deleted")));
 
     // Cancel performed NO lifecycle step and changed nothing at all.
     CHECK(log.order.empty());
@@ -894,7 +897,7 @@ TEST_CASE("confirming the dialog runs the full switch", "[mode_switch_flow]") {
                                       E::ReloadStarted});
     CHECK(win->current_mode() == TargetMode::BallLeveler);
     CHECK(denso::mode::load(h.handle()) == TargetMode::BallLeveler);
-    CHECK_FALSE(denso::camera::runtime(h.handle()).empty());  // nothing deleted
+    CHECK(denso::camera::runtime(h.handle()).empty());  // setup_complete cleared
     CHECK_FALSE(denso::brazing::load(h.handle()).enabled);
     CHECK(denso::camera::all(h.handle()).size() == 1);  // camera KEPT, not deleted
     // ACTIVATION: the destination runs, so the operator lands on the live grid
@@ -913,7 +916,7 @@ TEST_CASE("no stale delivered_ can suppress the next mode's first snapshot",
     // the old mode can never mark the new mode's first reading as already
     // delivered. Asserted directly on the policy, which is where the state lives.
     denso::ui::BrazingRetryPolicy fresh;
-    const auto a = fresh.submit(std::map<int, int>{{3, 120}});
+    const auto a = fresh.submit(std::map<int, denso::ui::ZoneValue>{{3, {120}}});
     CHECK(a.kind == denso::ui::RetryAction::Kind::Send);
-    CHECK(a.snapshot == std::map<int, int>{{3, 120}});
+    CHECK(a.snapshot == std::map<int, denso::ui::ZoneValue>{{3, {120}}});
 }

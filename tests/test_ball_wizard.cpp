@@ -1090,9 +1090,9 @@ TEST_CASE("the mode-confirm copy no longer calls Ball Leveler unavailable",
     // falsehood shown to the operator at the moment of commitment.
     const QString body = denso::ui::mode_confirm_body(TargetMode::BallLeveler);
     CHECK_FALSE(body.contains(QStringLiteral("not available in this release")));
-    // The rest of the copy is unchanged and still load-bearing.
-    CHECK(body.contains(QStringLiteral("Nothing is deleted")));
-    CHECK_FALSE(body.contains(QStringLiteral("cannot be undone")));
+    // The rest of the copy now states the destructive contract.
+    CHECK_FALSE(body.contains(QStringLiteral("Nothing is deleted")));
+    CHECK(body.contains(QStringLiteral("cannot be undone")));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

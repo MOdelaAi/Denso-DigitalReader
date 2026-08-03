@@ -7,7 +7,7 @@
 namespace denso::ui {
 
 ZoneReporter::ZoneReporter(
-    std::function<void(const std::map<int, int>&, uint64_t)> on_snapshot,
+    std::function<void(const std::map<int, ZoneValue>&, uint64_t)> on_snapshot,
     int stable_frames, std::function<int64_t()> clock, int64_t hold_timeout_ms)
     : on_snapshot_(std::move(on_snapshot)), clock_(std::move(clock)),
       aggregator_(stable_frames, kZoneExpiryMs, hold_timeout_ms) {}
@@ -23,7 +23,7 @@ int64_t ZoneReporter::now_ms() const {
 
 void ZoneReporter::on_zones(int64_t camera_id, const std::vector<ZoneReading>& zones) {
     const int64_t now_ms = this->now_ms();
-    std::optional<std::map<int, int>> snapshot;
+    std::optional<std::map<int, ZoneValue>> snapshot;
     uint64_t seq = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -162,7 +162,7 @@ std::vector<ZoneInhibitOnset> ZoneReporter::take_newly_inhibited() {
 }
 
 void ZoneReporter::set_camera_inhibited(int64_t camera_id, bool on) {
-    std::optional<std::map<int, int>> snapshot;
+    std::optional<std::map<int, ZoneValue>> snapshot;
     uint64_t seq = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);

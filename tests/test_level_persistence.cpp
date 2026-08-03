@@ -9,7 +9,7 @@
 //     model through the runtime manifest, asks the CENTRAL compatibility policy,
 //     requires exactly one model and exactly one class, validates the geometry,
 //     and writes binding + calibration in one transaction that rolls back whole.
-//   * `switch_mode` is NON-DESTRUCTIVE: it preserves Digital Reader
+//   * `switch_and_reset` is DESTRUCTIVE: it clears Digital Reader
 //     configuration, Ball Leveler calibration and every camera connection.
 //   * A dormant configuration belonging to the INACTIVE mode never degrades the
 //     active mode.
@@ -46,6 +46,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "zone_value_compat.h"
 
 using denso::detection::DetectionModel;
 using denso::health::Readiness;
@@ -329,11 +330,11 @@ bool save_float(const Fixture& fx, int64_t camera_id,
 
 // ─── 1-2. migration v13 -> v14 is additive and preserves every digit row ──────
 
-TEST_CASE("schema version is 15", "[level][schema]") {
-    CHECK(denso::db::supported_schema_version() == 15);
+TEST_CASE("schema version is 16", "[level][schema]") {
+    CHECK(denso::db::supported_schema_version() == 16);
 }
 
-TEST_CASE("v13 -> v15 migrates a populated database and preserves every Digital "
+TEST_CASE("v13 -> v16 migrates a populated database and preserves every Digital "
           "Reader row",
           "[level][schema][migration]") {
     QTemporaryDir dir;
@@ -390,13 +391,13 @@ TEST_CASE("v13 -> v15 migrates a populated database and preserves every Digital 
         REQUIRE(QSqlQuery(db->handle()).exec(QStringLiteral("PRAGMA user_version = 13")));
     }
 
-    // Reopen and migrate: v13 -> v15.
+    // Reopen and migrate: v13 -> v16.
     {
         auto db = denso::db::Db::open(path);
         REQUIRE(db.has_value());
         REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 13);
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
 
         // MUTATION GUARD: every digit row survives, with its values intact.
         CHECK(row_count(db->handle(), "camera") == 1);
@@ -446,7 +447,7 @@ TEST_CASE("v13 -> v15 migrates a populated database and preserves every Digital 
 // migration that infers schema from it fails at the first query. A failed
 // `run_migrations` is a bricked upgrade: the appliance refuses to boot.
 
-TEST_CASE("v11 -> v15 upgrades a real legacy database and preserves every row",
+TEST_CASE("v11 -> v16 upgrades a real legacy database and preserves every row",
           "[level][schema][migration]") {
     QTemporaryDir dir;
     REQUIRE(dir.isValid());
@@ -483,7 +484,7 @@ TEST_CASE("v11 -> v15 upgrades a real legacy database and preserves every row",
         REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 11);
 
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
 
         // Every v11 row survives, values intact.
         CHECK(row_count(db->handle(), "camera") == 1);
@@ -501,7 +502,7 @@ TEST_CASE("v11 -> v15 upgrades a real legacy database and preserves every row",
         // empty — this machine never had a Ball calibration to carry forward.
         const auto cams = denso::camera::all(db->handle());
         REQUIRE(cams.size() == 1);
-        CHECK(cams.front().setup_complete);
+    CHECK(cams.front().setup_complete);
         CHECK(has_table(db->handle(), "ball_level_binding"));
         CHECK(has_table(db->handle(), "ball_level_zone"));
         CHECK(row_count(db->handle(), "ball_level_binding") == 0);
@@ -525,7 +526,7 @@ TEST_CASE("a populated v14 Ball calibration becomes one binding plus one zone",
     REQUIRE(db.has_value());
     REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 14);
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
 
     // Exactly one binding, carrying the camera-level model identity.
     REQUIRE(row_count(db->handle(), "ball_level_binding") == 1);
@@ -704,7 +705,7 @@ TEST_CASE("a migration interrupted before the version stamp resumes on restart",
     auto db = denso::db::Db::open(path);
     REQUIRE(db.has_value());
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
 
     const auto cams = denso::camera::all(db->handle());
     REQUIRE(cams.size() == 1);
@@ -742,7 +743,7 @@ TEST_CASE("the v15 block repairs the digit zone schema it depends on",
     auto db = denso::db::Db::open(path);
     REQUIRE(db.has_value());
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 15);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
 
     // Repaired, not merely tolerated: the table AND its zone column are there,
     // so the digit reader has somewhere to record a claim after the upgrade.
@@ -1144,10 +1145,10 @@ TEST_CASE("a rejected save performs no partial write and leaves an existing "
     CHECK(row_count(fx.h(), "ball_level_zone") == 1);
 }
 
-// ─── 14-17. non-destructive switch_mode ──────────────────────────────────────
+// ─── 14-17. destructive switch_and_reset ────────────────────────────────────
 
-TEST_CASE("switch_mode preserves Digital Reader configuration, Ball Leveler "
-          "calibration and every camera connection",
+TEST_CASE("switch_and_reset clears both modes' configuration and keeps every "
+          "camera connection",
           "[level][switch][preserve]") {
     Fixture fx;
     const auto cid = denso::camera::insert(fx.h(), ip_camera("Line 1"));
@@ -1190,17 +1191,22 @@ TEST_CASE("switch_mode preserves Digital Reader configuration, Ball Leveler "
     REQUIRE(denso::brazing::load(fx.h()).enabled);
 
     // digit_reader -> ball_leveler
-    const auto r1 = denso::mode::switch_mode(fx.h(), TargetMode::BallLeveler);
+    const auto r1 = denso::mode::switch_and_reset(fx.h(), TargetMode::BallLeveler);
     REQUIRE(r1.ok);
     CHECK(denso::mode::load(fx.h()) == TargetMode::BallLeveler);
 
     // MUTATION GUARD: nothing may be deleted by a switch.
+    // The camera ROW survives; everything that CONFIGURED it does not. Both
+    // modes are cleared, so the destination genuinely opens unconfigured rather
+    // than inheriting a binding from two switches ago.
     CHECK(row_count(fx.h(), "camera") == 1);
-    CHECK(row_count(fx.h(), "camera_model") == 1);
-    CHECK(row_count(fx.h(), "camera_model_class") == 1);
-    CHECK(row_count(fx.h(), "camera_area") == 1);
-    CHECK(row_count(fx.h(), "reading") == 1);
-    CHECK(row_count(fx.h(), "ball_level_zone") == 1);
+    CHECK(row_count(fx.h(), "camera_model") == 0);
+    CHECK(row_count(fx.h(), "camera_model_class") == 0);
+    CHECK(row_count(fx.h(), "camera_area") == 0);
+    CHECK(row_count(fx.h(), "reading") == 0);
+    CHECK(row_count(fx.h(), "ball_level_zone") == 0);
+    CHECK(row_count(fx.h(), "ball_level_binding") == 0);
+    CHECK(row_count(fx.h(), "ball_level_calibration") == 0);
 
     // Camera connection columns and setup flags survive untouched.
     const auto cams = denso::camera::all(fx.h());
@@ -1208,7 +1214,7 @@ TEST_CASE("switch_mode preserves Digital Reader configuration, Ball Leveler "
     CHECK(cams.front().rtsp == ip_camera("Line 1").rtsp);
     CHECK(cams.front().username == ip_camera("Line 1").username);
     CHECK(cams.front().rotation == 90);
-    CHECK(cams.front().setup_complete);
+    CHECK_FALSE(cams.front().setup_complete);  // reset: the mode starts unconfigured
 
     // Reporting disabled, address kept.
     const auto bz = denso::brazing::load(fx.h());
@@ -1216,15 +1222,17 @@ TEST_CASE("switch_mode preserves Digital Reader configuration, Ball Leveler "
     CHECK(bz.base_url == "http://backend.example/api");
 
     // ball_leveler -> digit_reader: the Ball calibration must survive too.
-    const auto r2 = denso::mode::switch_mode(fx.h(), TargetMode::DigitReader);
+    const auto r2 = denso::mode::switch_and_reset(fx.h(), TargetMode::DigitReader);
     REQUIRE(r2.ok);
     CHECK(denso::mode::load(fx.h()) == TargetMode::DigitReader);
-    CHECK(row_count(fx.h(), "ball_level_zone") == 1);
-    CHECK(row_count(fx.h(), "camera_model") == 1);
-    CHECK(row_count(fx.h(), "camera_area") == 1);
+    // Switching BACK restores nothing: there is no round trip, by design.
+    CHECK(row_count(fx.h(), "ball_level_zone") == 0);
+    CHECK(row_count(fx.h(), "camera_model") == 0);
+    CHECK(row_count(fx.h(), "camera_area") == 0);
+    // The Ball calibration is gone with the rest: nothing survives to be read
+    // back, which is exactly what the confirmation told the operator.
     const auto still = denso::level::level_config_for(fx.h(), *cid);
-    REQUIRE(still.has_value());
-    CHECK(still->zones.at(0).calibration.y_0 == good_calibration().y_0);
+    CHECK_FALSE(still.has_value());
 }
 
 TEST_CASE("a failed mode-switch transaction leaves the previous mode unchanged",
@@ -1236,7 +1244,7 @@ TEST_CASE("a failed mode-switch transaction leaves the previous mode unchanged",
     // MUTATION GUARD: mode.target must be written INSIDE the transaction, so a
     // failure cannot leave the persisted mode advanced.
     REQUIRE(QSqlQuery(fx.h()).exec(QStringLiteral("DROP TABLE settings")));
-    const auto r = denso::mode::switch_mode(fx.h(), TargetMode::BallLeveler);
+    const auto r = denso::mode::switch_and_reset(fx.h(), TargetMode::BallLeveler);
     CHECK_FALSE(r.ok);
     CHECK_FALSE(r.error.empty());
 
@@ -1605,7 +1613,7 @@ TEST_CASE("a failure in the brazing upsert rolls back the mode.target write",
                                  "WHEN NEW.key = 'brazing.enabled' "
                                  "BEGIN SELECT RAISE(ABORT,'injected'); END")));
 
-        const auto r = denso::mode::switch_mode(fx.h(), TargetMode::BallLeveler);
+        const auto r = denso::mode::switch_and_reset(fx.h(), TargetMode::BallLeveler);
         CHECK_FALSE(r.ok);
         CHECK_FALSE(r.error.empty());
         // The mode did NOT advance, even though its own statement succeeded.

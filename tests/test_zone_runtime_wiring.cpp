@@ -8,6 +8,7 @@
 #include <QIODevice>
 #include <QString>
 #include <QStringList>
+#include "zone_value_compat.h"
 
 namespace {
 

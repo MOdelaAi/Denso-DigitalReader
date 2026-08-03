@@ -3,6 +3,7 @@
 #include "camera/zone_assembly.h"
 
 #include <opencv2/core.hpp>
+#include "zone_value_compat.h"
 
 using denso::ui::assemble_zone_value;
 using denso::ui::group_into_zones;
@@ -37,12 +38,29 @@ TEST_CASE("assemble_zone_value on empty or non-digit is not Complete", "[zone_as
     CHECK(r.value == 0);  // an unparseable label must never carry a usable value
 }
 
-TEST_CASE("assemble_zone_value rejects four digits", "[zone_assembly]") {
+TEST_CASE("assemble_zone_value accepts four digits", "[zone_assembly]") {
+    // The reader faces a FOUR-position instrument. This case previously asserted
+    // the opposite, when three positions were all the reader accepted; the
+    // decimal formats (0000 / 000.0 / 00.00 / 0.000) are all four wide, so a
+    // four-digit group is now the ordinary reading, not a spurious one.
     std::vector<NamedDetection> d = {
         digit(10, "5"),
         digit(25, "0"),
         digit(40, "0"),
         digit(55, "0"),
+    };
+
+    const auto r = assemble_zone_value(d);
+    CHECK(r.kind == ReadingKind::Complete);
+    CHECK(r.value == 5000);
+}
+
+TEST_CASE("assemble_zone_value rejects five digits", "[zone_assembly]") {
+    // One position wider than the face: a spurious extra detection, which must
+    // hold the previous value rather than POST a bogus one.
+    std::vector<NamedDetection> d = {
+        digit(10, "5"), digit(25, "0"), digit(40, "0"),
+        digit(55, "0"), digit(70, "1"),
     };
 
     const auto r = assemble_zone_value(d);
@@ -208,10 +226,19 @@ TEST_CASE("KNOWN LIMITATION: a single remaining detection is undetectable",
     REQUIRE(r.value == 3);
 }
 
-TEST_CASE("assemble: more than three digits is Incomplete, not a bogus value",
+TEST_CASE("assemble: a full four-position reading is Complete",
           "[zone_assembly]") {
     const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40), dg("2", 28, 0, 20, 40),
                                         dg("3", 56, 0, 20, 40), dg("4", 84, 0, 20, 40)});
+    REQUIRE(r.kind == ReadingKind::Complete);
+    REQUIRE(r.value == 1234);
+}
+
+TEST_CASE("assemble: more than four digits is Incomplete, not a bogus value",
+          "[zone_assembly]") {
+    const auto r = assemble_zone_value({dg("1", 0, 0, 20, 40), dg("2", 28, 0, 20, 40),
+                                        dg("3", 56, 0, 20, 40), dg("4", 84, 0, 20, 40),
+                                        dg("5", 112, 0, 20, 40)});
     REQUIRE(r.kind == ReadingKind::Incomplete);
     REQUIRE(r.value == 0);
 }

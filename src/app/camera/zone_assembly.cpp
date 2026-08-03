@@ -26,10 +26,11 @@ ZoneAssembly assemble_zone_value(const std::vector<NamedDetection>& digits_in_zo
     for (const NamedDetection* d : ordered) {
         digits += d->name;
     }
-    // Anything unparseable is Incomplete, never a value. A >3-digit group means a
-    // spurious extra detection; a non-digit label means the model emitted a class
-    // we cannot place. Both must hold the previous value rather than POST.
-    if (digits.size() > 3 ||
+    // Anything unparseable is Incomplete, never a value. A group wider than the
+    // four-position face means a spurious extra detection; a non-digit label
+    // means the model emitted a class we cannot place. Both must hold the
+    // previous value rather than POST.
+    if (digits.size() > static_cast<std::size_t>(kDigitPositions) ||
         !std::all_of(digits.begin(), digits.end(),
                      [](unsigned char c) { return c >= '0' && c <= '9'; })) {
         return {ReadingKind::Incomplete, 0};
@@ -94,12 +95,16 @@ std::vector<ZoneReading> group_into_zones(const std::vector<NamedDetection>& kep
             }
         }
         const ZoneAssembly a = assemble_zone_value(in_zone);
+        // The zone's decimal format is applied HERE, after detection, ordering,
+        // validation and grouping have already accepted (or rejected) the
+        // reading. It moves the point; it can never turn a rejected reading
+        // into a value, because `a.kind` is carried through untouched.
         // Emit for EVERY zoned area, including NoValue: the aggregator needs the
         // liveness signal, or the 10s expiry erases a held zone (spec §5.3).
         ZoneReading r;
         r.zone_no = *area.zone;
         r.kind    = a.kind;
-        r.value   = a.value;
+        r.value   = ZoneValue{a.value, area.decimal_places, kDigitPositions};
         r.conf    = in_zone.empty() ? 0.0f : min_conf;
         out.push_back(r);
     }

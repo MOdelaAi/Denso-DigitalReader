@@ -246,11 +246,12 @@ void MainWindow::on_switch_mode(int target) {
     const mode::TargetMode want = mode::from_index(target);
     if (want == current_mode_) return;  // no switch to the already-active mode
 
-    // NO count preview and NO pre-dialog abort gate. Both existed solely to
-    // guarantee that the destructive switch could state exactly what it was about
-    // to delete; a switch now deletes nothing, so there is nothing to count, and
-    // a broken count query is no longer a reason to refuse an operator a
-    // non-destructive, fully reversible action.
+    // NO count preview and NO pre-dialog abort gate. The switch destroys the
+    // configured setup again, but a COUNT of the rows about to go answers no
+    // question the operator can act on - the button does the same thing either
+    // way - while adding a query whose failure would refuse them the action
+    // entirely. The confirmation names the KINDS of thing that are cleared
+    // instead, which is what the decision actually turns on.
     //
     // The dialog only asks; it reads no DB and starts no transaction.
     ModeConfirmDialog dlg(want, this);
@@ -350,10 +351,13 @@ mode::TargetMode MainWindow::perform_switch(mode::TargetMode target) {
         camera_view_->teardown_for_switch();
         fire(SwitchEvent::TeardownCompleted);
 
-        // ── 3. The atomic, NON-DESTRUCTIVE switch. Writes mode.target and
-        // disables reporting in one transaction and deletes nothing.
+        // ── 3. The atomic, DESTRUCTIVE switch. Writes mode.target, disables
+        // reporting and clears BOTH modes' configured processing setup in one
+        // transaction. It runs strictly AFTER the teardown above: nothing may
+        // still be producing readings into configuration this is about to
+        // delete, and no reporter may survive to POST one afterwards.
         fire(SwitchEvent::TransactionStarted);
-        const auto r = mode::switch_mode(db_, target);
+        const auto r = mode::switch_and_reset(db_, target);
         if (r.ok) {
             outcome = Outcome::Committed;
             fire(SwitchEvent::TransactionCommitted);

@@ -14,7 +14,7 @@ ZoneAggregator::ZoneAggregator(int stable_frames, int64_t expiry_ms,
       // into zero rather than inventing behaviour.
       hold_timeout_ms_(std::max<int64_t>(0, hold_timeout_ms)) {}
 
-std::optional<std::map<int, int>> ZoneAggregator::observe(
+std::optional<std::map<int, ZoneValue>> ZoneAggregator::observe(
     const std::vector<ZoneReading>& zones, int64_t now_ms) {
     bool changed = false;
     // Zones that complete THEIR OWN recovery (reach count >= stable_frames_) in
@@ -183,7 +183,7 @@ std::optional<std::map<int, int>> ZoneAggregator::observe(
     return build_snapshot(recovered_this_call);
 }
 
-std::optional<std::map<int, int>> ZoneAggregator::evict_zones(
+std::optional<std::map<int, ZoneValue>> ZoneAggregator::evict_zones(
     const std::set<int>& zone_nos) {
     bool changed = false;
     for (const int zone_no : zone_nos) {
@@ -208,9 +208,9 @@ std::optional<std::map<int, int>> ZoneAggregator::evict_zones(
 // Build the full snapshot of every zone holding a stable value and commit it.
 // Returns nullopt when the result would be EMPTY: build_brazing_payload({})
 // renders literal "{}" and, under an unverified backend, could clear every zone.
-std::optional<std::map<int, int>> ZoneAggregator::build_snapshot(
+std::optional<std::map<int, ZoneValue>> ZoneAggregator::build_snapshot(
     const std::set<int>& recovered_zone_nos) {
-    std::map<int, int> snapshot;
+    std::map<int, ZoneValue> snapshot;
     for (const auto& [zone_no, d] : zones_) {
         if (d.has_stable && zone_inhibit_.count(zone_no) == 0) {
             snapshot[zone_no] = d.stable;

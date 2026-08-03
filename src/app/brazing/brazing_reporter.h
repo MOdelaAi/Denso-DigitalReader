@@ -27,7 +27,7 @@ public:
     ~BrazingReporter() override;
 
     /// Hand in the latest full zone snapshot to (eventually) deliver.
-    void submit(const std::map<int, int>& snapshot);
+    void submit(const std::map<int, ZoneValue>& snapshot);
 
 private:
     void apply(const RetryAction& action);  // execute one policy instruction

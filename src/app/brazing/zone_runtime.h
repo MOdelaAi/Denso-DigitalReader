@@ -6,6 +6,8 @@
 // appliance READ, not what a backend accepted.
 #pragma once
 
+#include "brazing/zone_reading.h"   // ZoneValue
+
 #include <cstdint>
 #include <optional>
 
@@ -22,9 +24,9 @@ enum class ZoneRuntimeState {
 /// One zone's projected state, keyed by zone number alone. Only ZoneAggregator
 /// produces these; the UI must never consume them without a camera identity.
 struct ZoneRuntime {
-    int                zone_no = 0;
-    ZoneRuntimeState   state   = ZoneRuntimeState::Acquiring;
-    std::optional<int> value;   ///< present ONLY for Healthy / HoldingLastValid
+    int                      zone_no = 0;
+    ZoneRuntimeState         state   = ZoneRuntimeState::Acquiring;
+    std::optional<ZoneValue> value;   ///< present ONLY for Healthy / HoldingLastValid
 };
 
 /// What a tile renders. Adds the camera-level facts the aggregator cannot know.
@@ -41,10 +43,10 @@ enum class ZoneDisplayState {
 /// across cameras, and joining by it would let one camera display a value the
 /// other produced.
 struct ZoneRuntimeEntry {
-    int64_t            camera_id = 0;
-    int                zone_no   = 0;
-    ZoneDisplayState   state     = ZoneDisplayState::Acquiring;
-    std::optional<int> value;   ///< present ONLY for Healthy / HoldingLastValid
+    int64_t                  camera_id = 0;
+    int                      zone_no   = 0;
+    ZoneDisplayState         state     = ZoneDisplayState::Acquiring;
+    std::optional<ZoneValue> value;   ///< present ONLY for Healthy / HoldingLastValid
 
     /// Value equality — lets the grid skip repainting a tile whose rows are
     /// unchanged since the last poll.

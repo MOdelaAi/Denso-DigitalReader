@@ -401,7 +401,7 @@ TEST_CASE("a configured ball camera builds one BallLevelProcessor and requests "
     f.add_model("digitv3", {"0", "1", "2", "3"});
     const int64_t cam = f.add_camera(dead_cam("Tank A"));
     f.calibrate(cam, flt, 0, good_calibration());
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -433,7 +433,7 @@ TEST_CASE("an unconfigured ball camera builds no measuring pipeline",
     f.add_model("float-small", {"Small"});
     const int64_t cam = f.add_camera(dead_cam("Never calibrated"));
     (void)cam;
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -466,7 +466,7 @@ TEST_CASE("a calibration drawn against a different view builds no measuring "
     REQUIRE(stored.has_value());
     stored->rotation = 90;
     REQUIRE(denso::camera::update(f.h(), *stored));
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -509,7 +509,7 @@ TEST_CASE("a ball camera bound to a wrong-mode model builds no measuring "
         REQUIRE(q.exec());
         REQUIRE(q.numRowsAffected() == 1);   // the edit must actually land
     }
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -560,7 +560,7 @@ TEST_CASE("a ball binding whose class does not exist in the resolved metadata "
         REQUIRE(q.exec());
         REQUIRE(q.numRowsAffected() == 1);
     }
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -593,7 +593,7 @@ TEST_CASE("a ball camera whose bound model is gone builds no measuring pipeline"
         q.addBindValue(static_cast<qlonglong>(flt));
         REQUIRE(q.exec());
     }
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -631,7 +631,7 @@ TEST_CASE("a ball camera carrying more than the four permitted zones builds no "
         q.addBindValue(static_cast<qlonglong>(cam));
         REQUIRE(q.exec());
     }
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -654,7 +654,7 @@ TEST_CASE("a valid Float binding builds exactly one processor per camera",
     const int64_t b = f.add_camera(dead_cam("Tank B"));
     f.calibrate(a, flt, 0, good_calibration(), 1);
     f.calibrate(b, flt, 0, good_calibration(), 2);
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -683,7 +683,7 @@ TEST_CASE("one unconfigured ball camera does not stop its calibrated sibling",
     const int64_t bad = f.add_camera(dead_cam("Not calibrated"));
     (void)bad;
     f.calibrate(good, flt, 0, good_calibration());
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = permissive_registry(log);
@@ -770,7 +770,7 @@ TEST_CASE("switching modes tears the old pipeline down before the new one starts
     auto ball_engines = permissive_registry(ball_log);
     grid.set_engines(ball_engines, nullptr);
 
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
     const uint64_t balls_before = BallLevelProcessor::constructed_count();
     const uint64_t dets_before = DetectionProcessor::constructed_count();
 
@@ -812,7 +812,7 @@ TEST_CASE("the engine registry cannot be replaced under a live pipeline",
     auto other = permissive_registry(other_log);
     grid.set_engines(other, nullptr);
 
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
     grid.reload();
     // The refused registry was never adopted: the reload used the ORIGINAL one,
     // so the replacement's log stayed empty.
@@ -836,7 +836,7 @@ TEST_CASE("a failed warm-up releases the cameras waiting on it", "[ball_runtime]
     const int64_t flt = f.add_model("float-small", {"Small"});
     const int64_t cam = f.add_camera(dead_cam("Tank"));
     f.calibrate(cam, flt, 0, good_calibration());
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     // Every load fails, and the Float engine is REQUIRED — so warm_up() throws.
     BuildLog log;
@@ -935,7 +935,7 @@ TEST_CASE("a model whose warm-up inference threw does not measure",
     const int64_t flt = f.add_model("float-small", {"Small"});
     const int64_t cam = f.add_camera(dead_cam("Tank"));
     f.calibrate(cam, flt, 0, good_calibration());
-    REQUIRE(denso::mode::switch_mode(f.h(), TargetMode::BallLeveler).ok);
+    REQUIRE(denso::mode::save(f.h(), TargetMode::BallLeveler));
 
     BuildLog log;
     auto engines = std::make_shared<EngineRegistry>(

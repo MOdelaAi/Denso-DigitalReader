@@ -23,7 +23,7 @@ RetryAction BrazingRetryPolicy::maybe_send() {
     return a;
 }
 
-RetryAction BrazingRetryPolicy::submit(const std::map<int, int>& snapshot) {
+RetryAction BrazingRetryPolicy::submit(const std::map<int, ZoneValue>& snapshot) {
     pending_ = snapshot;
     backoff_ms_ = 0;  // a fresh value resets the retry cadence
     return maybe_send();

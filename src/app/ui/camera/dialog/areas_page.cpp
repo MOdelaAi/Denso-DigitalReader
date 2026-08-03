@@ -1,5 +1,8 @@
 #include "ui/camera/dialog/areas_page.h"
 
+#include "brazing/zone_reading.h"   // ZoneValue, zone_value_display/json
+#include "camera/zone_assembly.h"    // kDigitPositions
+
 #include "camera/area_validation.h"
 #include "ui/camera/dialog/page_util.h"
 #include "ui/camera/dialog/roi_canvas.h"
@@ -199,6 +202,39 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
             });
     side->addWidget(zone_combo_);
 
+    // Where the decimal point sits among the reader's four digit positions. The
+    // four entries ARE the four legal formats, and each carries its
+    // decimal_places as item data, so no format string is ever constructed or
+    // stored - an operator cannot express a format the reader cannot render.
+    side->addWidget(dim_label(QStringLiteral("Number format")));
+    format_combo_ = new QComboBox;
+    format_combo_->addItem(QStringLiteral("0000"), QVariant(0));
+    format_combo_->addItem(QStringLiteral("000.0"), QVariant(1));
+    format_combo_->addItem(QStringLiteral("00.00"), QVariant(2));
+    format_combo_->addItem(QStringLiteral("0.000"), QVariant(3));
+    connect(format_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+                if (idx < 0) {
+                    return;
+                }
+                // Clamped even though every item is in range: itemData on a
+                // cleared/rebuilt model can be invalid, and 0 is the format that
+                // preserves the pre-v16 reading.
+                const int dp = std::clamp(format_combo_->itemData(idx).toInt(), 0, 3);
+                if (drafting_) {
+                    draft_decimal_places_ = dp;
+                } else if (camera::CameraArea* a = selected_area()) {
+                    // Per AREA: writing through the selection is what keeps Zone 1
+                    // and Zone 2 independent.
+                    a->decimal_places = dp;
+                }
+                update_format_preview();
+            });
+    side->addWidget(format_combo_);
+
+    format_preview_ = dim_label(QString());
+    side->addWidget(format_preview_);
+
     redraw_btn_ = new QPushButton(QStringLiteral("Redraw shape"));
     connect(redraw_btn_, &QPushButton::clicked, this,
             &CameraAreasPage::redraw_selected);
@@ -265,11 +301,13 @@ void CameraAreasPage::load(std::vector<camera::CameraArea> areas,
     drafting_ = false;
     draft_name_.clear();
     draft_zone_.reset();
+    draft_decimal_places_ = 0;
     redrawing_row_ = -1;
     rebuild_zone_choices();
     refresh_list();
     name_edit_->clear();
     sync_zone_combo(std::nullopt);
+    sync_format_combo();
     canvas_->go_idle();
     push_context_areas();
     if (!areas_.empty()) {
@@ -336,6 +374,7 @@ void CameraAreasPage::select_area(int row) {
     if (row < 0 || row >= static_cast<int>(areas_.size())) {
         name_edit_->clear();
         sync_zone_combo(std::nullopt);
+        sync_format_combo();
         canvas_->go_idle();
         push_context_areas();
         update_controls();
@@ -348,10 +387,32 @@ void CameraAreasPage::select_area(int row) {
     name_edit_->setText(QString::fromStdString(a.name));
     rebuild_zone_choices();  // availability depends on which area is selected
     sync_zone_combo(a.zone);
+    sync_format_combo();
     push_context_areas();
     canvas_->edit_polygon(a.points);
     update_controls();
     update_status();
+}
+
+void CameraAreasPage::sync_format_combo() {
+    const QSignalBlocker block(format_combo_);
+    const camera::CameraArea* a = selected_area();
+    const int dp = drafting_ ? draft_decimal_places_ : (a ? a->decimal_places : 0);
+    const int idx = format_combo_->findData(QVariant(std::clamp(dp, 0, 3)));
+    format_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
+    update_format_preview();
+}
+
+void CameraAreasPage::update_format_preview() {
+    // A worked example on a fixed sample, so the operator sees what the choice
+    // MEANS before saving it. Rendered through the same two functions the
+    // annotation and the payload use - not a re-implementation that could drift.
+    const int dp = std::clamp(format_combo_->currentData().toInt(), 0, 3);
+    const ZoneValue sample{1234, dp, kDigitPositions};
+    format_preview_->setText(
+        QStringLiteral("Raw digits 1234 -> shows %1, reports %2")
+            .arg(QString::fromStdString(zone_value_display(sample)),
+                 QString::fromStdString(zone_value_json(sample))));
 }
 
 void CameraAreasPage::push_context_areas() {
@@ -395,9 +456,11 @@ void CameraAreasPage::start_new_area() {
     redrawing_row_ = -1;
     draft_name_ = suggested_name().toStdString();
     draft_zone_.reset();
+    draft_decimal_places_ = 0;
     name_edit_->setText(QString::fromStdString(draft_name_));
     rebuild_zone_choices();  // a draft blocks against every existing area
     sync_zone_combo(std::nullopt);
+    sync_format_combo();
     push_context_areas();
     canvas_->begin_draw();
     canvas_->setFocus();
@@ -435,11 +498,13 @@ void CameraAreasPage::commit_drawn_polygon() {
     // camera_id is assigned by the repo's replace_areas (it ignores this field).
     a.name = draft_name_.empty() ? suggested_name().toStdString() : draft_name_;
     a.zone = draft_zone_;
+    a.decimal_places = draft_decimal_places_;
     a.points = canvas_->polygon();
     areas_.push_back(std::move(a));
     drafting_ = false;
     draft_name_.clear();
     draft_zone_.reset();
+    draft_decimal_places_ = 0;
     refresh_list();
     list_->setCurrentRow(static_cast<int>(areas_.size()) - 1);  // → select_area
 }
@@ -468,11 +533,13 @@ void CameraAreasPage::cancel_active_draw() {
     redrawing_row_ = -1;
     draft_name_.clear();
     draft_zone_.reset();
+    draft_decimal_places_ = 0;
     if (restore >= 0 && restore < static_cast<int>(areas_.size())) {
         select_area(restore);  // back to the untouched original
     } else {
         name_edit_->clear();
         sync_zone_combo(std::nullopt);
+        sync_format_combo();
         canvas_->go_idle();
         push_context_areas();
     }
@@ -661,6 +728,7 @@ void CameraAreasPage::update_controls() {
     // operator's typing.
     name_edit_->setEnabled(has_sel || drafting_);
     zone_combo_->setEnabled(has_sel || drafting_);
+    format_combo_->setEnabled(has_sel || drafting_);
 
     hint_->setText(
         active ? QStringLiteral("Name and zone are kept and applied when you "
