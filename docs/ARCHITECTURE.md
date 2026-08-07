@@ -219,6 +219,112 @@ cameras, so it legitimately requires no engines) and is never created; a
 `attached_model_filenames` returns `{}` for both, which would let a corrupt
 database pass as a fresh install.
 
+## Install and runtime architecture
+
+### Fresh install resolves an operator; it never assumes one
+
+`sudo apt install ./<deb>` is the entire fresh-install procedure. `postinst`
+resolves exactly one operator account and hands the rest to
+`denso-setup configure --user <u> --autostart --auto`, reusing the tool that was
+verified on hardware rather than keeping a second copy of the
+ownership/seeding/autostart logic inside a maintainer script.
+
+`resolve_operator_user` (policy.sh — pure, fixture-tested) applies one precedence:
+
+| | Rule | Why |
+|---|---|---|
+| 1 | the recorded `install-state/user` | an upgrade must never be re-pointed at whoever runs sudo today. A recorded-but-invalid user is a **hard failure**, not a fall-through — falling through is exactly how an appliance would be silently taken from its operator |
+| 2 | `SUDO_USER` | the normal interactive `sudo apt install` case |
+| 3 | exactly one acceptable **local, active, non-remote** session user | last resort |
+
+Rule 3's filters are not decoration. `Class=user` drops the GDM greeter — which
+runs as the `gdm` system account and is otherwise the only "graphical" session on
+a powered-on appliance — and `Remote=no` drops the administrator's own SSH
+session, because resolving to whoever SSH'd in is the wrong answer when they are
+installing *for* someone else.
+
+Refused: root, `nobody`, system/service accounts, `nologin`/`false` shells, uids
+outside `[1000,60000]`, and unknown names. **Zero candidates and several
+candidates both fail the installation.** Nothing guesses; nothing ever falls back
+to root. The operator username is arbitrary and is never hardcoded.
+
+Autostart is enabled automatically. **Autologin is never touched** — no
+maintainer script references GDM, and `denso-setup configure --enable-autologin`
+remains an explicit operator action.
+
+### One graphical launch path
+
+```
+graphical login → systemd --user → denso-digitalreader.service
+                                     → /usr/bin/denso-digitalreader  (exports DENSO_DATA_DIR)
+                                     → /opt/denso/bin/denso
+
+desktop / menu click → systemctl --user start denso-digitalreader.service
+                       (the SAME unit; a no-op when already active)
+```
+
+**systemd `--user` is the sole autostart authority.** There is no XDG autostart
+entry, and the legacy one is deleted on migration. That is not tidiness: with an
+entry still in `~/.config/autostart`, `systemctl --user disable` would not have
+stopped Denso starting at login, and `disable` would be a lie.
+
+`denso-digitalreader.service` is a systemd **user** unit in
+`/usr/lib/systemd/user/`, never a system/root service: Denso is a GUI and must
+live and die with the operator's graphical session, and a root service would have
+no session, no display, and would write root-owned artifacts into an
+operator-owned data dir. Four deliberate properties:
+
+- **`[Install] WantedBy=graphical-session.target`**, so `enable`/`disable`
+  (and `--now`) are real. The anchor was verified on the target, not assumed:
+  `gnome-session.target` declares `BindsTo=`/`Before=graphical-session.target`
+  so the target is genuinely reached, `enable`/`disable` were measured to create
+  and remove `~/.config/systemd/user/graphical-session.target.wants/…`, and the
+  target's `RefuseManualStart=yes` does not block dependency wiring.
+- **`PartOf=graphical-session.target`**, so Denso stops when the session ends.
+- **`Restart=no`.** Denso is single-instance; a restart loop against a held lock
+  produces exit-3 churn that buries the original fault.
+- **No invented display.** `ExecStartPre=/usr/bin/denso-session-check` fails
+  first, naming the missing `DISPLAY`/`WAYLAND_DISPLAY`, rather than letting Qt
+  abort on a display that is absent or belongs to the greeter. On this X11
+  appliance (`WaylandEnable=false`) GNOME publishes the real values through
+  `/etc/X11/Xsession.d/95dbus_update-activation-env`
+  (`dbus-update-activation-environment --systemd --all`) before the session
+  target is reached; nothing in the package supplies a value of its own.
+
+Nothing runs `systemctl` at build or install time. `postinst` enables the unit
+for the resolved operator by creating the same `.wants` symlink
+`systemctl --user enable` would — that user is normally not logged in during
+`apt install`, so there is no user manager to talk to. A hand-made symlink was
+measured to be reported `enabled`, removed by `systemctl --user disable`, and
+re-creatable by `systemctl --user enable`.
+
+**Legacy XDG → systemd migration** is guarded by
+`install-state/autostart-migrated` and preserves intent: legacy entry present →
+remove **only** that file and enable the unit; legacy entry absent → autostart
+was deliberately off, so the unit is left disabled; marker present → do nothing.
+An upgrade therefore can never silently re-enable a service the operator turned
+off. A fresh install never enters this path — it always enables, and writes the
+marker so migration never runs on it.
+
+### Lifecycle status is not application health
+
+| Question | Answered by |
+|---|---|
+| process/service lifecycle and autostart | `systemctl --user status\|start\|stop\|restart\|enable\|disable denso-digitalreader` |
+| is an instance holding the lock | `denso-digitalreader --check-running` (0/1/4, tri-state) |
+| application, database and model health | `denso-digitalreader --check` (0 Ready / 10 Degraded / 78 Blocked) |
+
+These are not interchangeable, and `systemctl status` must never be documented as
+a replacement for the application health checks.
+
+Runtime output reaches the journal (`StandardOutput`/`StandardError=journal`).
+The appliance runs a **volatile** journal with no per-user journal files, so the
+supported reader is
+`sudo journalctl _SYSTEMD_USER_UNIT=denso-digitalreader.service -f`.
+`journalctl --user -u …` requires persistent per-user journals, which this
+package neither requires nor configures — a package has no business changing a
+whole machine's log retention and write policy.
+
 ## Upgrade architecture (manual `.deb`)
 
 Denso is an embedded appliance updated by an **administrator**, manually. There
@@ -231,7 +337,7 @@ The whole design rests on one split, and dpkg respects it:
 | Domain | Paths | Owner | Lifecycle |
 |---|---|---|---|
 | **Package-owned / immutable application content** | `/opt/denso/bin`, `/opt/denso/lib`, `/opt/denso/models` | `root:root` | **Replaced** by the `.deb` on every upgrade |
-| **Operator data** | `/opt/denso/data` (`denso.db`, WAL/SHM, `denso.log`, `models/`, `denso.lock`, `denso.db.pre-v*`) | `modela` | **Persists** across normal package upgrades and `apt remove` |
+| **Operator data** | `/opt/denso/data` (`denso.db`, WAL/SHM, `denso.log`, `models/`, `denso.lock`, `denso.db.pre-v*`) | the resolved operator |  **Persists** across normal package upgrades and `apt remove` |
 
 The package **does not own the operator database**, its WAL/SHM, or generated
 migration backups — dpkg never touches `/opt/denso/data`. That is precisely why

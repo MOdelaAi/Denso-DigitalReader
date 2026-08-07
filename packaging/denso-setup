@@ -24,7 +24,10 @@ PKG_MANIFEST=/opt/denso/lib/manifest.json      # packaged schema-2 template
 DATA_MODELS=/opt/denso/data/models
 DATA_MANIFEST=/opt/denso/data/models/manifest.json  # where the app reads it
 GDM_CONF=/etc/gdm3/custom.conf
+# Kept only so the legacy entry can be REMOVED: nothing installs it any more.
 AUTOSTART_NAME=com.denso.DigitalReader.desktop
+UNIT_NAME=denso-digitalreader.service
+USER_UNIT=/usr/lib/systemd/user/$UNIT_NAME
 
 die() { echo "denso-setup: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" = "0" ] || die "must run as root (sudo denso-setup ...)"; }
@@ -39,16 +42,23 @@ as_user() {
 
 cmd_configure() {
     need_root
-    user=""; autostart=0; autologin=0
+    user=""; autostart=0; autologin=0; auto=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --user) user="${2-}"; shift 2 ;;
             --autostart) autostart=1; shift ;;
             --enable-autologin) autologin=1; shift ;;
+            --auto) auto=1; shift ;;     # invoked by postinst; suppress the
+                                         # human call-to-action at the end
             *) die "unknown option: $1" ;;
         esac
     done
-    # $SUDO_USER is NOT trusted: absent under automation, wrong from a root shell.
+    # $SUDO_USER is NOT trusted HERE, and that has not changed: this entry point
+    # is also used from a root shell and from automation, where SUDO_USER is
+    # absent or names the wrong person. postinst resolves the operator
+    # explicitly (resolve_operator_user in policy.sh) and passes the answer in as
+    # --user, so the trust decision lives in the single place where SUDO_USER
+    # really does name the invoking administrator — not here.
     [ -n "$user" ] || die "--user <username> is required"
     id "$user" >/dev/null 2>&1 || die "no such user: $user"
     home="$(getent passwd "$user" | cut -d: -f6)"
@@ -105,19 +115,22 @@ cmd_configure() {
     done
 
     if [ "$autostart" = "1" ]; then
-        # Same class as the model-seeding bug: write-as-root-then-chown leaves a
-        # root-owned file in the user's home if interrupted between the two
-        # steps. `install -o -g` sets ownership as part of the atomic create, and
-        # uses $group (id -gn), not "$user":"$user" — a primary group need not
-        # share the username.
-        dir="$home/.config/autostart"
-        install -d -o "$user" -g "$group" -m 0755 "$dir" || die "cannot create $dir"
-        install -o "$user" -g "$group" -m 0644 "/usr/share/applications/$AUTOSTART_NAME" \
-                "$dir/$AUTOSTART_NAME" || die "cannot install the autostart entry"
-        echo "denso-setup: autostart enabled for $user ($dir/$AUTOSTART_NAME)"
-        echo "denso-setup: NOTE — XDG autostart only fires AFTER a graphical login."
-        echo "             Without --enable-autologin this box still stops at the"
-        echo "             GDM greeter on power-on and the app will NOT start."
+        # Autostart is the systemd USER unit — there is no XDG autostart entry
+        # any more. enable_user_unit (policy.sh) creates the same .wants symlink
+        # `systemctl --user enable` would, because the operator is usually not
+        # logged in at install time and has no user manager to talk to.
+        link="$(enable_user_unit "$USER_UNIT" "$home" "$user" "$group")" \
+            || die "cannot enable $UNIT_NAME for $user"
+        # Clear a stale entry from the pre-systemd architecture, so the old and
+        # new authorities can never both be live.
+        rm -f "$home/.config/autostart/$AUTOSTART_NAME"
+        echo "denso-setup: autostart enabled for $user ($link)"
+        echo "denso-setup: NOTE — the unit starts with the graphical session."
+        echo "             Autologin is NOT enabled, so this box stops at the GDM"
+        echo "             greeter on power-on; Denso starts when the operator"
+        echo "             logs in graphically. Manage it with:"
+        echo "               systemctl --user status|start|stop|restart denso-digitalreader"
+        echo "               systemctl --user disable denso-digitalreader   # stop autostarting"
     fi
 
     if [ "$autologin" = "1" ]; then
@@ -169,7 +182,10 @@ cmd_configure() {
     fi
 
     # `sudo` is not decoration: cmd_verify calls need_root four lines below.
-    echo "denso-setup: configured. Run 'sudo denso-setup verify' next."
+    # Suppressed under --auto: postinst prints its own fresh-install summary, and
+    # a normal `apt install` must not end by telling the operator to run another
+    # command — that is the whole point of the one-command install.
+    [ "$auto" = "1" ] || echo "denso-setup: configured. Run 'sudo denso-setup verify' next."
 }
 
 # seed-manifest — place the packaged schema-2 manifest.json into the data dir so
@@ -506,8 +522,13 @@ cmd_unconfigure() {
     user="$(cat "$STATE/user" 2>/dev/null || echo "")"
     if [ -n "$user" ]; then
         home="$(getent passwd "$user" | cut -d: -f6 || echo "")"
-        [ -n "$home" ] && rm -f "$home/.config/autostart/$AUTOSTART_NAME" && \
-            echo "denso-setup: autostart removed for $user"
+        if [ -n "$home" ]; then
+            # Disable the unit AND clear any legacy XDG entry: unconfigure must
+            # leave no autostart authority behind, from either architecture.
+            disable_user_unit "$UNIT_NAME" "$home"
+            rm -f "$home/.config/autostart/$AUTOSTART_NAME"
+            echo "denso-setup: autostart disabled for $user"
+        fi
     fi
     if [ -f "$STATE/autologin.orig" ]; then
         # A missing $GDM_CONF here is a real failure, not a no-op: if we

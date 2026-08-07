@@ -1498,6 +1498,342 @@ is "slice5: no maintainer script / configure / verify invokes seed-manifest" "$I
 
 fi  # python3 available
 
+# ── operator-user resolution: the one-command fresh install picks the operator.
+#    Driven from a FIXTURE passwd file, so every rejection class is exercised
+#    without needing those accounts to exist on the build box.
+PW="$T/passwd"
+cat > "$PW" <<'PWEOF'
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+gdm:x:128:135:Gnome Display Manager:/var/lib/gdm3:/bin/false
+svc:x:999:999:service acct:/var/lib/svc:/usr/sbin/nologin
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
+bob:x:1001:1001:Bob:/home/bob:/bin/bash
+carol:x:1500:1500:Carol:/home/carol:/bin/zsh
+locked:x:1002:1002:Locked:/home/locked:/usr/sbin/nologin
+nohome:x:1003:1003:No Home:/nonexistent:/bin/bash
+huge:x:60001:60001:Out of range:/home/huge:/bin/bash
+nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+PWEOF
+
+operator_user_ok "$PW" alice;  rc_is "operator: a normal user is acceptable"          $? 0
+operator_user_ok "$PW" bob;    rc_is "operator: a second normal user is acceptable"   $? 0
+operator_user_ok "$PW" carol;  rc_is "operator: an arbitrary name/uid/shell is fine"  $? 0
+operator_user_ok "$PW" root;   rc_is "operator: REJECTS root"                         $? 1
+operator_user_ok "$PW" nobody; rc_is "operator: REJECTS nobody"                       $? 1
+operator_user_ok "$PW" daemon; rc_is "operator: REJECTS a uid<1000 system account"    $? 1
+operator_user_ok "$PW" gdm;    rc_is "operator: REJECTS gdm (false shell)"            $? 1
+operator_user_ok "$PW" svc;    rc_is "operator: REJECTS a nologin service account"    $? 1
+operator_user_ok "$PW" locked; rc_is "operator: REJECTS a nologin shell at uid>=1000" $? 1
+operator_user_ok "$PW" nohome; rc_is "operator: REJECTS /nonexistent home"            $? 1
+operator_user_ok "$PW" huge;   rc_is "operator: REJECTS uid above UID_MAX"            $? 1
+operator_user_ok "$PW" ghost;  rc_is "operator: REJECTS a user not in the database"   $? 1
+operator_user_ok "$PW" "";     rc_is "operator: REJECTS an empty name"                $? 1
+
+is "resolve: SUDO_USER=alice resolves alice" "$(resolve_operator_user "$PW" "" alice)" "alice sudo_user"
+is "resolve: SUDO_USER=bob resolves bob"     "$(resolve_operator_user "$PW" "" bob)"   "bob sudo_user"
+is "resolve: an arbitrary username resolves" "$(resolve_operator_user "$PW" "" carol)" "carol sudo_user"
+
+resolve_operator_user "$PW" "" root >/dev/null 2>&1
+rc_is "resolve: SUDO_USER=root is refused outright" $? 1
+is "resolve: root SUDO_USER never wins over a real session user" \
+   "$(resolve_operator_user "$PW" "" root alice)" "alice session"
+
+resolve_operator_user "$PW" "" "" alice bob >/dev/null 2>&1
+rc_is "resolve: two qualifying session users is AMBIGUOUS, not a guess" $? 1
+resolve_operator_user "$PW" "" "" alice bob 2>&1 | grep -q "ambiguous" \
+    && ok "resolve: the ambiguity is named in the message" \
+    || bad "resolve: the ambiguity is named in the message"
+is "resolve: exactly one session user resolves" \
+   "$(resolve_operator_user "$PW" "" "" bob)" "bob session"
+is "resolve: the same user seen twice is not ambiguous" \
+   "$(resolve_operator_user "$PW" "" "" alice alice)" "alice session"
+resolve_operator_user "$PW" "" "" >/dev/null 2>&1
+rc_is "resolve: no SUDO_USER and no session FAILS" $? 1
+resolve_operator_user "$PW" "" "" root gdm nobody >/dev/null 2>&1
+rc_is "resolve: sessions of only unacceptable accounts FAIL" $? 1
+
+is "resolve: recorded alice + SUDO_USER=bob still resolves ALICE" \
+   "$(resolve_operator_user "$PW" alice bob)" "alice recorded"
+is "resolve: recorded bob + SUDO_USER=alice still resolves BOB" \
+   "$(resolve_operator_user "$PW" bob alice)" "bob recorded"
+is "resolve: recorded user beats a session user too" \
+   "$(resolve_operator_user "$PW" alice "" bob)" "alice recorded"
+resolve_operator_user "$PW" ghost bob >/dev/null 2>&1
+rc_is "resolve: a recorded-but-invalid user FAILS (never falls through)" $? 1
+resolve_operator_user "$PW" ghost bob 2>&1 | grep -q "Refusing to silently adopt" \
+    && ok "resolve: the refusal explains why it will not adopt the sudo user" \
+    || bad "resolve: the refusal explains why it will not adopt the sudo user"
+
+# ── enable_user_unit / disable_user_unit: the real code path, run unprivileged
+#    by targeting the invoking user (chowning to yourself is allowed).
+ME="$(id -un)"; MYG="$(id -gn)"
+UNIT="$REPO/packaging/systemd/denso-digitalreader.service"
+UNAME_="denso-digitalreader.service"
+UH="$T/unithome"; rm -rf "$UH"; mkdir -p "$UH"
+
+is "enable: the wants path matches what systemctl uses" \
+   "$(user_unit_wants_link "$UH" "$UNAME_")" \
+   "$UH/.config/systemd/user/graphical-session.target.wants/$UNAME_"
+
+LINK="$(enable_user_unit "$UNIT" "$UH" "$ME" "$MYG")"
+rc_is "enable: enabling succeeds" $? 0
+[ -L "$LINK" ] && ok "enable: creates a symlink" || bad "enable: creates a symlink"
+is "enable: the symlink points at the packaged unit" "$(readlink "$LINK")" "$UNIT"
+is "enable: the symlink is owned by the target user" "$(stat -c %U "$LINK")" "$ME"
+is "enable: the wants dir is 0755" \
+   "$(stat -c %a "$UH/.config/systemd/user/graphical-session.target.wants")" "755"
+enable_user_unit "$UNIT" "$UH" "$ME" "$MYG" >/dev/null
+rc_is "enable: re-enabling is idempotent" $? 0
+is "enable: still exactly one link after re-enabling" \
+   "$(ls "$UH/.config/systemd/user/graphical-session.target.wants" | wc -l)" "1"
+enable_user_unit "$T/no-such.service" "$UH" "$ME" "$MYG" >/dev/null 2>&1
+rc_is "enable: a missing unit file is refused" $? 1
+enable_user_unit "$UNIT" "$UH" "$ME" >/dev/null 2>&1
+rc_is "enable: a missing argument is refused" $? 1
+
+# The hazard this guards: ~/.config may legitimately be 0700, and an `install -d`
+# over the whole path would silently widen it to 0755.
+UH2="$T/unithome2"; rm -rf "$UH2"; mkdir -p "$UH2/.config"; chmod 0700 "$UH2/.config"
+enable_user_unit "$UNIT" "$UH2" "$ME" "$MYG" >/dev/null
+is "enable: does NOT widen an existing 0700 ~/.config" "$(stat -c %a "$UH2/.config")" "700"
+
+# disable removes only Denso's link.
+touch "$UH/.config/systemd/user/graphical-session.target.wants/other.service"
+disable_user_unit "$UNAME_" "$UH"
+rc_is "disable: succeeds" $? 0
+[ -e "$UH/.config/systemd/user/graphical-session.target.wants/$UNAME_" ] \
+    && bad "disable: removes the Denso link" || ok "disable: removes the Denso link"
+[ -e "$UH/.config/systemd/user/graphical-session.target.wants/other.service" ] \
+    && ok "disable: leaves another enabled unit alone" \
+    || bad "disable: leaves another enabled unit alone"
+disable_user_unit "$UNAME_" "$UH"
+rc_is "disable: disabling twice is harmless" $? 0
+
+# ── migrate_xdg_autostart: the legacy transition matrix.
+mk_legacy() {   # <home> — an old-architecture home with a Denso autostart entry
+    rm -rf "$1"; mkdir -p "$1/.config/autostart"
+    printf '[Desktop Entry]\nExec=/usr/bin/denso-digitalreader\n' \
+        > "$1/.config/autostart/com.denso.DigitalReader.desktop"
+    printf '[Desktop Entry]\nExec=/usr/bin/some-other-app\n' \
+        > "$1/.config/autostart/other-app.desktop"
+}
+ST="$T/state"; rm -rf "$ST"; mkdir -p "$ST"
+
+# (a) legacy entry PRESENT -> remove it, enable the unit, mark.
+MH="$T/mig-a"; mk_legacy "$MH"
+is "migrate: legacy entry present -> enabled" \
+   "$(migrate_xdg_autostart "$ST" "$MH" "$ME" "$MYG" "$UNIT")" "enabled"
+[ -e "$MH/.config/autostart/com.denso.DigitalReader.desktop" ] \
+    && bad "migrate: the Denso XDG entry is removed" \
+    || ok  "migrate: the Denso XDG entry is removed"
+[ -e "$MH/.config/autostart/other-app.desktop" ] \
+    && ok  "migrate: UNRELATED autostart entries are untouched" \
+    || bad "migrate: UNRELATED autostart entries are untouched"
+[ -L "$(user_unit_wants_link "$MH" "$UNAME_")" ] \
+    && ok "migrate: the user service is enabled" || bad "migrate: the user service is enabled"
+[ -f "$ST/autostart-migrated" ] \
+    && ok "migrate: the marker is written" || bad "migrate: the marker is written"
+is "migrate: a second run is a no-op" \
+   "$(migrate_xdg_autostart "$ST" "$MH" "$ME" "$MYG" "$UNIT")" "already"
+
+# (b) legacy entry ABSENT on an EXISTING install -> autostart was deliberately
+#     off; leave the new unit DISABLED.
+ST2="$T/state-b"; mkdir -p "$ST2"
+MH2="$T/mig-b"; rm -rf "$MH2"; mkdir -p "$MH2/.config/autostart"
+printf '[Desktop Entry]\nExec=/usr/bin/some-other-app\n' > "$MH2/.config/autostart/other-app.desktop"
+is "migrate: legacy entry absent -> preserved-disabled" \
+   "$(migrate_xdg_autostart "$ST2" "$MH2" "$ME" "$MYG" "$UNIT")" "preserved-disabled"
+[ -e "$(user_unit_wants_link "$MH2" "$UNAME_")" ] \
+    && bad "migrate: does NOT enable when autostart was off" \
+    || ok  "migrate: does NOT enable when autostart was off"
+[ -e "$MH2/.config/autostart/other-app.desktop" ] \
+    && ok  "migrate: unrelated entries survive the disabled case too" \
+    || bad "migrate: unrelated entries survive the disabled case too"
+[ -f "$ST2/autostart-migrated" ] \
+    && ok "migrate: the marker is written in the disabled case" \
+    || bad "migrate: the marker is written in the disabled case"
+
+# (c) THE critical one: once migrated, an upgrade must never re-enable a service
+#     the operator turned off with `systemctl --user disable`.
+disable_user_unit "$UNAME_" "$MH"           # operator disables it after migrating
+is "migrate: post-migration run is still a no-op" \
+   "$(migrate_xdg_autostart "$ST" "$MH" "$ME" "$MYG" "$UNIT")" "already"
+[ -e "$(user_unit_wants_link "$MH" "$UNAME_")" ] \
+    && bad "migrate: an upgrade NEVER re-enables a disabled service" \
+    || ok  "migrate: an upgrade NEVER re-enables a disabled service"
+# ...even if a stale legacy entry reappears.
+mkdir -p "$MH/.config/autostart"
+printf '[Desktop Entry]\nExec=/usr/bin/denso-digitalreader\n' \
+    > "$MH/.config/autostart/com.denso.DigitalReader.desktop"
+migrate_xdg_autostart "$ST" "$MH" "$ME" "$MYG" "$UNIT" >/dev/null
+[ -e "$(user_unit_wants_link "$MH" "$UNAME_")" ] \
+    && bad "migrate: the marker wins over a reappearing legacy entry" \
+    || ok  "migrate: the marker wins over a reappearing legacy entry"
+migrate_xdg_autostart "$ST" "$MH" "$ME" "$MYG" >/dev/null 2>&1
+rc_is "migrate: a missing argument is refused" $? 1
+
+# ── ONE authority: systemd. Nothing installs an XDG autostart entry any more.
+DESK="$REPO/packaging/com.denso.DigitalReader.desktop"
+is "launch: the menu entry starts the unit" \
+   "$(grep '^Exec=' "$DESK" | cut -d= -f2-)" \
+   "/usr/bin/systemctl --user start denso-digitalreader.service"
+is "launch: the menu entry has exactly one Exec line" "$(grep -c '^Exec=' "$DESK")" "1"
+grep -qE "^Exec=(/usr/bin/denso-digitalreader|/opt/denso/bin/denso)$" "$DESK" \
+    && bad "launch: the menu entry does NOT execute the GUI directly" \
+    || ok  "launch: the menu entry does NOT execute the GUI directly"
+grep -q "^StartupNotify=false" "$DESK" \
+    && ok "launch: StartupNotify is false (Exec returns immediately)" \
+    || bad "launch: StartupNotify is false (Exec returns immediately)"
+# Only a WRITE into ~/.config/autostart counts. denso-setup still `rm -f`s the
+# legacy entry — that is cleanup of the old authority, not a second one.
+sed 's/#.*//' "$REPO/packaging/denso-setup" | grep -qE "(install|cp|ln) .*autostart/" \
+    && bad "launch: denso-setup installs no XDG autostart entry" \
+    || ok  "launch: denso-setup installs no XDG autostart entry"
+sed 's/#.*//' "$REPO/packaging/denso-setup" | grep -q "rm -f .*autostart/" \
+    && ok "launch: denso-setup still clears the legacy entry" \
+    || bad "launch: denso-setup still clears the legacy entry"
+[ -e "$REPO/packaging/denso-autostart" ] \
+    && bad "launch: denso-autostart is NOT shipped" || ok "launch: denso-autostart is NOT shipped"
+grep -rq "denso-autostart" "$REPO/tools/build_package.sh" \
+    && ! sed 's/#.*//' "$REPO/tools/build_package.sh" | grep -q "denso-autostart" \
+    && ok "launch: the build stages no denso-autostart" \
+    || { sed 's/#.*//' "$REPO/tools/build_package.sh" | grep -q "denso-autostart" \
+         && bad "launch: the build stages no denso-autostart" \
+         || ok  "launch: the build stages no denso-autostart"; }
+
+# ── the systemd USER unit
+[ -f "$UNIT" ] && ok "unit: the user unit is in the tree" || bad "unit: the user unit is in the tree"
+is "unit: ExecStart is the packaged wrapper" \
+   "$(grep '^ExecStart=' "$UNIT" | cut -d= -f2-)" "/usr/bin/denso-digitalreader"
+is "unit: ExecStartPre is the session guard" \
+   "$(grep '^ExecStartPre=' "$UNIT" | cut -d= -f2-)" "/usr/bin/denso-session-check"
+grep -q "^ExecStart=/opt/denso/bin/denso" "$UNIT" \
+    && bad "unit: ExecStart does not bypass the wrapper" \
+    || ok  "unit: ExecStart does not bypass the wrapper"
+grep -q "^\[Install\]" "$UNIT" \
+    && ok "unit: HAS an [Install] section (enable/disable must work)" \
+    || bad "unit: HAS an [Install] section (enable/disable must work)"
+is "unit: WantedBy=graphical-session.target" \
+   "$(grep '^WantedBy=' "$UNIT" | cut -d= -f2-)" "graphical-session.target"
+is "unit: Restart=no"                 "$(grep -c '^Restart=no' "$UNIT")" "1"
+is "unit: stdout goes to the journal" "$(grep -c '^StandardOutput=journal' "$UNIT")" "1"
+is "unit: stderr goes to the journal" "$(grep -c '^StandardError=journal' "$UNIT")" "1"
+grep -qE "^(User|Group)=" "$UNIT" \
+    && bad "unit: sets no User=/Group= (it is a USER unit, not a system one)" \
+    || ok  "unit: sets no User=/Group= (it is a USER unit, not a system one)"
+is "unit: PartOf=graphical-session.target (stops with the session)" \
+   "$(grep -c '^PartOf=graphical-session.target' "$UNIT")" "1"
+
+# ── no invented graphical environment, anywhere
+# An ASSIGNMENT is what would hardcode a display. Reporting the value back in a
+# message ("graphical session present (DISPLAY=$DISPLAY)") is the opposite —
+# it echoes what the session really supplied — so match assignments only.
+for f in "$UNIT" "$REPO/packaging/denso-session-check" "$DESK"; do
+    if sed 's/#.*//' "$f" \
+         | grep -qE "^[[:space:]]*(export[[:space:]]+|Environment=)?(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY)="; then
+        bad "session: $(basename "$f") hardcodes no graphical environment"
+    else
+        ok "session: $(basename "$f") hardcodes no graphical environment"
+    fi
+done
+# And nothing anywhere may contain the classic guessed value.
+for f in "$UNIT" "$REPO/packaging/denso-session-check" "$DESK" \
+         "$REPO/packaging/debian/postinst" "$REPO/packaging/denso-setup"; do
+    sed 's/#.*//' "$f" | grep -qE "DISPLAY=:[0-9]" \
+        && bad "session: $(basename "$f") never guesses DISPLAY=:0" \
+        || ok  "session: $(basename "$f") never guesses DISPLAY=:0"
+done
+sed 's/#.*//' "$UNIT" | grep -q "Environment=" \
+    && bad "session: the unit sets no Environment=" \
+    || ok  "session: the unit sets no Environment="
+
+# ── denso-session-check: the real guard, executed
+SC="$REPO/packaging/denso-session-check"
+( unset DISPLAY WAYLAND_DISPLAY; sh "$SC" >/dev/null 2>&1 )
+rc_is "session-check: FAILS with no DISPLAY and no WAYLAND_DISPLAY" $? 1
+( unset DISPLAY WAYLAND_DISPLAY; DISPLAY=:99 sh "$SC" >/dev/null 2>&1 )
+rc_is "session-check: passes with DISPLAY" $? 0
+( unset DISPLAY WAYLAND_DISPLAY; WAYLAND_DISPLAY=wayland-9 sh "$SC" >/dev/null 2>&1 )
+rc_is "session-check: passes with WAYLAND_DISPLAY" $? 0
+( unset DISPLAY WAYLAND_DISPLAY; sh "$SC" 2>&1 ) | grep -q "no graphical session" \
+    && ok "session-check: names the session reason" \
+    || bad "session-check: names the session reason"
+( unset DISPLAY WAYLAND_DISPLAY; sh "$SC" 2>&1 ) | grep -qi "invent" \
+    && ok "session-check: states that no DISPLAY is invented" \
+    || bad "session-check: states that no DISPLAY is invented"
+
+# ── postinst wiring
+PI="$REPO/packaging/debian/postinst"
+grep -q "resolve_operator_user" "$PI" \
+    && ok "postinst: resolves the operator user" || bad "postinst: resolves the operator user"
+grep -q -- "--autostart" "$PI" \
+    && ok "postinst: fresh install enables autostart" \
+    || bad "postinst: fresh install enables autostart"
+grep -q "migrate_xdg_autostart" "$PI" \
+    && ok "postinst: upgrade runs the legacy migration" \
+    || bad "postinst: upgrade runs the legacy migration"
+sed 's/#.*//' "$PI" | grep -q -- "--enable-autologin" \
+    && bad "postinst: NEVER passes --enable-autologin" \
+    || ok  "postinst: NEVER passes --enable-autologin"
+sed 's/#.*//' "$PI" | grep -qE "gdm_set_autologin|gdm_restore_autologin|/etc/gdm3|GDM_CONF" \
+    && bad "postinst: never manipulates GDM" || ok "postinst: never manipulates GDM"
+grep -q "Class.*--value" "$PI" \
+    && ok "postinst: filters sessions by Class (drops the gdm greeter)" \
+    || bad "postinst: filters sessions by Class (drops the gdm greeter)"
+grep -q "Remote.*--value" "$PI" \
+    && ok "postinst: filters sessions by Remote (drops SSH admins)" \
+    || bad "postinst: filters sessions by Remote (drops SSH admins)"
+sed 's/#.*//' "$PI" | grep -q "chown" \
+    && bad "postinst: contains no chown of its own" \
+    || ok  "postinst: contains no chown of its own"
+grep -q "user_unit_wants_link" "$PI" \
+    && ok "postinst: verifies the enable symlink" || bad "postinst: verifies the enable symlink"
+grep -q "autostart-migrated" "$PI" \
+    && ok "postinst: a fresh install records the migration as done" \
+    || bad "postinst: a fresh install records the migration as done"
+FAILLINE="$(grep -n 'INSTALLATION HALTED: setup did not verify' "$PI" | head -1 | cut -d: -f1)"
+OKLINE="$(grep -n 'fresh installation configured' "$PI" | head -1 | cut -d: -f1)"
+if [ -n "$FAILLINE" ] && [ -n "$OKLINE" ] && [ "$FAILLINE" -lt "$OKLINE" ]; then
+    ok "postinst: the 'configured' banner is printed only after verification"
+else
+    bad "postinst: the 'configured' banner is printed only after verification (fail=$FAILLINE ok=$OKLINE)"
+fi
+for line in "fresh installation configured" "operator user:" "autostart: enabled" "autologin: unchanged"; do
+    grep -q "$line" "$PI" && ok "postinst: reports '$line'" || bad "postinst: reports '$line'"
+done
+
+# ── build staging
+BP="$REPO/tools/build_package.sh"
+grep -E "^install .*-o [^ ]+ .*STAGE/opt/denso" "$BP" \
+    && bad "build: /opt/denso content is staged root-owned" \
+    || ok  "build: /opt/denso content is staged root-owned"
+grep -q "packaging/denso-session-check" "$BP" \
+    && ok "build: ships denso-session-check" || bad "build: ships denso-session-check"
+grep -q "usr/lib/systemd/user/denso-digitalreader.service" "$BP" \
+    && ok "build: ships the systemd user unit" || bad "build: ships the systemd user unit"
+sed 's/#.*//' "$BP" | grep -q "systemctl" \
+    && bad "build: runs no systemctl at build/install time" \
+    || ok  "build: runs no systemctl at build/install time"
+sed 's/#.*//' "$REPO/packaging/denso-setup" | grep -q 'chown -R "\$user":"\$group" "\$DATA"' \
+    && ok "setup: chowns the data dir to the resolved operator" \
+    || bad "setup: chowns the data dir to the resolved operator"
+sed 's/#.*//' "$REPO/packaging/denso-setup" | grep -q "enable_user_unit" \
+    && ok "setup: --autostart enables the user unit" \
+    || bad "setup: --autostart enables the user unit"
+sed 's/#.*//' "$REPO/packaging/denso-setup" | grep -q "disable_user_unit" \
+    && ok "setup: unconfigure disables the user unit" \
+    || bad "setup: unconfigure disables the user unit"
+
+# ── no hardcoded operator username anywhere in the product
+for f in "$PI" "$UNIT" "$SC" "$DESK" "$REPO/packaging/lib/policy.sh"; do
+    if sed 's/#.*//' "$f" | grep -q "modela"; then
+        bad "no-hardcode: $(basename "$f") does not hardcode an operator username"
+    else
+        ok "no-hardcode: $(basename "$f") does not hardcode an operator username"
+    fi
+done
+
 rm -rf "$T"
 echo; echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]

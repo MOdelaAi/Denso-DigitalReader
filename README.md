@@ -371,6 +371,94 @@ Testing on the real target: connection details, credentials and the
 platform/toolchain versions live in `d:\workspace\devices.md`, the shared device
 registry outside this repo.
 
+## Fresh install — one command
+
+```bash
+sudo apt install ./denso-digitalreader_<version>_arm64.deb
+```
+
+That is the whole procedure. There is **no** `denso-setup configure` step
+afterwards. The install:
+
+1. **Resolves the operator user** — the existing recorded user if there is one,
+   otherwise `SUDO_USER`, otherwise exactly one acceptable local, active,
+   non-remote session user. root, `nobody`, system/service accounts and unknown
+   users are refused, and if the answer is ambiguous the **install fails rather
+   than guessing**. Any normal local username works; nothing is hardcoded.
+2. Creates and initialises `/opt/denso/data` and hands it to that user.
+3. Leaves `/opt/denso/{bin,lib,models}` root-owned and package-owned.
+4. **Enables autostart** for that user — the systemd user service
+   `denso-digitalreader.service`.
+5. **Does not touch autologin.** The box still stops at the greeter on power-on.
+6. Verifies the setup and **fails the installation** if it is incomplete.
+
+Expected output:
+
+```
+denso: fresh installation configured.
+denso: operator user: <resolved-user>
+denso: autostart: enabled
+denso: autologin: unchanged
+```
+
+Denso then starts at that operator's next graphical login.
+
+### Running it, and watching it
+
+**systemd `--user` is the only thing that starts Denso.** There is no XDG
+autostart entry, so `systemctl --user disable` genuinely stops it starting:
+
+```
+graphical login → systemd --user → denso-digitalreader.service
+                                     → /usr/bin/denso-digitalreader
+                                     → /opt/denso/bin/denso
+
+desktop / menu click → systemctl --user start denso-digitalreader.service
+                       (the SAME unit — a no-op if it is already running)
+```
+
+Lifecycle, as the operator (not root):
+
+```bash
+systemctl --user status  denso-digitalreader
+systemctl --user start   denso-digitalreader
+systemctl --user stop    denso-digitalreader
+systemctl --user restart denso-digitalreader
+
+systemctl --user enable  denso-digitalreader   # start at every graphical login
+systemctl --user disable denso-digitalreader   # stop starting automatically
+systemctl --user enable  --now denso-digitalreader
+systemctl --user disable --now denso-digitalreader
+```
+
+`enable`/`disable` are authoritative — nothing else can start Denso at login, so
+a disabled service stays disabled. A `.deb` upgrade will **not** re-enable it.
+
+Live and recent output:
+
+```bash
+sudo journalctl _SYSTEMD_USER_UNIT=denso-digitalreader.service -f
+sudo journalctl _SYSTEMD_USER_UNIT=denso-digitalreader.service -n 100
+```
+
+> This appliance runs a **volatile** journal with no per-user journal files, so
+> those are the supported commands. `journalctl --user -u denso-digitalreader -f`
+> also works *if* a machine has been configured with persistent per-user
+> journals — the Denso package neither requires nor configures that.
+
+**Service status is not application health.** They answer different questions:
+
+| Question | Command |
+|---|---|
+| Is the service running? | `systemctl --user status denso-digitalreader` |
+| Is an instance holding the lock? | `denso-digitalreader --check-running` — 0 running, 1 not, 4 cannot tell |
+| Is the app, database and model set healthy? | `denso-digitalreader --check` — 0 Ready, 10 Degraded, 78 Blocked |
+
+If the service will not start and the journal says *"no graphical session is
+available"*, that is the guard doing its job: Denso is a GUI and there is no
+display for it. Log in graphically. **No `DISPLAY` value is ever invented** — a
+guessed one either does not exist, or belongs to the greeter or another user.
+
 ## Manual upgrade — the short version
 
 Denso is an **embedded appliance updated manually by an administrator**. There is
@@ -452,6 +540,11 @@ value before running the line. They are not valid shell, so a block containing o
 will fail loudly rather than do something unintended. The two multi-command blocks
 where that would be dangerous (the backup and the restore) use a real example path
 you overwrite instead.
+
+`<operator>` is one of those placeholders: it is the account this appliance
+recorded at install time, readable with `cat /opt/denso/install-state/user`.
+It is whatever normal local user the installer resolved — the product hardcodes
+no particular username, and neither should any procedure here.
 
 ### 1. Pre-build checks
 
@@ -610,7 +703,7 @@ mismatched pair that looks restorable and is not — which is exactly why
 Quit it from the GUI, then confirm:
 
 ```bash
-sudo -u modela env DENSO_DATA_DIR=/opt/denso/data /opt/denso/bin/denso --check-running
+sudo -u <operator> env DENSO_DATA_DIR=/opt/denso/data /opt/denso/bin/denso --check-running
 echo $?
 ```
 
@@ -625,7 +718,7 @@ left by running a check under plain `sudo`:
 
 ```bash
 ls -l /opt/denso/data/denso.lock
-sudo chown -R modela:modela /opt/denso/data
+sudo chown -R <operator>:<operator> /opt/denso/data
 ```
 
 The package enforces this too: `prerm` **refuses** an upgrade or removal while an
@@ -658,10 +751,10 @@ a root-owned file left in an operator-owned data dir is one the app can no longe
 write:
 
 ```bash
-BK=$(sudo -u modela mktemp -d "/opt/denso/data/pre-upgrade-$(date +%Y%m%d-%H%M%S)-XXXXXX")
+BK=$(sudo -u <operator> mktemp -d "/opt/denso/data/pre-upgrade-$(date +%Y%m%d-%H%M%S)-XXXXXX")
 echo "backup dir: $BK"
 
-sudo -u modela bash -c '
+sudo -u <operator> bash -c '
     set -eu
     src=/opt/denso/data
     dst=$1
@@ -671,7 +764,7 @@ sudo -u modela bash -c '
     if [ -f "$src/denso.db-wal" ]; then
         cp -p "$src/denso.db-wal" "$dst/denso.db-wal"
     fi
-' _ "$BK" && sudo -u modela python3 - "$BK/denso.db" <<'PY'
+' _ "$BK" && sudo -u <operator> python3 - "$BK/denso.db" <<'PY'
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 print("integrity:", db.execute("PRAGMA integrity_check").fetchone()[0])
@@ -686,8 +779,8 @@ is the version you would be rolling back to. **If the copy failed you will see t
 
 Do not proceed until you have seen `integrity: ok`.
 
-The check runs through `sudo -u modela` too: `mktemp -d` creates the directory
-mode 0700 owned by `modela`, so reading it as anyone else fails on permissions.
+The check runs through `sudo -u <operator>` too: `mktemp -d` creates the directory
+mode 0700 owned by `<operator>`, so reading it as anyone else fails on permissions.
 That keeps the procedure identical whichever sudo-capable account you are using.
 
 The `-wal` is optional only in the sense that the file may not exist. If it does
@@ -722,9 +815,9 @@ to `Depends` would put an apt fetch in the middle of an offline `.deb` upgrade,
 for a database the standard library already speaks. It is usable by hand:
 
 ```bash
-sudo -u modela python3 /opt/denso/lib/denso-db-helper user-version    /opt/denso/data/denso.db
-sudo -u modela python3 /opt/denso/lib/denso-db-helper integrity-check /opt/denso/data/denso.db
-sudo -u modela python3 /opt/denso/lib/denso-db-helper backup          /opt/denso/data/denso.db /path/to/snapshot.db
+sudo -u <operator> python3 /opt/denso/lib/denso-db-helper user-version    /opt/denso/data/denso.db
+sudo -u <operator> python3 /opt/denso/lib/denso-db-helper integrity-check /opt/denso/data/denso.db
+sudo -u <operator> python3 /opt/denso/lib/denso-db-helper backup          /opt/denso/data/denso.db /path/to/snapshot.db
 ```
 
 `backup` uses SQLite's **online backup API** (`Connection.backup()`), which is
@@ -779,7 +872,7 @@ command fails with it and the application stays stopped.
 judgement is an explicit operator step:
 
 ```bash
-sudo denso-setup configure --user modela
+sudo denso-setup configure --user <operator>
 ```
 
 `--user` is **required** and is not inferred from `$SUDO_USER` (absent under
@@ -791,7 +884,7 @@ user**. A model already present and identical is left alone; one that differs is
 Autostart is **opt-in and not verified on hardware**:
 
 ```bash
-sudo denso-setup configure --user modela --autostart --enable-autologin
+sudo denso-setup configure --user <operator> --autostart --enable-autologin
 ```
 
 XDG autostart only fires after a graphical login, so `--autostart` without
@@ -860,7 +953,7 @@ Only needed if you are recovering a half-configured appliance. As the target
 user, never as root:
 
 ```bash
-sudo -u modela env DENSO_DATA_DIR=/opt/denso/data \
+sudo -u <operator> env DENSO_DATA_DIR=/opt/denso/data \
     /opt/denso/bin/denso --apply-migrations
 ```
 
@@ -879,7 +972,7 @@ launch.
 Confirm the live database actually moved, and is sound:
 
 ```bash
-sudo -u modela python3 - /opt/denso/data/denso.db <<'PY'
+sudo -u <operator> python3 - /opt/denso/data/denso.db <<'PY'
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 print("integrity:", db.execute("PRAGMA integrity_check").fetchone()[0])
@@ -928,7 +1021,7 @@ The `--check` in item 4 speaks the readiness contract:
 To run that check alone:
 
 ```bash
-sudo -u modela env DENSO_DATA_DIR=/opt/denso/data /opt/denso/bin/denso --check
+sudo -u <operator> env DENSO_DATA_DIR=/opt/denso/data /opt/denso/bin/denso --check
 echo $?
 ```
 
@@ -941,8 +1034,8 @@ expected — it appears on the build host too — and does not indicate a proble
 denso-digitalreader
 ```
 
-Run it as `modela`, from a graphical session. That launcher is the **one entry
-point** — the menu entry, the XDG autostart entry and an operator shell all go
+Run it as `<operator>`, from a graphical session. That launcher is the **one entry
+point** — the menu entry, the systemd user service and an operator shell all go
 through it, so the environment is identical however the app starts. It sets
 `DENSO_DATA_DIR=/opt/denso/data` and executes `/opt/denso/bin/denso`.
 
@@ -996,7 +1089,7 @@ writing.
 
 **Restore the database backup**
 
-Restore the **whole set** (the `-wal` matters), as `modela`, with the app closed:
+Restore the **whole set** (the `-wal` matters), as `<operator>`, with the app closed:
 
 ```bash
 # 1. List the candidates, newest first, and choose one.
@@ -1008,7 +1101,7 @@ BK=/opt/denso/data/pre-upgrade-20260803-101500-Ab3xYz
 
 # 3. Restore, fail-fast, in a separate shell process (see the backup step for
 #    why a subshell would NOT abort).
-sudo -u modela bash -c '
+sudo -u <operator> bash -c '
     set -eu
     dst=/opt/denso/data
     src=$1

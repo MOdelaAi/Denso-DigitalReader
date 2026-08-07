@@ -3,8 +3,18 @@ Type=Application
 Version=1.0
 Name=Denso Digital Reader
 Comment=Read 4-digit 7-segment displays from live cameras
-Exec=/usr/bin/denso-digitalreader
+# Starts the SAME systemd user unit that autostart uses, rather than executing
+# the GUI: one unit is the only process authority. Starting an already-active
+# unit is a no-op, so clicking this while Denso is running does nothing.
+#
+# This file is a MENU entry only. It is never installed into
+# ~/.config/autostart — systemd --user is the sole autostart authority.
+Exec=/usr/bin/systemctl --user start denso-digitalreader.service
 Icon=denso-digitalreader
 Terminal=false
 Categories=Utility;
-StartupNotify=true
+# false, because Exec starts a unit and returns immediately: the desktop
+# environment would otherwise wait for a window from systemctl, which never maps
+# one, and show a hung launch cursor until it timed out. The window comes from
+# the service.
+StartupNotify=false

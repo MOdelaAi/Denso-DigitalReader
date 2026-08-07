@@ -26,6 +26,8 @@ DB="$DATA/denso.db"
 DENSO=/opt/denso/bin/denso
 POLICY=/opt/denso/lib/policy.sh
 HELPER=/opt/denso/lib/denso-db-helper
+UNIT_NAME=denso-digitalreader.service
+USER_UNIT=/usr/lib/systemd/user/$UNIT_NAME
 
 case "$1" in
   configure)
@@ -38,10 +40,13 @@ case "$1" in
     # (wrong — should be `id -gn`), and swallowed failure with `|| true`.
     # `denso-setup configure` owns initial ownership and repair instead.
 
-    # The gate runs only when there is operator data to preserve. A fresh
-    # install has no database: nothing to back up, nothing to migrate, and boot
-    # creates the schema at the supported version.
-    if [ -e "$DB" ]; then
+    # EXISTING vs FRESH is decided by $STATE/user FIRST, and only then by the
+    # database. They answer different questions: an install that was configured
+    # but never launched has a recorded user and no database yet, and treating
+    # that as "fresh" would re-run the operator resolution and could hand the
+    # appliance to a different administrator. A database with no recorded user
+    # is the other anomaly, handled below.
+    if [ -r "$STATE/user" ] || [ -e "$DB" ]; then
         . "$POLICY"
 
         # Which account owns the data. Every database operation runs as this
@@ -69,13 +74,162 @@ case "$1" in
             exit 1
         fi
 
-        db_upgrade_gate "$DATA" "$DB" "$DENSO" "runuser -u $user --" "$HELPER" || exit 1
+        # Persist a user recovered from the database owner, so the NEXT upgrade
+        # reads it from install-state instead of re-deriving it. Never overwrite
+        # an existing record — that file is what stops an upgrade being
+        # re-pointed at whoever is running sudo today.
+        if [ ! -r "$STATE/user" ]; then
+            printf '%s\n' "$user" > "$STATE/user"
+            echo "denso: recorded operator user '$user' in $STATE/user for future upgrades."
+        fi
 
-        echo "denso: upgrade complete. The application is stopped; start it when ready."
+        # ── one-time migration off the old XDG-autostart architecture ────────
+        # Guarded by a marker so a future upgrade can NEVER re-enable a service
+        # the operator turned off with `systemctl --user disable`. An existing
+        # install with no legacy entry is read as "autostart was deliberately
+        # off" and is left disabled — a FRESH install is a different case and
+        # never comes through here.
+        home="$(getent passwd "$user" | cut -d: -f6 2>/dev/null || true)"
+        if [ -n "$home" ] && [ -d "$home" ]; then
+            case "$(migrate_xdg_autostart "$STATE" "$home" "$user" "$(id -gn "$user")" "$USER_UNIT" || echo error)" in
+                enabled)
+                    echo "denso: migrated autostart to the systemd user service (enabled for $user)." ;;
+                preserved-disabled)
+                    echo "denso: no previous Denso autostart entry — leaving the service DISABLED."
+                    echo "denso: enable it with: systemctl --user enable --now denso-digitalreader" ;;
+                already) : ;;
+                *) echo "denso: WARNING — autostart migration did not complete; check" >&2
+                   echo "denso: 'systemctl --user is-enabled denso-digitalreader' as $user." >&2 ;;
+            esac
+        fi
+
+        # An UPGRADE deliberately does NOT re-run ownership, model seeding or
+        # service enablement: the operator may have adjusted them, and dpkg has
+        # not touched /opt/denso/data. Only the database gate runs.
+        if [ -e "$DB" ]; then
+            db_upgrade_gate "$DATA" "$DB" "$DENSO" "runuser -u $user --" "$HELPER" || exit 1
+            echo "denso: upgrade complete. The application is stopped; start it when ready."
+        else
+            echo "denso: upgrade complete (no database yet). Operator user: $user."
+        fi
+        echo "denso:   systemctl --user status denso-digitalreader"
     else
-        echo "denso: installed. Next:"
-        echo "  sudo denso-setup configure --user <username> [--autostart] [--enable-autologin]"
-        echo "  sudo denso-setup verify"
+        # ── FRESH INSTALL ────────────────────────────────────────────────────
+        # A normal install must complete with `sudo apt install ./x.deb` alone,
+        # so everything the operator used to run by hand happens here.
+        #
+        # Discriminated on $STATE/user (checked above), NOT on $DB: "has a
+        # database" and "is configured" are different questions, and an install
+        # that was configured but never started has no database yet.
+        . "$POLICY"
+
+        # Local, ACTIVE, NON-REMOTE sessions belonging to a real user. Each
+        # filter earns its place on this appliance: Class=user drops the GDM
+        # greeter (which runs as the `gdm` system account and would otherwise be
+        # the only "graphical" session on the box), and Remote=no drops the
+        # administrator's own SSH session — resolving to whoever SSH'd in is
+        # exactly the wrong answer when they are installing FOR someone else.
+        sessions=""
+        if command -v loginctl >/dev/null 2>&1; then
+            for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+                [ "$(loginctl show-session "$s" -p Class  --value 2>/dev/null)" = "user"   ] || continue
+                [ "$(loginctl show-session "$s" -p Remote --value 2>/dev/null)" = "no"     ] || continue
+                [ "$(loginctl show-session "$s" -p State  --value 2>/dev/null)" = "active" ] || continue
+                n="$(loginctl show-session "$s" -p Name --value 2>/dev/null)"
+                [ -n "$n" ] && sessions="$sessions $n"
+            done
+        fi
+
+        # shellcheck disable=SC2086
+        if ! resolved="$(resolve_operator_user /etc/passwd "" "${SUDO_USER-}" $sessions)"; then
+            echo "denso: INSTALLATION HALTED: no operator user could be determined." >&2
+            echo "denso: Denso will not install itself against root or a guessed account." >&2
+            echo "denso: Re-run as 'sudo apt install ./<deb>' from the operator's own" >&2
+            echo "denso: session, or install and then run:" >&2
+            echo "denso:   sudo denso-setup configure --user <username> --autostart" >&2
+            exit 1
+        fi
+        user="${resolved%% *}"
+        rule="${resolved##* }"
+
+        if ! id "$user" >/dev/null 2>&1; then
+            echo "denso: INSTALLATION HALTED: resolved user '$user' does not exist." >&2
+            exit 1
+        fi
+
+        # Reuse denso-setup rather than reimplementing ownership, model seeding
+        # and the autostart entry here. It is the tool that was verified on
+        # hardware; a second copy of that logic in a maintainer script is a
+        # second thing to keep correct. --enable-autologin is NEVER passed.
+        if ! denso-setup configure --user "$user" --autostart --auto; then
+            echo "denso: INSTALLATION HALTED: configuring for '$user' failed." >&2
+            echo "denso: After fixing the cause, re-run: sudo dpkg --configure -a" >&2
+            exit 1
+        fi
+
+        # ── setup verification ───────────────────────────────────────────────
+        # Deliberately NOT `denso-setup verify`: that asserts L4T/TensorRT/CUDA
+        # versions, probes GStreamer elements and deep-loads every engine. Those
+        # are the right checks for an operator gate, but failing an INSTALL on
+        # them would reject a correctly-installed package for reasons that have
+        # nothing to do with whether setup completed. What is checked here is
+        # exactly "did setup complete", plus the app's own health verdict.
+        fail=""
+        [ "$(cat "$STATE/user" 2>/dev/null || true)" = "$user" ] \
+            || fail="$fail\n  the operator user was not recorded in $STATE/user"
+        [ "$(stat -c %U "$DATA" 2>/dev/null || true)" = "$user" ] \
+            || fail="$fail\n  $DATA is not owned by $user"
+        home="$(getent passwd "$user" | cut -d: -f6)"
+        link="$(user_unit_wants_link "$home" "$UNIT_NAME")"
+        [ -L "$link" ] || fail="$fail\n  the service is not enabled ($link is missing)"
+        [ "$(readlink "$link" 2>/dev/null || true)" = "$USER_UNIT" ] \
+            || fail="$fail\n  $link does not point at $USER_UNIT"
+        [ "$(stat -c %U "$link" 2>/dev/null || true)" = "$user" ] \
+            || fail="$fail\n  the enable symlink is not owned by $user"
+        # Belt and braces: the old authority must not exist on a fresh install.
+        [ -e "$home/.config/autostart/com.denso.DigitalReader.desktop" ] \
+            && fail="$fail\n  a legacy XDG autostart entry is present"
+
+        set +e
+        runuser -u "$user" -- env DENSO_DATA_DIR="$DATA" "$DENSO" --check
+        rc=$?
+        set -e
+        verdict="$(check_verdict "$rc")"
+        case "$verdict" in
+            ok|degraded) : ;;
+            *) fail="$fail\n  denso --check reported '$verdict' (rc=$rc)" ;;
+        esac
+
+        if [ -n "$fail" ]; then
+            # No success line is printed on this path. A fresh install that could
+            # not be verified must never look configured.
+            echo "denso: INSTALLATION HALTED: setup did not verify:" >&2
+            # shellcheck disable=SC2059
+            printf "$fail\n" >&2
+            echo "denso: The package is left unconfigured. After fixing the cause:" >&2
+            echo "denso:   sudo dpkg --configure -a" >&2
+            exit 1
+        fi
+
+        # A fresh install is already on the systemd architecture, so record the
+        # migration as done. Without this, the NEXT upgrade would run the legacy
+        # migration, find no XDG entry, and log a misleading
+        # "leaving the service DISABLED" for an install that is in fact enabled.
+        printf '%s\n' "fresh-install" > "$STATE/autostart-migrated" || true
+
+        echo "denso: fresh installation configured."
+        echo "denso: operator user: $user"
+        echo "denso: autostart: enabled"
+        echo "denso: autologin: unchanged"
+        [ "$verdict" = "degraded" ] && \
+            echo "denso: health: DEGRADED (serviceable) — run 'sudo denso-setup verify' for detail."
+        case "$rule" in
+            sudo_user) : ;;
+            session)   echo "denso: (operator resolved from the active local session)" ;;
+            recorded)  echo "denso: (operator resolved from the recorded install state)" ;;
+        esac
+        echo "denso: Denso starts at the operator's next graphical login."
+        echo "denso:   systemctl --user status denso-digitalreader"
     fi
     ;;
   abort-upgrade|abort-remove|abort-deconfigure)

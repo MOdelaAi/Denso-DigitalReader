@@ -29,6 +29,222 @@ version_ok() (
     return 0
 )
 
+# --- operator_user_ok <passwd-file> <name> -----------------------------------
+# Is <name> acceptable as THE Denso operator account?
+#
+# Takes the passwd file as a parameter rather than calling getent: it makes the
+# rule drivable from a fixture in tests/packaging/run.sh, and it is the more
+# correct reading of the requirement anyway — the operator must be a LOCAL user,
+# and /etc/passwd is exactly the local database.
+#
+# This checks ACCOUNT SHAPE only. Whether the home directory actually exists on
+# disk is checked by denso-setup's cmd_configure, which is where the filesystem
+# lives; keeping that out of here is what lets this rule stay pure.
+#
+# Rejected, roughly in order of how badly each would end:
+#   root      running the GUI and the database as root is the worst outcome —
+#             it poisons an operator-owned data dir permanently
+#   nobody    the classic "safe" default that is not a person and owns nothing
+#   uid <1000 or >60000 — system/service accounts, and nobody(65534), per the
+#             target's own /etc/login.defs UID_MIN/UID_MAX
+#   nologin / false shells — a service account whatever its uid
+#   missing or /nonexistent home — nowhere to put an autostart entry
+#   unknown   not in the local database at all
+operator_user_ok() (
+    pw="${1-}"; name="${2-}"
+    [ -n "$pw" ] && [ -n "$name" ] || return 1
+    [ -r "$pw" ] || return 1
+
+    # Named outright, not left to the uid range below: the range already
+    # excludes root(0) and nobody(65534), but a box with a renumbered nobody or
+    # a second uid-0 account under another name must still be refused.
+    case "$name" in
+        root|nobody|nogroup|daemon|bin|sys|"") return 1 ;;
+        *:*|*" "*|-*) return 1 ;;          # not a plausible login name
+    esac
+
+    line="$(awk -F: -v n="$name" '$1 == n { print; exit }' "$pw")"
+    [ -n "$line" ] || return 1              # nonexistent
+
+    uid="$(printf '%s' "$line" | cut -d: -f3)"
+    home="$(printf '%s' "$line" | cut -d: -f6)"
+    ushell="$(printf '%s' "$line" | cut -d: -f7)"
+
+    case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$uid" -ge 1000 ]  || return 1        # system/service account
+    [ "$uid" -le 60000 ] || return 1        # excludes nobody (65534)
+
+    case "$ushell" in
+        ""|*/nologin|*/false|*/sync) return 1 ;;
+    esac
+    case "$home" in
+        ""|/|/nonexistent|/dev/null|/usr/sbin) return 1 ;;
+    esac
+    return 0
+)
+
+# --- resolve_operator_user <passwd-file> <recorded> <sudo-user> [session…] ----
+# Decide THE one operator account, or fail. Echoes "<user> <rule>" so the caller
+# can report which precedence rule fired — worth printing in the apt output,
+# because "which user did it pick, and why" is the first question asked when it
+# ever picks wrong.
+#
+# Precedence:
+#   1. the already-recorded user — an UPGRADE must never be re-pointed at
+#      whoever happens to be running sudo today. If a user IS recorded but is no
+#      longer valid, that is a HARD FAILURE, not a fall-through to rule 2:
+#      falling through is precisely how an upgrade would silently steal an
+#      appliance from its operator.
+#   2. SUDO_USER — the normal interactive `sudo apt install` case.
+#   3. exactly ONE acceptable local, active, non-remote session user.
+#
+# Never guesses. Zero candidates and several candidates are both failures, and
+# the caller is expected to fail the installation rather than pick one.
+resolve_operator_user() (
+    pw="${1-}"; recorded="${2-}"; sudo_user="${3-}"
+    shift 3 2>/dev/null || true
+
+    if [ -n "$recorded" ]; then
+        if operator_user_ok "$pw" "$recorded"; then
+            echo "$recorded recorded"
+            return 0
+        fi
+        echo "operator-user: this installation is recorded for '$recorded', which is no" >&2
+        echo "operator-user: longer a valid operator account. Refusing to silently adopt a" >&2
+        echo "operator-user: different user — that would hand the appliance to whoever ran" >&2
+        echo "operator-user: sudo. Fix the account, or run 'sudo denso-setup unconfigure'." >&2
+        return 1
+    fi
+
+    if [ -n "$sudo_user" ] && operator_user_ok "$pw" "$sudo_user"; then
+        echo "$sudo_user sudo_user"
+        return 0
+    fi
+
+    cands=""
+    for u in "$@"; do
+        [ -n "$u" ] || continue
+        operator_user_ok "$pw" "$u" || continue
+        case " $cands " in *" $u "*) continue ;; esac    # de-duplicate
+        cands="$cands $u"
+    done
+
+    # shellcheck disable=SC2086
+    set -- $cands
+    case "$#" in
+        1) echo "$1 session"; return 0 ;;
+        0) echo "operator-user: no acceptable operator account could be determined." >&2
+           echo "operator-user: SUDO_USER was unset or unusable, and no single local active" >&2
+           echo "operator-user: session belongs to a normal user. Re-run under sudo as the" >&2
+           echo "operator-user: operator, or run 'sudo denso-setup configure --user <name>'." >&2
+           return 1 ;;
+        *) echo "operator-user: ambiguous — more than one local session user qualifies:$cands" >&2
+           echo "operator-user: refusing to guess which one owns this appliance. Run" >&2
+           echo "operator-user: 'sudo denso-setup configure --user <name>' to say explicitly." >&2
+           return 1 ;;
+    esac
+)
+
+# --- user_unit_wants_link <home> <unit-name> ---------------------------------
+# Where `systemctl --user enable` puts the symlink for a unit whose [Install]
+# says WantedBy=graphical-session.target. One definition, so the enable path,
+# the disable path and the tests can never disagree about it.
+user_unit_wants_link() (
+    echo "${1-}/.config/systemd/user/graphical-session.target.wants/${2-}"
+)
+
+# --- enable_user_unit <unit-path> <home> <user> <group> ----------------------
+# Enable a systemd USER unit for an operator who is very likely NOT logged in.
+#
+# It creates the .wants symlink directly instead of calling
+# `systemctl --user enable`, because during `apt install` the target user
+# usually has no running `systemd --user` instance and no session bus to talk
+# to. This was measured on the target, not assumed: a hand-made symlink is
+# reported `enabled` by `systemctl --user is-enabled`, is removed by
+# `systemctl --user disable`, and can be re-created by `systemctl --user
+# enable` afterwards — so the operator's normal commands keep working.
+#
+# Echoes the created link path.
+enable_user_unit() (
+    unit="${1-}"; home="${2-}"; user="${3-}"; group="${4-}"
+    [ -n "$unit" ] && [ -n "$home" ] && [ -n "$user" ] && [ -n "$group" ] \
+        || { echo "enable-unit: missing argument" >&2; return 1; }
+    [ -f "$unit" ] || { echo "enable-unit: no such unit file: $unit" >&2; return 1; }
+
+    name="$(basename "$unit")"
+    link="$(user_unit_wants_link "$home" "$name")"
+
+    # Create ONLY what is missing, and never chmod/chown a directory that
+    # already exists: ~/.config may legitimately be 0700, and an `install -d`
+    # over the whole path would silently widen it to 0755. Ownership is set as
+    # part of the create — write-then-chown would leave a root-owned directory
+    # in the operator's home if interrupted between the two steps.
+    for d in "$home/.config" "$home/.config/systemd" "$home/.config/systemd/user" \
+             "$(dirname "$link")"; do
+        [ -d "$d" ] && continue
+        install -d -o "$user" -g "$group" -m 0755 "$d" \
+            || { echo "enable-unit: cannot create $d" >&2; return 1; }
+    done
+
+    ln -sfn "$unit" "$link" || { echo "enable-unit: cannot link $link" >&2; return 1; }
+    # -h: chown the SYMLINK, not the /usr/lib unit file it points at.
+    chown -h "$user":"$group" "$link" 2>/dev/null || true
+    echo "$link"
+)
+
+# --- disable_user_unit <unit-name> <home> ------------------------------------
+# The inverse. Removes only Denso's own .wants symlink; any other unit the
+# operator has enabled into graphical-session.target is left alone, and the
+# .wants directory itself is kept (systemctl leaves it too).
+disable_user_unit() (
+    name="${1-}"; home="${2-}"
+    [ -n "$name" ] && [ -n "$home" ] || { echo "disable-unit: missing argument" >&2; return 1; }
+    rm -f "$(user_unit_wants_link "$home" "$name")"
+)
+
+# --- migrate_xdg_autostart <state-dir> <home> <user> <group> <unit-path> -----
+# One-time migration from the old XDG-autostart architecture to the systemd
+# user unit. Echoes what it did: "enabled" | "preserved-disabled" | "already".
+#
+# The marker is the whole point. Without it, every future .deb upgrade would
+# re-enable the service, silently undoing a deliberate
+# `systemctl --user disable` — an upgrade must never re-arm something the
+# operator switched off.
+#
+# The legacy entry's ABSENCE is read as intent, not as an accident: an existing
+# installation that has no Denso autostart entry is one where autostart was
+# turned off, so the new unit is left disabled. (A FRESH install is a different
+# case entirely and does not come through here — it always enables.)
+#
+# Exactly one named file is ever deleted, so unrelated entries in
+# ~/.config/autostart are untouched.
+migrate_xdg_autostart() (
+    state="${1-}"; home="${2-}"; user="${3-}"; group="${4-}"; unit="${5-}"
+    [ -n "$state" ] && [ -n "$home" ] && [ -n "$user" ] && [ -n "$group" ] && [ -n "$unit" ] \
+        || { echo "migrate-autostart: missing argument" >&2; return 1; }
+
+    marker="$state/autostart-migrated"
+    if [ -e "$marker" ]; then
+        echo "already"
+        return 0
+    fi
+
+    legacy="$home/.config/autostart/com.denso.DigitalReader.desktop"
+    if [ -f "$legacy" ]; then
+        rm -f "$legacy" || { echo "migrate-autostart: cannot remove $legacy" >&2; return 1; }
+        enable_user_unit "$unit" "$home" "$user" "$group" >/dev/null || return 1
+        result="enabled"
+    else
+        result="preserved-disabled"
+    fi
+
+    # Written LAST, as the commit marker: a failure above must leave the
+    # migration un-marked so the next `dpkg --configure -a` retries it.
+    printf '%s\n' "$result" > "$marker" \
+        || { echo "migrate-autostart: cannot write $marker" >&2; return 1; }
+    echo "$result"
+)
+
 # --- canonical_model_stems ---------------------------------------------------
 # The canonical production model set, in REVIEWED MANIFEST ORDER.
 #

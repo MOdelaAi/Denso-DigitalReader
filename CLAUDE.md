@@ -291,13 +291,60 @@ development → tests → clean commit → clean .deb build → remote maintenan
 automatic rollback, or unattended crash recovery. They were considered and
 deliberately rejected — recovery is manual and explicit.
 
-- **Upgrade with `sudo apt install ./denso-digitalreader_<version>_arm64.deb`.**
-  Never remove the old package first, never make `dpkg -i` the normal workflow,
-  never `apt purge` when operator data must survive. The `.deb` replaces
-  application files and preserves operator data.
+- **Install and upgrade with `sudo apt install ./denso-digitalreader_<version>_arm64.deb`
+  — that one command is the whole procedure**, fresh or upgrade. There is no
+  mandatory `denso-setup configure` step afterwards. Never remove the old package
+  first, never make `dpkg -i` the normal workflow, never `apt purge` when
+  operator data must survive.
+- **The operator user is resolved, never assumed, and never hardcoded.**
+  `resolve_operator_user` (policy.sh) applies one precedence: an existing
+  recorded user → `SUDO_USER` → exactly one acceptable local, active,
+  non-remote session user. root, `nobody`, system/service accounts, `nologin`
+  shells, uids outside `[1000,60000]` and unknown names are refused, and
+  **ambiguity fails the install rather than guessing**. A recorded user that is
+  no longer valid is a hard failure, *not* a fall-through — falling through is
+  how an upgrade would silently hand the appliance to whoever ran sudo.
+- **Autostart is enabled automatically; autologin is never touched.** A fresh
+  install enables the user unit for the resolved operator by creating the same
+  `graphical-session.target.wants` symlink `systemctl --user enable` would —
+  that user is normally not logged in during `apt install`, so there is no user
+  manager to talk to. Nothing in the package edits GDM.
+- **systemd `--user` is the SOLE autostart authority.** There is no XDG
+  autostart entry; `denso-digitalreader.service` carries
+  `[Install] WantedBy=graphical-session.target`, so
+  `systemctl --user enable|disable` is meaningful and `disable` genuinely stops
+  Denso starting at login. Startup is
+  `graphical login → systemd --user → denso-digitalreader.service →
+  /usr/bin/denso-digitalreader → /opt/denso/bin/denso`. The desktop/menu entry
+  runs `systemctl --user start denso-digitalreader.service`, i.e. the *same
+  unit* — starting an already-active unit is a no-op, so there is exactly one
+  process authority. **Never reintroduce an XDG autostart entry**: a second
+  authority would make `disable` a lie.
+- **An upgrade must never re-enable a disabled service.** The legacy XDG→systemd
+  migration is guarded by `install-state/autostart-migrated`. Legacy entry
+  present → remove it and enable the unit; legacy entry absent → autostart was
+  deliberately off, so leave the unit disabled; marker present → do nothing. A
+  *fresh* install is a separate path and always enables.
+- **`denso-digitalreader.service` is a systemd USER unit, never a system/root
+  service** — Denso is a GUI that must live and die with the operator's
+  graphical session. `Restart=no` (single-instance; a restart loop against a
+  held lock buries the real fault). No `DISPLAY`/`WAYLAND_DISPLAY` is ever
+  invented: `denso-session-check` fails first, with the reason.
+- **Lifecycle and health are different questions.** `systemctl --user
+  status|start|stop|restart denso-digitalreader` reports process/service
+  lifecycle. `denso-digitalreader --check-running` (lock, tri-state) and
+  `--check` (application/database/model health, 0/10/78) report application
+  health. Never substitute one for the other.
+- **Logs.** This appliance runs a volatile journal with no per-user journal
+  files, so the supported command is
+  `sudo journalctl _SYSTEMD_USER_UNIT=denso-digitalreader.service -f`
+  (`-n 100` for recent). `journalctl --user -u denso-digitalreader` works only
+  where persistent per-user journals are configured; the package must never
+  require or configure that.
 - **Operator data is `/opt/denso/data`** (primary DB `denso.db`). The package
   **must not own** the database, its WAL/SHM, or generated migration backups.
-  Database files are operated **as `modela`, never as root** — a root-owned
+  Database files are operated **as the resolved operator user, never as root** —
+  a root-owned
   WAL/SHM/lock in an operator-owned data dir is how this appliance breaks.
 - **Migration is forward-only and fail-closed.** `postinst` runs
   `db_upgrade_gate` (`packaging/lib/policy.sh`): confirm stopped → classify

@@ -1,0 +1,32 @@
+#!/bin/sh
+# ExecStartPre guard for denso-digitalreader.service.
+#
+# Denso is a GUI application. If the systemd user manager has no graphical
+# session environment, starting it produces a Qt xcb abort and a core dump —
+# a confusing failure whose real cause (no session) is nowhere in the message.
+#
+# This fails FIRST, with the actual reason, and never substitutes a guessed
+# DISPLAY=:0: a guessed display either does not exist, or belongs to the GDM
+# greeter or another user's session, and connecting a GUI to someone else's
+# display is worse than not starting.
+set -u
+
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    echo "denso: graphical session present (WAYLAND_DISPLAY=$WAYLAND_DISPLAY)"
+    exit 0
+fi
+if [ -n "${DISPLAY:-}" ]; then
+    echo "denso: graphical session present (DISPLAY=$DISPLAY)"
+    exit 0
+fi
+
+echo "denso: no graphical session is available to this user service." >&2
+echo "denso: neither WAYLAND_DISPLAY nor DISPLAY is set in the systemd user manager." >&2
+echo "denso: Denso is a GUI application and will NOT be started." >&2
+echo "denso:" >&2
+echo "denso: This is expected if you ran 'systemctl --user start denso-digitalreader'" >&2
+echo "denso: over SSH, or before logging in graphically. Log in at the console —" >&2
+echo "denso: the service is enabled on graphical-session.target and starts" >&2
+echo "denso: there. Check with: systemctl --user is-active graphical-session.target" >&2
+echo "denso: No DISPLAY value is invented; the session must supply a real one." >&2
+exit 1

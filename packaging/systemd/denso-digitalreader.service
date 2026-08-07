@@ -1,0 +1,41 @@
+[Unit]
+Description=Denso Digital Reader (operator GUI)
+# A USER service, never a system service: Denso is a graphical application and
+# must live and die with the resolved operator's graphical session. A root
+# system service would have no session, no display, and would write root-owned
+# artifacts into an operator-owned data dir.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Fails loudly, with the real reason, when there is no graphical session —
+# instead of letting Qt abort on a missing display. Never invents a DISPLAY,
+# WAYLAND_DISPLAY or XAUTHORITY value.
+ExecStartPre=/usr/bin/denso-session-check
+# The packaged wrapper, not /opt/denso/bin/denso directly: the wrapper is the
+# stable public command and it is what exports DENSO_DATA_DIR.
+ExecStart=/usr/bin/denso-digitalreader
+# Deliberately NOT restarting. Denso is single-instance: a restart loop against
+# a held lock produces exit-3 churn that buries the original fault. A stopped
+# unit with a recorded failure is the honest state, and `systemctl --user
+# status denso-digitalreader` shows it.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=denso
+
+[Install]
+# systemd --user is the SOLE autostart authority for Denso; there is no XDG
+# autostart entry any more. That is what makes `systemctl --user disable`
+# truthful — with a second authority in ~/.config/autostart, disabling the unit
+# would not have stopped Denso starting at login.
+#
+# graphical-session.target is the correct anchor on Ubuntu 22.04 GNOME, and was
+# verified on the target rather than assumed: gnome-session.target declares
+# BindsTo=/Before=graphical-session.target so the target is genuinely reached,
+# and `systemctl --user enable` was measured to create
+# ~/.config/systemd/user/graphical-session.target.wants/denso-digitalreader.service
+# with `disable` removing it again. The target's own RefuseManualStart=yes does
+# not prevent being pulled in as a dependency.
+WantedBy=graphical-session.target

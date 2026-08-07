@@ -265,6 +265,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 install -d "$STAGE/DEBIAN" "$STAGE/opt/denso/bin" "$STAGE/opt/denso/models" \
            "$STAGE/opt/denso/lib" "$STAGE/usr/bin" "$STAGE/usr/share/applications" \
+           "$STAGE/usr/lib/systemd/user" \
            "$STAGE/usr/share/icons/hicolor/256x256/apps"
 
 install -m 0755 "$EXE"                              "$STAGE/opt/denso/bin/denso"
@@ -274,6 +275,16 @@ install -m 0644 packaging/lib/policy.sh             "$STAGE/opt/denso/lib/policy
 install -m 0755 packaging/denso-db-helper           "$STAGE/opt/denso/lib/denso-db-helper"
 install -m 0755 packaging/denso-digitalreader       "$STAGE/usr/bin/denso-digitalreader"
 install -m 0755 packaging/denso-setup               "$STAGE/usr/bin/denso-setup"
+# The session guard the user unit runs as ExecStartPre. There is no
+# denso-autostart wrapper: systemd --user is the sole autostart authority, and
+# the menu entry starts the same unit directly.
+install -m 0755 packaging/denso-session-check       "$STAGE/usr/bin/denso-session-check"
+# A systemd USER unit, never a system one. Shipping the file is all that is
+# needed at build time. postinst enables it for the resolved operator by creating
+# the same .wants symlink `systemctl --user enable` would, because that user is
+# normally not logged in during apt install and has no user manager to talk to.
+install -m 0644 packaging/systemd/denso-digitalreader.service \
+                                                    "$STAGE/usr/lib/systemd/user/denso-digitalreader.service"
 install -m 0644 packaging/com.denso.DigitalReader.desktop \
                                                     "$STAGE/usr/share/applications/com.denso.DigitalReader.desktop"
 install -m 0644 assets/icon.png                     "$STAGE/usr/share/icons/hicolor/256x256/apps/denso-digitalreader.png"
