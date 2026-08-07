@@ -309,20 +309,38 @@ denso --check [--engine <file>]...   # validate data dir + engines; no primary-D
                                      #   10 Degraded (serviceable)
                                      #   78 Blocked
 denso --check-running                # 0 running, 1 not running, 4 cannot determine
-denso --check-migrations <db-path>   # APPLIES the migration chain to that path.
+denso --check-migrations <db-path>   # APPLIES the chain to a THROWAWAY COPY.
                                      # Writes — see the warning below.
+denso --apply-migrations             # Migrates the LIVE database in place.
+                                     # Takes no path, on purpose.
+                                     #   0  at the supported schema
+                                     #   78 Blocked (unreadable / newer / failed)
 ```
 
 `--check` exit **10** is a non-blocking condition, not a failure — `denso-setup`
 interprets these codes.
 
+There are two migration commands, and the split is deliberate:
+
+| | target | who runs it |
+|---|---|---|
+| `--check-migrations <path>` | a throwaway **copy** you supply | `denso-setup verify`, to prove the chain *would* apply |
+| `--apply-migrations` | the **live** database under `DENSO_DATA_DIR` | the package's `postinst`, to actually apply it |
+
 > **`--check-migrations` is not read-only.** Despite the name it opens the
 > database you name and migrates it, creating tables and converting legacy rows.
-> Aimed at a copy it validates the chain; aimed at the live database it upgrades
-> the live database — which is exactly how a deployment applies a pending
-> migration (see *Build and deploy the Debian package*, step 10). It also creates
-> the file if it does not exist, so a mistyped path yields a new empty database
-> and still reports `ok`.
+> It also creates the file if it does not exist, so a mistyped path yields a new
+> empty database and still reports `ok`. **Point it only at a copy.** Aiming it
+> at `/opt/denso/data/denso.db` migrates the live database with no backup taken
+> and no schema-newer guard — which is what `--apply-migrations` exists to
+> prevent.
+
+> **`--apply-migrations` refuses to take a path.** It always migrates the primary
+> database under `DENSO_DATA_DIR`, so it cannot be aimed somewhere else by a typo
+> in a maintainer script, and it cannot conjure an empty database at a mistyped
+> path. It runs the read-only schema classifier *first*, so a database written by
+> a **newer** build is refused with **78** before the chain opens it for writing —
+> the forward-only guard. It never rolls back: recovery is manual and explicit.
 
 ## Automated tests
 
@@ -403,18 +421,46 @@ sha256sum models/digitv3.engine models/digitv3.names.json
 ### 2. Build the package
 
 ```bash
-# Release A — the digit reader alone
-tools/build_package.sh --model models/digitv3.engine
+# THE RELEASE CUT — the complete canonical set, both product modes
+tools/build_package.sh --models-dir models
+```
 
-# Release B — all three generations, in EXACTLY this order
-tools/build_package.sh \
-    --model models/digitv3.engine \
-    --model models/float-small.engine \
-    --model models/float-big.engine
+`--models-dir` is the canonical release input. It requires **exactly** the six
+canonical files and refuses anything else:
+
+| Model | Sidecar | Family | Mode |
+|---|---|---|---|
+| `digitv3.engine` | `digitv3.names.json` | `digit_numeric` | Digital Number Reader |
+| `float-small.engine` | `float-small.names.json` | `float_ball` | Floating Ball Leveler |
+| `float-big.engine` | `float-big.names.json` | `float_ball` | Floating Ball Leveler |
+
+It refuses a missing engine, a missing sidecar, an unexpected fourth engine, and
+any `.pt` or `.onnx` in the directory (production packaging is TensorRT-engine
+only). It hands the engines downstream in reviewed manifest order — the order is
+part of the manifest bytes, and therefore part of the pinned Release-B identity.
+
+**Why it exists:** `--model` builds whatever set it is handed, so a partial
+release is the easy mistake. A package built from `--model models/digitv3.engine`
+alone is valid and installable and **silently ships without the entire Floating
+Ball Leveler mode**. `--models-dir` makes that unrepresentable.
+
+`--model` remains for one-off and diagnostic builds, and is mutually exclusive
+with `--models-dir` (an extra `--model` could only widen a canonical set):
+
+```bash
+# NOT a release cut — a single-mode package, for diagnosis only
+tools/build_package.sh --model models/digitv3.engine --allow-dirty
 ```
 
 Run it from the repository root. Model paths are resolved relative to the repo
 root regardless of where you invoke it from.
+
+Containing all three models does not let either mode load the wrong one: the
+`canonical_id -> family -> allowed modes` registry in
+`src/core/models/compatibility.cpp` is the only thing that grants authority, no
+family is permitted in both modes (a `static_assert` enforces it), and the
+manifest never states privileges — so an operator edit in the models directory
+cannot widen what a model may do.
 
 What the command does and does **not** do:
 
@@ -527,9 +573,17 @@ package installed, which is the correct outcome.
 
 ### 6. Create a verified pre-upgrade database backup
 
-**Take your own backup before the upgrade touches anything.** `denso-setup verify`
-does create one, but it runs *after* the migration step below — so it is not the
-backup that protects you from the migration.
+**The package now takes one for you.** `postinst` creates and verifies
+`/opt/denso/data/denso.db.pre-v<schema>` before it migrates anything (step 10),
+and halts the upgrade if that backup cannot be made or cannot be verified. So
+this step is no longer the only thing standing between you and a failed
+migration.
+
+Take one anyway if you want a copy **outside** `/opt/denso/data` — on other media,
+or before a risky release. The gate's backup lives in the data dir, which is no
+help if the concern is the filesystem itself. `denso-setup verify` also creates
+one, but it runs *after* the migration, so it is not the backup that protects you
+from the migration.
 
 Create the directory with `mktemp -d`, and capture the path from the command that
 created it. Do not name a directory by timestamp and then rediscover it with `ls`:
@@ -600,6 +654,25 @@ SQLite associates them.
 There is **no `sqlite3` CLI** on the Jetson image; `python3` is a package
 dependency and is the supported way to read these pragmas.
 
+That is also why the package ships **`/opt/denso/lib/denso-db-helper`**, a small
+Python 3 tool the upgrade gate uses instead of the `sqlite3` CLI. Adding the CLI
+to `Depends` would put an apt fetch in the middle of an offline `.deb` upgrade,
+for a database the standard library already speaks. It is usable by hand:
+
+```bash
+sudo -u modela python3 /opt/denso/lib/denso-db-helper user-version    /opt/denso/data/denso.db
+sudo -u modela python3 /opt/denso/lib/denso-db-helper integrity-check /opt/denso/data/denso.db
+sudo -u modela python3 /opt/denso/lib/denso-db-helper backup          /opt/denso/data/denso.db /path/to/snapshot.db
+```
+
+`backup` uses SQLite's **online backup API** (`Connection.backup()`), which is
+consistent under WAL — it is not a copy of `denso.db`/`-wal`/`-shm`, and it
+verifies the snapshot's own `integrity_check` and `user_version` before
+reporting success. It refuses a destination that already exists, and it opens the
+source with `mode=rw` rather than `rwc`, so a **mistyped source path is an error
+instead of a brand-new empty database**. Run it as the data-dir owner, never as
+root.
+
 ### 7. Install or upgrade the package
 
 On the build box, install straight out of `dist/` — **both steps, in this order**:
@@ -634,7 +707,9 @@ CUDA 12.6 / `sm_87`.
 An upgrade keeps `/opt/denso/data` — dpkg never touches it, which is why all
 mutable state lives there and not beside the root-owned, upgrade-replaced binary.
 **That is also why the database arrives at the new binary still on the old
-schema**, and why step 10 exists.
+schema**, and why the package's `postinst` runs the upgrade gate described in
+step 10 before handing the appliance back. If that gate fails, this install
+command fails with it and the application stays stopped.
 
 ### 8. Configure the installation
 
@@ -673,62 +748,69 @@ prints `manifest already current` when so. It **refuses** rather than overwritin
 if the target differs, is a symlink, is not a regular file, or is unreadable;
 remove or correct it and re-run.
 
-### 10. Apply pending migrations to the live database
+### 10. Migrations — applied automatically by `postinst`
 
-> **This step modifies `/opt/denso/data/denso.db` in place. Do not run it until
-> step 6's backup exists and reported `integrity: ok`.**
+**There is normally nothing to do here.** Step 7's install runs the package's
+`postinst`, which performs the whole forward-only upgrade gate before you are
+given the appliance back:
 
-It must run as the **target user**, never as root — a root-created WAL or journal
-file in an operator-owned data dir is one the app can no longer write.
+1. Reads the live schema version.
+2. Takes **one** pre-migration backup at
+   `/opt/denso/data/denso.db.pre-v<schema>`, and proves it with
+   `PRAGMA integrity_check` before anything writes to the live database.
+3. Runs `denso --apply-migrations` against the live database, as the target
+   user.
+4. Runs `denso --check`.
 
-If you are logged in as `modela`, that is simply:
+Every database operation runs as the **target user**, never as root — a
+root-created WAL or journal file in an operator-owned data dir is one the app can
+no longer write.
+
+**If any of those fail, the upgrade halts:** `postinst` exits non-zero, dpkg
+leaves the package unconfigured, and the application stays stopped. Nothing is
+rolled back and no backup is deleted — recovery is manual and explicit. The
+failure message names the backup path. Once you have fixed the cause:
 
 ```bash
-denso-digitalreader --check-migrations /opt/denso/data/denso.db
+sudo dpkg --configure -a
 ```
 
-From any other shell, name the user explicitly rather than assuming whose it is:
+That re-runs the gate. It will **not** take a second backup: the backup is named
+for the schema version being left, so a retry finds the existing one and keeps
+it. Overwriting it would replace your only recovery point with a copy of the
+half-migrated database.
+
+`--check` exit **10** (Degraded) does **not** halt the upgrade — a per-camera
+fault such as a rejected model attachment must not brick a multi-camera
+appliance. Exit **78** (Blocked) does halt it.
+
+A database written by a **newer** build than the one you just installed is
+refused with 78 before the chain opens it for writing. Downgrades are not
+supported; that is what "forward-only" means here.
+
+**Backups accumulate on purpose.** One file per schema version the appliance has
+passed through, never pruned automatically. Deleting them is an explicit
+operator decision.
+
+#### Running the migration by hand
+
+Only needed if you are recovering a half-configured appliance. As the target
+user, never as root:
 
 ```bash
-sudo -u modela denso-digitalreader --check-migrations /opt/denso/data/denso.db
+sudo -u modela env DENSO_DATA_DIR=/opt/denso/data \
+    /opt/denso/bin/denso --apply-migrations
 ```
 
-`sudo -u modela` is fine — what must not happen is running it as **root**.
-
-Expect `check-migrations: ok (/opt/denso/data/denso.db)`.
-
-**`--check-migrations` is not read-only, despite its name.** It opens the database
-you name and runs the migration chain against it: new tables are created and
-legacy configuration is migrated. Point it at the live database and the live
-database is migrated. Point it at a copy and only the copy is.
-
-That dual use is exactly why the name misleads. `denso-setup verify` calls it
-against a **throwaway copy** to prove the chain *would* apply; this step calls it
-against the **live database** to actually apply it. Both are the same command with
-different targets, and only the second changes the appliance.
-
-Two hazards worth knowing before you run it:
-
-- **A mistyped path is silently created.** The database is opened with SQLite's
-  default create-if-missing behaviour, so a wrong path produces a brand-new empty
-  database, migrates it to the current schema, and reports `ok`. That looks
-  identical to success. Check the path.
-- **It does not take the single-instance lock.** Nothing stops it running against
-  a database a live app is using. Step 5 is a prerequisite, not a formality.
-
-Why this step is not optional, and why `verify` alone is not enough: an upgrade
-replaces the binary but never touches `/opt/denso/data`, so the new binary meets
-the old schema. This was observed on a real upgrade — the live database was at
-schema 14; `denso-setup verify` migration-tested a throwaway copy successfully,
-yet the runtime check still failed because the *live* database was still at 14.
-Running `--check-migrations` against `/opt/denso/data/denso.db` moved it to 15,
-created the new tables, migrated the legacy Ball configuration, and `verify` then
-passed.
+Expect `apply-migrations: ok db=/opt/denso/data/denso.db from=14 to=15`. It takes
+no path argument — see the two-command table in *Command-line modes* for why, and
+do **not** substitute `--check-migrations`, which has no backup, no schema-newer
+guard, and will silently create an empty database at a mistyped path.
 
 A normal GUI launch will also open and migrate its configured database. **The
-deployment workflow does not rely on that.** Migrate and verify explicitly first,
-so a migration failure surfaces at a controlled moment with a fresh backup beside
-it — not on an operator's first launch.
+deployment workflow does not rely on that.** The gate migrates and verifies at a
+controlled moment with a verified backup beside it — not on an operator's first
+launch.
 
 ### 11. Verify the live schema and integrity
 
@@ -828,14 +910,27 @@ still installed and configured.
 
 **`verify` fails its runtime check right after an upgrade**
 
-The most likely cause is a skipped step 10: the live database is still on the old
-schema. Confirm with step 11, run step 10, then re-run `verify`.
+The most likely cause is that the live database is still on the old schema —
+which now means the upgrade gate never completed. Check whether the package is
+configured (`dpkg -l denso-digitalreader`; state `iU` means unconfigured),
+confirm the schema with step 11, then run `sudo dpkg --configure -a` and re-run
+`verify`.
 
 **The migration itself failed**
 
-`check-migrations: migration chain FAILED` leaves the live database mid-upgrade.
-Restore step 6's backup (below) before doing anything else, then capture
+`apply-migrations: BLOCKED: migration chain FAILED` leaves the live database
+mid-upgrade, and `postinst` halts the upgrade rather than reporting success. The
+gate's own message names the pre-migration backup — it is at
+`/opt/denso/data/denso.db.pre-v<schema>` and was **not** restored automatically.
+Restore it (below) before doing anything else, then capture
 `/opt/denso/data/denso.log` — the failure is a defect, not an operator error.
+
+**`apply-migrations: BLOCKED` naming a newer schema**
+
+The live database was written by a newer build than the one you installed. This
+is a downgrade, which is not supported. Install the newer package again; the
+database is untouched, because the guard runs before the chain opens it for
+writing.
 
 **Restore the database backup**
 
@@ -912,9 +1007,27 @@ sudo apt remove denso-digitalreader      # keeps /opt/denso/data (database, engi
 sudo apt purge  denso-digitalreader      # also removes it
 ```
 
+> **Never `purge` when the operator data must be preserved.**
+> `purge` runs `rm -rf /opt/denso/data`, which deletes the database, the
+> operator's engines, **and every `denso.db.pre-v*` pre-migration backup the
+> upgrade gate has ever taken**. Those backups live in the data directory, so a
+> purge destroys the recovery points along with the thing they exist to recover.
+> There is no undo and nothing is archived elsewhere.
+>
+> Use `apt remove` to replace or reinstall the package: it keeps
+> `/opt/denso/data` untouched, and an upgrade never purges. If you genuinely
+> intend to discard operator data, copy the database and any needed
+> `denso.db.pre-v*` file somewhere outside `/opt/denso` **first**.
+
 `remove` reverts autostart/autologin first and restores the recorded original GDM
 settings; it refuses rather than proceeding if it cannot, so a purge can never
 destroy the only record of your prior configuration.
+
+`postrm` does nothing at all on `remove`, `upgrade`, `failed-upgrade`,
+`abort-*` or `disappear` — the deletion is reachable only through `purge`, and
+even then only after a `readlink -f` guard confirms `/opt/denso/data` resolves to
+exactly itself (a symlinked data dir must never turn a purge into `rm -rf` of
+somewhere else).
 
 ## Repository structure
 

@@ -81,6 +81,83 @@ int run_check_migrations(const QString& db_path) {
     return 0;
 }
 
+/// The ONE production migration primitive: non-interactive, and it migrates the
+/// PRIMARY database that DENSO_DATA_DIR resolves. It takes no path on purpose —
+/// --check-migrations above stays copy-only, so exactly one entry point in the
+/// binary is allowed to write real operator data, and it cannot be aimed
+/// somewhere else by a typo in a maintainer script.
+///
+/// Exit contract (postinst branches on it; keep it in step with policy.sh's
+/// migrate_verdict):
+///   0  = the primary DB is at the supported schema — migrated, already current,
+///        or absent (a fresh install has nothing to migrate)
+///   78 = Blocked (EX_CONFIG): unreadable, written by a NEWER build, or the
+///        migration chain failed. The same code boot and --check return for a
+///        configuration fault no restart fixes.
+///
+/// It never restores, never rolls back, and never deletes: the caller took the
+/// backup, and recovery from a half-applied chain is a deliberate manual act.
+int run_apply_migrations() {
+    const int blocked = denso::health::exit_code_for(denso::health::Readiness::Blocked);
+    const QString db_path = denso::paths::db_file();
+
+    // A missing database is a FRESH install, not a fault — boot creates it. This
+    // must stay exit 0 or a first install would fail its own postinst.
+    //
+    // This command cannot tell "fresh install" from "the database vanished
+    // mid-upgrade": both look like an absent file from here, and only a caller
+    // that observed the database EARLIER knows which happened. That distinction
+    // is therefore drawn by policy.sh's db_upgrade_gate, which re-checks
+    // existence after this returns and treats a disappearance as fatal. Do not
+    // "fix" it here by failing on an absent database — that would break the
+    // first install of the package.
+    if (!QFileInfo::exists(db_path)) {
+        std::printf("apply-migrations: no database at %s — fresh install, nothing to do\n",
+                    qPrintable(db_path));
+        return 0;
+    }
+
+    // The forward-only guard, and it runs FIRST: the same read-only classifier
+    // boot and --check use. A database written by a NEWER build (SchemaNewer)
+    // must be refused BEFORE the chain opens it for WRITING — running an older
+    // migration chain over newer data is precisely the corruption that no backup
+    // taken after the fact would help with.
+    if (const auto v = denso::health::evaluate_db_schema(db_path);
+        v.status == denso::health::Readiness::Blocked) {
+        for (const auto& b : v.blockers) {
+            std::fprintf(stderr, "apply-migrations: BLOCKED: %s\n", qPrintable(b.detail));
+        }
+        return denso::health::exit_code_for(v.status);
+    }
+
+    auto db = denso::db::Db::open(db_path);
+    if (!db) {
+        std::fprintf(stderr, "apply-migrations: BLOCKED: cannot open %s\n",
+                     qPrintable(db_path));
+        return blocked;
+    }
+
+    // Read the version BEFORE the chain runs: run_migrations() stamps
+    // user_version at the very end, so reading after would report the target for
+    // both a real migration and a no-op, and the operator's log would not show
+    // which upgrade actually moved the data.
+    const std::optional<int> from = denso::db::read_user_version(db->handle());
+    const int supported = denso::db::supported_schema_version();
+
+    if (!denso::db::run_migrations(db->handle())) {
+        std::fprintf(stderr,
+                     "apply-migrations: BLOCKED: migration chain FAILED on %s "
+                     "(from=%d to=%d). The database is left exactly as the chain "
+                     "left it; restore from the pre-migration backup by hand.\n",
+                     qPrintable(db_path), from ? *from : -1, supported);
+        return blocked;
+    }
+
+    std::printf("apply-migrations: ok db=%s from=%d to=%d\n",
+                qPrintable(db_path), from ? *from : -1, supported);
+    return 0;
+}
+
 /// Real create-and-remove probe. access(W_OK) is weaker: it does not prove a
 /// create succeeds under the actual mount, ACL, quota, or read-only conditions.
 bool data_dir_writable() {
@@ -319,6 +396,7 @@ int run_headless(const denso::cli::Command& cmd) {
         case Mode::Version:         return run_version();
         case Mode::CheckRunning:    return run_check_running();
         case Mode::CheckMigrations: return run_check_migrations(cmd.arg);
+        case Mode::ApplyMigrations: return run_apply_migrations();
         case Mode::Check:           return run_check(cmd.engines);
         case Mode::MigrateModel:    return run_migrate_model(cmd);
         case Mode::Error:

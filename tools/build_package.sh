@@ -2,7 +2,10 @@
 # Build the Denso .deb. MUST run on an aarch64 JetPack 6.2 Jetson — there is no
 # cross-toolchain, and the engines are sm_87/TRT-10.3 pinned.
 #
-#   tools/build_package.sh --model models/digitv3.engine [--allow-dirty]
+#   RELEASE (canonical, both modes):
+#     tools/build_package.sh --models-dir models
+#   One-off / partial set (never a release cut):
+#     tools/build_package.sh --model models/digitv3.engine [--model ...] [--allow-dirty]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,15 +40,46 @@ RELEASE_A_DIGITV3_MANIFEST_SHA256=1e6eb46206dcc03352496f3643f94d4e83927645a4a639
 RELEASE_B_MANIFEST_SHA256=ca8e9d6d991e52e0845060e9b75b1b7d393460abaef229ed1a5030a590cc7c16
 
 MODELS=()
+MODELS_DIR=""
 ALLOW_DIRTY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --model) MODELS+=("$2"); shift 2 ;;
+        --models-dir) MODELS_DIR="$2"; shift 2 ;;
         --allow-dirty) ALLOW_DIRTY=1; shift ;;
-        *) echo "usage: $0 --model <path/to.engine> [--model ...] [--allow-dirty]" >&2; exit 2 ;;
+        *) echo "usage: $0 {--models-dir <dir> | --model <path/to.engine> [--model ...]} [--allow-dirty]" >&2; exit 2 ;;
     esac
 done
-[ "${#MODELS[@]}" -gt 0 ] || { echo "at least one --model is required (never a glob — see packaging/models.approved)" >&2; exit 2; }
+
+# ── --models-dir: the canonical RELEASE input.
+#
+# `--model` builds whatever set it is handed, which makes a PARTIAL release the
+# easy mistake: digitv3 alone produces a valid, installable package that is
+# silently missing the entire Floating Ball Leveler mode. --models-dir refuses
+# anything that is not exactly the canonical set, so a release cut cannot be
+# short a mode. resolve_models_dir lives in packaging/lib/policy.sh because this
+# script refuses to run off an aarch64 JetPack box — the rules have to be
+# testable on the dev box (tests/packaging/run.sh drives it with fixtures).
+#
+# The two selectors are mutually exclusive: silently merging them would let a
+# stray --model widen a canonical release set, which is the exact outcome
+# resolve_models_dir exists to prevent.
+if [ -n "$MODELS_DIR" ]; then
+    [ "${#MODELS[@]}" -eq 0 ] || {
+        echo "--models-dir and --model are mutually exclusive: --models-dir already names the" >&2
+        echo "complete canonical set, and an extra --model could only widen it." >&2
+        exit 2; }
+    # Ordered, one path per line. Any failure inside resolve_models_dir has
+    # already explained itself on stderr.
+    MAPFILE_TMP="$(resolve_models_dir "$MODELS_DIR")" || exit 1
+    while IFS= read -r _line; do [ -n "$_line" ] && MODELS+=("$_line"); done <<EOF
+$MAPFILE_TMP
+EOF
+    unset MAPFILE_TMP _line
+    echo ">> canonical model set from $MODELS_DIR: $(canonical_model_stems)"
+fi
+
+[ "${#MODELS[@]}" -gt 0 ] || { echo "--models-dir <dir>, or at least one --model, is required (never a glob — see packaging/models.approved)" >&2; exit 2; }
 [ "$(uname -m)" = "aarch64" ] || { echo "must build on aarch64 (engines are sm_87-pinned)" >&2; exit 1; }
 
 cd "$HERE"
@@ -235,6 +269,9 @@ install -d "$STAGE/DEBIAN" "$STAGE/opt/denso/bin" "$STAGE/opt/denso/models" \
 
 install -m 0755 "$EXE"                              "$STAGE/opt/denso/bin/denso"
 install -m 0644 packaging/lib/policy.sh             "$STAGE/opt/denso/lib/policy.sh"
+# 0755: the upgrade gate invokes it as `python3 <helper>`, but it carries a
+# shebang and doubles as a standalone operator tool during manual recovery.
+install -m 0755 packaging/denso-db-helper           "$STAGE/opt/denso/lib/denso-db-helper"
 install -m 0755 packaging/denso-digitalreader       "$STAGE/usr/bin/denso-digitalreader"
 install -m 0755 packaging/denso-setup               "$STAGE/usr/bin/denso-setup"
 install -m 0644 packaging/com.denso.DigitalReader.desktop \

@@ -1,15 +1,34 @@
 #!/bin/sh
-# Structural only, and idempotent: dpkg may re-invoke this during recovery, and
-# a failure here leaves the package unconfigured and blocks later apt runs.
+# Structural setup, plus the forward-only upgrade gate.
+#
 # Everything with judgement (target user, autostart, autologin, validation)
-# lives in `denso-setup`, which the operator runs explicitly afterwards.
+# still lives in `denso-setup`, which the operator runs explicitly afterwards.
+# The gate is the one exception, and it belongs here because this is the only
+# point that runs BETWEEN "dpkg has replaced the binaries" and "the operator may
+# start the app again". A newer binary against an unmigrated database is exactly
+# the window that must not be left open.
+#
+# THIS SCRIPT MAY FAIL, deliberately reversing the previous "structural only,
+# never fail" rule. The cost is understood: a failure leaves the package
+# unconfigured and blocks later apt runs until the operator acts. That IS the
+# fail-closed requirement — an upgrade whose backup, migration, or integrity
+# verification failed must not quietly look successful. Every failure path is
+# re-runnable with `dpkg --configure -a` once the cause is fixed.
+#
+# The decisions live in /opt/denso/lib/policy.sh (db_upgrade_gate and friends),
+# where the test suite drives them directly. This file owns only install-layout
+# knowledge: where things are, and which account owns the data.
 set -e
+
+DATA=/opt/denso/data
+STATE=/opt/denso/install-state
+DB="$DATA/denso.db"
+DENSO=/opt/denso/bin/denso
+POLICY=/opt/denso/lib/policy.sh
+HELPER=/opt/denso/lib/denso-db-helper
 
 case "$1" in
   configure)
-    DATA=/opt/denso/data
-    STATE=/opt/denso/install-state
-
     mkdir -p "$DATA/models" "$STATE"
     chmod 0755 "$STATE"
 
@@ -19,9 +38,45 @@ case "$1" in
     # (wrong — should be `id -gn`), and swallowed failure with `|| true`.
     # `denso-setup configure` owns initial ownership and repair instead.
 
-    echo "denso: installed. Next:"
-    echo "  sudo denso-setup configure --user <username> [--autostart] [--enable-autologin]"
-    echo "  sudo denso-setup verify"
+    # The gate runs only when there is operator data to preserve. A fresh
+    # install has no database: nothing to back up, nothing to migrate, and boot
+    # creates the schema at the supported version.
+    if [ -e "$DB" ]; then
+        . "$POLICY"
+
+        # Which account owns the data. Every database operation runs as this
+        # user, never as root — see db_upgrade_gate's `runner` parameter.
+        if [ -r "$STATE/user" ]; then
+            user="$(cat "$STATE/user")"
+        else
+            # A database with no recorded user is an anomalous install, but
+            # refusing outright would make it unupgradeable forever. The file's
+            # own owner is a real, checkable answer.
+            user="$(stat -c %U "$DB" 2>/dev/null || true)"
+            [ -n "$user" ] && \
+                echo "denso: note — no $STATE/user; using the database owner '$user'." >&2
+        fi
+        if [ -z "$user" ]; then
+            echo "denso: UPGRADE HALTED: cannot determine which account owns $DB," >&2
+            echo "denso: so database operations cannot be run as a non-root user." >&2
+            echo "denso: Run 'sudo denso-setup configure --user <username>', then" >&2
+            echo "denso: re-run 'sudo dpkg --configure -a'." >&2
+            exit 1
+        fi
+        if ! id "$user" >/dev/null 2>&1; then
+            echo "denso: UPGRADE HALTED: the target user '$user' does not exist." >&2
+            echo "denso: After fixing the cause, re-run: sudo dpkg --configure -a" >&2
+            exit 1
+        fi
+
+        db_upgrade_gate "$DATA" "$DB" "$DENSO" "runuser -u $user --" "$HELPER" || exit 1
+
+        echo "denso: upgrade complete. The application is stopped; start it when ready."
+    else
+        echo "denso: installed. Next:"
+        echo "  sudo denso-setup configure --user <username> [--autostart] [--enable-autologin]"
+        echo "  sudo denso-setup verify"
+    fi
     ;;
   abort-upgrade|abort-remove|abort-deconfigure)
     ;;

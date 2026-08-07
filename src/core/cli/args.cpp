@@ -6,6 +6,7 @@ QString usage() {
     return QStringLiteral(
         "usage: denso [--version | --check [--engine <file>]... |\n"
         "              --check-running | --check-migrations <db-path> |\n"
+        "              --apply-migrations |\n"
         "              --migrate-model --old <file> --new <file>\n"
         "                             --camera <id>... [--class-map <path>]]\n"
         "\n"
@@ -19,6 +20,13 @@ QString usage() {
         "  --check-running            exit 0 if an instance holds the lock, 1 if not,\n"
         "                             4 if that cannot be determined (lock unusable)\n"
         "  --check-migrations <db>    run the migration chain against <db> ONLY\n"
+        "                             (a throwaway COPY — never the primary database)\n"
+        "  --apply-migrations         migrate the PRIMARY database in place, once,\n"
+        "                             non-interactively. Takes no path, on purpose.\n"
+        "                             0 = at the supported schema (migrated, already\n"
+        "                             current, or absent); 78 = blocked (unreadable,\n"
+        "                             newer-than-supported, or the chain failed).\n"
+        "                             Never rolls back: recovery is the operator's.\n"
         "  --migrate-model            re-point cameras from an old engine to a new\n"
         "                             one; requires --old, --new, and at least one\n"
         "                             --camera <id> (repeatable); --class-map <path>\n"
@@ -89,6 +97,19 @@ Command parse(const QStringList& args) {
         if (rest.size() == 1) return Command{Mode::CheckMigrations, rest.first(), {}, {}};
         return error(QStringLiteral("--check-migrations requires exactly one "
                                     "database path"));
+    }
+
+    // Deliberately NOT folded into the no-argument block below. Taking a path
+    // here is the mistake an operator is most likely to make (by analogy with
+    // --check-migrations, one line up), and it is the one that would point the
+    // in-place migrator at an arbitrary file. It earns a message that says what
+    // to use instead, not a generic "unknown or malformed option".
+    if (flag == QStringLiteral("--apply-migrations")) {
+        if (rest.isEmpty()) return Command{Mode::ApplyMigrations, {}, {}, {}};
+        return error(QStringLiteral(
+            "--apply-migrations takes no arguments: it always migrates the primary "
+            "database under DENSO_DATA_DIR. To exercise the chain against a "
+            "throwaway copy, use --check-migrations <db-path>."));
     }
 
     if (rest.isEmpty()) {

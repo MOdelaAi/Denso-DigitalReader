@@ -29,6 +29,84 @@ version_ok() (
     return 0
 )
 
+# --- canonical_model_stems ---------------------------------------------------
+# The canonical production model set, in REVIEWED MANIFEST ORDER.
+#
+# Order is not cosmetic: gen_model_manifest.py emits generations in the order it
+# is given them, so the order is part of the manifest bytes and therefore part of
+# the pinned Release-B identity (build_package.sh RELEASE_B_MANIFEST_SHA256).
+# Emitting these stems in any other order would produce a manifest nobody
+# reviewed and silently skip the identity assert.
+#
+# Both product modes are represented, and the split is fixed by the C++ registry
+# (src/core/models/compatibility.cpp), NOT by this list:
+#   digitv3                  -> digit_numeric -> Digital Number Reader
+#   float-small, float-big   -> float_ball    -> Floating Ball Leveler
+# Nothing here widens a model's authorization; the registry is the only thing
+# that decides what a model may do.
+canonical_model_stems() (
+    echo "digitv3 float-small float-big"
+)
+
+# --- resolve_models_dir <dir> ------------------------------------------------
+# Echo the canonical engine paths, one per line, in reviewed manifest order, so
+# `build_package.sh --models-dir <dir>` cannot assemble a partial release.
+#
+# Why this exists: `--model` takes one engine at a time, which makes a PARTIAL
+# release set the easy mistake — a package built with digitv3 alone is valid,
+# installable, and silently missing the entire Floating Ball Leveler mode. This
+# refuses anything that is not exactly the canonical set.
+#
+# It deliberately does NOT glob the directory into the model list (see
+# packaging/models.approved): the directory is CHECKED against the canonical set,
+# never used to discover it, so a stray engine is an error rather than a silent
+# addition. Hash approval still happens downstream, per pair.
+#
+# Returns 0 and prints the ordered engine paths; returns 1 with a message on
+# stderr otherwise. Subshell body — see version_ok.
+resolve_models_dir() (
+    dir="${1-}"
+    [ -n "$dir" ] || { echo "models-dir: no directory given" >&2; return 1; }
+    [ -d "$dir" ] || { echo "models-dir: not a directory: $dir" >&2; return 1; }
+
+    # Production packaging is TensorRT-engine only. A checkpoint or an ONNX
+    # export sitting beside the engines is a sign the directory is a working
+    # area, not a release input — refuse rather than quietly ignore it.
+    for bad in "$dir"/*.pt "$dir"/*.onnx; do
+        [ -e "$bad" ] || continue
+        echo "models-dir: refusing '$bad' — packaging is TensorRT-engine only" >&2
+        return 1
+    done
+
+    stems="$(canonical_model_stems)"
+
+    # Every canonical PAIR must be present. The pair is the unit: TrtEngine's
+    # ctor reads <stem>.names.json, so an engine without its sidecar is not a
+    # shippable model.
+    for s in $stems; do
+        [ -f "$dir/$s.engine" ] \
+            || { echo "models-dir: missing engine: $dir/$s.engine" >&2; return 1; }
+        [ -f "$dir/$s.names.json" ] \
+            || { echo "models-dir: missing sidecar: $dir/$s.names.json" >&2; return 1; }
+    done
+
+    # No engine outside the canonical set. This is the "unexpected fourth
+    # engine" case: models/ is git-ignored, so a forgotten experimental engine
+    # with a valid sidecar would otherwise be a candidate for production.
+    for e in "$dir"/*.engine; do
+        [ -e "$e" ] || continue
+        st="$(basename "$e" .engine)"
+        case " $stems " in
+            *" $st "*) : ;;
+            *) echo "models-dir: unexpected engine '$st' in $dir" >&2
+               echo "models-dir: the canonical set is exactly: $stems" >&2
+               return 1 ;;
+        esac
+    done
+
+    for s in $stems; do echo "$dir/$s.engine"; done
+)
+
 # --- check_verdict <exit-code> ----------------------------------------------
 # Map `denso --check`'s exit code to a verify action. The readiness contract
 # (src/core/health/integrity.cpp exit_code_for) is:
@@ -47,6 +125,229 @@ check_verdict() (
         78) echo blocked ;;
         *)  echo failed ;;
     esac
+)
+
+# --- migrate_verdict <exit-code> ---------------------------------------------
+# Map `denso --apply-migrations` (src/app/cli/run_headless.cpp) to a postinst
+# action. Deliberately NOT check_verdict: the two commands do not share an exit
+# contract, and reusing it would silently accept 10 — which --apply-migrations
+# never returns and which would mean "carry on" on a code we do not model.
+#   0  = at the supported schema (migrated, already current, or fresh) -> "ok"
+#   78 = Blocked: unreadable, newer-than-supported, or the chain FAILED
+#        -> "blocked"  postinst STOPS, leaves the app stopped, exits non-zero
+#   *  = anything else (crash, 127 missing binary, 2 bad usage) -> "failed"
+# There is no non-fatal verdict here: unlike --check's Degraded, a partly
+# migrated database has no serviceable middle state.
+migrate_verdict() (
+    case "${1-}" in
+        0)  echo ok ;;
+        78) echo blocked ;;
+        *)  echo failed ;;
+    esac
+)
+
+# --- user_version_ok <string> ------------------------------------------------
+# Validate what `denso-db-helper user-version` printed BEFORE it is used to build
+# a backup filename or compared as a number. Fail closed on anything that is not
+# a plain non-negative integer: an empty string (helper missing, DB unreadable,
+# or the PRAGMA silently failing) would otherwise produce the backup name
+# "denso.db.pre-v" and quietly collapse every schema version onto ONE file — so
+# the second failed upgrade would find that name already present, skip the
+# backup, and migrate with no recovery point at all.
+user_version_ok() (
+    case "${1-}" in
+        "") return 1 ;;
+        *[!0-9]*) return 1 ;;    # digits only: no sign, no space, no newline
+        *) return 0 ;;
+    esac
+)
+
+# --- backup_basename <user-version> ------------------------------------------
+# The pre-migration backup filename, keyed on the schema version being LEFT.
+#
+# Deliberately deterministic — no timestamp. Two properties depend on it:
+#   1. `dpkg --configure -a` re-runs postinst after a failed upgrade. A
+#      timestamped name would take a SECOND backup, this time of the
+#      half-migrated database, and (worse) the operator's real recovery point
+#      would no longer be the newest file in the directory.
+#   2. Reinstalling the same package repeatedly cannot grow the directory: the
+#      name only changes when the schema version does, so the backup count is
+#      bounded by the number of schema versions the appliance has passed
+#      through. That is what makes "no automatic pruning" safe to promise.
+# The caller must never overwrite an existing one — see postinst.
+backup_basename() (
+    echo "denso.db.pre-v${1-}"
+)
+
+# --- db_upgrade_gate <data-dir> <db> <denso-bin> <runner> <helper> -----------
+# The forward-only upgrade gate: confirm stopped, back up, PROVE the backup,
+# migrate, confirm the database survived, verify. Returns 0 to let the upgrade
+# proceed, 1 to HALT it (postinst then exits non-zero, leaving the package
+# unconfigured and the application stopped).
+#
+# `runner` is the command prefix every database operation runs through, passed
+# as ONE word-split string, e.g. "runuser -u denso --". It is a parameter and
+# not a hardcoded `runuser` for two reasons: none of this may run as root
+# (opening a WAL database creates -wal/-shm beside it, and `--check` writes a
+# probe file into the data dir — a root-owned artifact in an operator-owned data
+# dir is the documented way this appliance breaks; see prerm, where a root-owned
+# lock makes every later --check-running return 4), and the tests need to drive
+# the real logic as an unprivileged user. An EMPTY runner would silently mean
+# "as root" and is refused outright.
+#
+# `helper` is denso-db-helper, which wraps the Python 3 stdlib sqlite3 module.
+# There is no `sqlite3` CLI dependency: python3 is already required, and adding
+# a package would put an apt fetch in the middle of an offline .deb upgrade.
+#
+# ORDER IS THE DESIGN: back up FIRST, prove the backup is a usable recovery
+# point SECOND, and only then let anything write to the live database. A backup
+# taken after a failed migration is not a backup.
+#
+# It never restores, never rolls back, and never deletes or overwrites an
+# existing backup. Recovery is a deliberate manual act, by requirement.
+db_upgrade_gate() (
+    data="${1-}"; db="${2-}"; denso="${3-}"; runner="${4-}"; helper="${5-}"
+
+    backup=""
+    halt() {
+        echo "denso: UPGRADE HALTED: $1" >&2
+        echo "denso:" >&2
+        echo "denso: The application has NOT been started and must stay stopped." >&2
+        if [ -n "$backup" ] && [ -e "$backup" ]; then
+            echo "denso: Pre-migration backup (NOT restored automatically):" >&2
+            echo "denso:   $backup" >&2
+            echo "denso: To recover by hand, with the application stopped, as the" >&2
+            echo "denso: account that owns the data dir:" >&2
+            echo "denso:   cp -p '$backup' '$db'" >&2
+            echo "denso:   rm -f '$db-wal' '$db-shm'" >&2
+        else
+            echo "denso: No pre-migration backup was taken; the database is untouched." >&2
+        fi
+        echo "denso:" >&2
+        echo "denso: After fixing the cause, re-run:  sudo dpkg --configure -a" >&2
+        return 1
+    }
+
+    [ -n "$runner" ] || { halt "internal error: no privilege-dropping runner was
+ supplied, so database operations would run as root."; return 1; }
+    [ -n "$data" ] && [ -n "$db" ] && [ -n "$denso" ] && [ -n "$helper" ] \
+        || { halt "internal error: db_upgrade_gate called with missing paths."; return 1; }
+    [ -x "$denso" ] || { halt "$denso is missing or not executable."; return 1; }
+    [ -f "$helper" ] || { halt "$helper is missing."; return 1; }
+    command -v python3 >/dev/null 2>&1 || { halt "python3 is not installed. It is
+ a package dependency; run 'sudo apt-get -f install' and retry."; return 1; }
+
+    # --- the application must be stopped --------------------------------------
+    # prerm already refused the upgrade if it was running, but that check ran
+    # before unpacking; this one runs immediately before we touch the database.
+    # --check-running is TRI-STATE and read as such: 1 (definitely not running)
+    # is the ONLY safe-to-proceed code. Treating 4 ("cannot determine") as safe
+    # is exactly the unsafe upgrade the tri-state exists to prevent.
+    $runner env DENSO_DATA_DIR="$data" "$denso" --check-running >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        1) : ;;
+        0) halt "the application is running. Stop it, then re-run
+ 'sudo dpkg --configure -a'."; return 1 ;;
+        *) halt "cannot establish whether the application is running (rc=$rc);
+ refusing to migrate. Check /opt/denso/data ownership and permissions."; return 1 ;;
+    esac
+
+    # --- the schema version currently on disk ---------------------------------
+    cur="$($runner python3 "$helper" user-version "$db" 2>/dev/null)"
+    rc=$?
+    [ "$rc" -eq 0 ] || { halt "cannot read the schema version from $db (helper
+ rc=$rc); the database may be missing, unreadable or corrupt."; return 1; }
+    user_version_ok "$cur" || { halt "the schema version read from $db is not a
+ plain integer (got '$cur'); refusing to guess a backup name."; return 1; }
+
+    # --- exactly one pre-migration backup -------------------------------------
+    backup="$data/$(backup_basename "$cur")"
+    if [ -e "$backup" ]; then
+        # A retry after a failed upgrade. Keeping the ORIGINAL is the whole point
+        # of the deterministic name: overwriting now would replace the operator's
+        # only recovery point with a copy of the half-migrated database.
+        echo "denso: a pre-migration backup for schema v$cur already exists;"
+        echo "denso: keeping it unchanged: $backup"
+    else
+        part="$backup.partial"
+        rm -f "$part"
+        echo "denso: backing up the database at schema v$cur -> $backup"
+        # The helper uses the SQLite online backup API (WAL-consistent) and
+        # verifies the snapshot's own integrity_check and user_version before
+        # returning 0. It refuses a destination that already exists.
+        $runner python3 "$helper" backup "$db" "$part"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            rm -f "$part"
+            halt "the pre-migration backup could not be created and verified
+ (helper rc=$rc)."
+            return 1
+        fi
+        # Rename only once verified: a crash mid-copy must not leave a truncated
+        # file at $backup that the retry above would trust and skip.
+        mv "$part" "$backup" || { halt "cannot move the verified backup into place."; return 1; }
+        echo "denso: backup verified (integrity_check ok, schema v$cur)."
+    fi
+
+    # --- migrate the live database --------------------------------------------
+    # The one production migration primitive. It refuses a database written by a
+    # NEWER build before opening it for writing (forward-only), and returns 78
+    # for every blocked state.
+    echo "denso: applying migrations..."
+    $runner env DENSO_DATA_DIR="$data" "$denso" --apply-migrations
+    rc=$?
+    case "$(migrate_verdict "$rc")" in
+        ok) : ;;
+        blocked) halt "migration was refused or failed (rc=$rc). This includes a
+ database written by a NEWER version of the application than the one just
+ installed — downgrades are not supported."; return 1 ;;
+        *) halt "the migration command failed unexpectedly (rc=$rc)."; return 1 ;;
+    esac
+
+    # --- the database must still be there -------------------------------------
+    # A database that is ABSENT when the gate first classifies the install is a
+    # fresh install: nothing to migrate, and postinst never calls this function.
+    # A database that is absent HERE is a different event entirely — it existed
+    # moments ago, we backed it up, and it has since gone. `--apply-migrations`
+    # cannot tell those apart (an absent database is a legitimate no-op for a
+    # fresh install, so it returns 0 and says so), which is precisely why the
+    # distinction has to be drawn here, where the earlier observation is known.
+    # Accepting the exit code alone would report a successful upgrade of a
+    # database that no longer exists.
+    [ -f "$db" ] || { halt "the database $db disappeared during migration.
+ It existed at schema v$cur moments ago and was backed up.
+ This is not a fresh install and must not be treated as one."; return 1; }
+
+    now="$($runner python3 "$helper" user-version "$db" 2>/dev/null)"
+    rc=$?
+    [ "$rc" -eq 0 ] || { halt "the database $db is unreadable immediately after
+ migration (helper rc=$rc)."; return 1; }
+    user_version_ok "$now" || { halt "the schema version after migration is not a
+ plain integer (got '$now')."; return 1; }
+    [ "$now" -ge "$cur" ] || { halt "the schema version went BACKWARDS during
+ migration: v$cur -> v$now."; return 1; }
+    echo "denso: schema v$cur -> v$now."
+
+    # --- integrity verification ------------------------------------------------
+    # Exit 10 (Degraded) is NOT an upgrade failure: it means a per-camera fault
+    # such as a rejected model attachment. Halting a four-camera appliance
+    # because one camera has a bad attachment would invert the per-zone
+    # fail-closed contract the readiness verdict exists to express.
+    echo "denso: verifying integrity..."
+    $runner env DENSO_DATA_DIR="$data" "$denso" --check
+    rc=$?
+    case "$(check_verdict "$rc")" in
+        ok) echo "denso: integrity ok." ;;
+        degraded)
+            echo "denso: integrity DEGRADED (rc=10) — serviceable; the application" >&2
+            echo "denso: will start. Run 'sudo denso-setup verify' for per-camera detail." >&2 ;;
+        blocked) halt "integrity verification reported a blocking configuration
+ fault (rc=78)."; return 1 ;;
+        *) halt "integrity verification failed unexpectedly (rc=$rc)."; return 1 ;;
+    esac
+
+    return 0
 )
 
 # --- apt_plan_ok <plan-file> -------------------------------------------------

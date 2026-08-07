@@ -57,6 +57,408 @@ is "check: 1 -> failed (unexpected)"           "$(check_verdict 1)"  failed
 is "check: 2 -> failed (unexpected)"           "$(check_verdict 2)"  failed
 is "check: 127 -> failed (unexpected)"         "$(check_verdict 127)" failed
 
+# ── migrate_verdict: map `denso --apply-migrations` to a postinst action. There
+#    is no non-fatal middle state here: a partly migrated database is never
+#    "serviceable", so 10 must NOT be accepted the way check_verdict accepts it.
+is "migrate: 0 -> ok (continue)"               "$(migrate_verdict 0)"  ok
+is "migrate: 78 -> blocked (halt the upgrade)" "$(migrate_verdict 78)" blocked
+is "migrate: 1 -> failed (unexpected)"         "$(migrate_verdict 1)"  failed
+is "migrate: 2 -> failed (bad usage)"          "$(migrate_verdict 2)"  failed
+is "migrate: 127 -> failed (binary missing)"   "$(migrate_verdict 127)" failed
+is "migrate: 10 is NOT degraded-serviceable"   "$(migrate_verdict 10)" failed
+is "migrate: empty -> failed (fail closed)"    "$(migrate_verdict)"    failed
+
+# ── user_version_ok: guards the backup FILENAME. Empty input is the dangerous
+#    case: it would name every backup "denso.db.pre-v", so the second upgrade
+#    would find that name present, skip the backup, and migrate with no
+#    recovery point. Fail closed on anything that is not a plain integer.
+user_version_ok "0";      rc_is "user_version: accepts 0 (fresh schema)" $? 0
+user_version_ok "7";      rc_is "user_version: accepts a version"        $? 0
+user_version_ok "12";     rc_is "user_version: accepts multi-digit"      $? 0
+user_version_ok "";       rc_is "user_version: REJECTS empty"            $? 1
+user_version_ok " 7";     rc_is "user_version: REJECTS leading space"    $? 1
+user_version_ok "7 ";     rc_is "user_version: REJECTS trailing space"   $? 1
+user_version_ok "-1";     rc_is "user_version: REJECTS a sign"           $? 1
+user_version_ok "7a";     rc_is "user_version: REJECTS junk"             $? 1
+user_version_ok "../x";   rc_is "user_version: REJECTS path traversal"   $? 1
+user_version_ok "Error: file is not a database"; \
+                          rc_is "user_version: REJECTS an sqlite3 error line" $? 1
+
+# ── backup_basename: deterministic, keyed on the schema version being LEFT.
+#    A timestamp here would break BOTH promises the design makes: the
+#    dpkg --configure -a retry would take a second backup (of the half-migrated
+#    database), and the file count would grow without bound.
+is "backup: names by the version left"   "$(backup_basename 7)"  "denso.db.pre-v7"
+is "backup: v0 is not special-cased"     "$(backup_basename 0)"  "denso.db.pre-v0"
+is "backup: same version -> same name (retry is idempotent)" \
+   "$(backup_basename 7)" "$(backup_basename 7)"
+if [ "$(backup_basename 7)" != "$(backup_basename 8)" ]; then
+    ok "backup: a different schema version gets a different name"
+else
+    bad "backup: a different schema version gets a different name"
+fi
+# It becomes a path component under /opt/denso/data, so it must stay a bare
+# filename — no separator can appear even if a caller skipped user_version_ok.
+case "$(backup_basename 7)" in
+    */*) bad "backup: the name is a bare filename (no path separator)" ;;
+    *)   ok  "backup: the name is a bare filename (no path separator)" ;;
+esac
+
+# ── resolve_models_dir: the canonical RELEASE model set.
+#    `--model` builds whatever it is handed, so a PARTIAL release is the easy
+#    mistake — digitv3 alone is a valid, installable package missing the entire
+#    Floating Ball Leveler mode. These pin the refusal of anything that is not
+#    exactly the canonical set.
+is "models: the canonical set is exactly the three release stems" \
+   "$(canonical_model_stems)" "digitv3 float-small float-big"
+
+MD="$T/models"
+# SUBSHELL body, not braces: POSIX shell variables are global, so a brace-bodied
+# helper that loops over `s` clobbers the CALLER's `s` — which silently turned
+# the per-stem loop below into three passes over the same stem. Same rule, same
+# reason, as every function in packaging/lib/policy.sh.
+mk_models() (   # <dir> — a complete, well-formed canonical directory
+    rm -rf "$1"; mkdir -p "$1"
+    for _st in digitv3 float-small float-big; do
+        printf 'ENGINE-%s' "$_st" > "$1/$_st.engine"
+        printf '{"0":"%s"}' "$_st" > "$1/$_st.names.json"
+    done
+)
+
+mk_models "$MD"
+MOUT="$(resolve_models_dir "$MD")"; rc_is "models: a complete canonical dir resolves" $? 0
+is "models: resolves all three engines" "$(printf '%s\n' "$MOUT" | grep -c '\.engine$')" "3"
+# Order is part of the manifest bytes (the pinned Release-B identity), so it is
+# asserted, not assumed.
+is "models: engines come back in REVIEWED MANIFEST ORDER" \
+   "$(printf '%s\n' "$MOUT" | sed 's#.*/##; s#\.engine$##' | tr '\n' ' ')" \
+   "digitv3 float-small float-big "
+
+# Deleting any ONE required file must fail — engine or sidecar, any stem.
+for s in digitv3 float-small float-big; do
+    mk_models "$MD"; rm -f "$MD/$s.engine"
+    resolve_models_dir "$MD" >/dev/null 2>&1
+    rc_is "models: a missing $s ENGINE is refused" $? 1
+    mk_models "$MD"; rm -f "$MD/$s.names.json"
+    resolve_models_dir "$MD" >/dev/null 2>&1
+    rc_is "models: a missing $s SIDECAR is refused" $? 1
+done
+
+mk_models "$MD"; rm -f "$MD/float-big.engine"
+resolve_models_dir "$MD" 2>&1 | grep -q "missing engine" \
+    && ok "models: the refusal names the missing engine" \
+    || bad "models: the refusal names the missing engine"
+
+# An unexpected FOURTH engine. models/ is git-ignored, so a forgotten
+# experimental engine with a valid sidecar would otherwise reach production.
+mk_models "$MD"
+printf 'ENGINE-x' > "$MD/experimental.engine"; printf '{}' > "$MD/experimental.names.json"
+resolve_models_dir "$MD" >/dev/null 2>&1
+rc_is "models: an unexpected FOURTH engine is refused" $? 1
+resolve_models_dir "$MD" 2>&1 | grep -q "unexpected engine 'experimental'" \
+    && ok "models: the refusal names the unexpected engine" \
+    || bad "models: the refusal names the unexpected engine"
+
+# Production packaging is TensorRT-engine only.
+mk_models "$MD"; printf 'x' > "$MD/digitv3.pt"
+resolve_models_dir "$MD" >/dev/null 2>&1
+rc_is "models: a .pt checkpoint in the dir is refused" $? 1
+mk_models "$MD"; printf 'x' > "$MD/digitv3.onnx"
+resolve_models_dir "$MD" >/dev/null 2>&1
+rc_is "models: an .onnx export in the dir is refused" $? 1
+resolve_models_dir "$MD" 2>&1 | grep -q "TensorRT-engine only" \
+    && ok "models: the refusal states the engine-only rule" \
+    || bad "models: the refusal states the engine-only rule"
+
+resolve_models_dir "$T/no-such-dir" >/dev/null 2>&1
+rc_is "models: a missing directory is refused" $? 1
+resolve_models_dir "" >/dev/null 2>&1
+rc_is "models: an empty directory argument is refused" $? 1
+rm -rf "$MD"
+
+# ── denso-db-helper + db_upgrade_gate, end to end.
+#    The helper here is the REAL packaging/denso-db-helper — no sqlite3 stub —
+#    driven against real SQLite databases as the invoking (unprivileged) user.
+#    Only `denso` is stubbed, because the gate needs to steer its exit codes.
+#    The runner is "env"; postinst passes "runuser -u <user> --" in that slot.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "skip - gate: python3 unavailable (it is a package dependency; the helper needs it)"
+else
+HELPER="$HERE/../../packaging/denso-db-helper"
+GB="$T/gatebin"; mkdir -p "$GB"
+STUBDIR="$T/stub"; mkdir -p "$STUBDIR"; export STUBDIR
+
+# Stub application. --check-running is tri-state; the fault hooks let a test
+# make the "migration" delete or rewind the database so the gate's
+# post-migration checks can be exercised for real.
+cat > "$GB/denso" <<'SHEOF'
+#!/bin/sh
+for a in "$@"; do
+    case "$a" in
+        --check-running) exit "$(cat "$STUBDIR/running_rc")" ;;
+        --apply-migrations)
+            [ -f "$STUBDIR/delete_db" ] && rm -f "$DENSO_DATA_DIR/denso.db"
+            [ -f "$STUBDIR/rewind_db" ] && python3 -c 'import sqlite3,sys
+c=sqlite3.connect(sys.argv[1]); c.execute("PRAGMA user_version=1"); c.commit(); c.close()' \
+                "$DENSO_DATA_DIR/denso.db"
+            exit "$(cat "$STUBDIR/migrate_rc")" ;;
+        --check) exit "$(cat "$STUBDIR/check_rc")" ;;
+    esac
+done
+exit 0
+SHEOF
+chmod +x "$GB/denso"
+
+# A helper wrapper whose `backup` reports failure, standing in for the real
+# helper detecting a snapshot it cannot verify. Everything else delegates to the
+# real helper.
+#
+# It must be PYTHON, not shell: the gate invokes the helper as
+# `python3 <helper>`, so a shell wrapper would be handed to the interpreter and
+# die at the FIRST helper call (user-version), halting the gate for the wrong
+# reason and never reaching the backup path this case exists to test.
+cat > "$GB/helper-failbackup" <<PYEOF
+#!/usr/bin/env python3
+import runpy, sys
+if len(sys.argv) > 1 and sys.argv[1] == "backup":
+    sys.stderr.write("denso-db-helper: backup failed its integrity check\n")
+    sys.exit(1)
+runpy.run_path("$HELPER", run_name="__main__")
+PYEOF
+chmod +x "$GB/helper-failbackup"
+
+mkdb() {   # <path> <user_version>
+    python3 -c 'import sqlite3,sys
+c=sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE IF NOT EXISTS reading(x)")
+c.execute("INSERT INTO reading VALUES (1)")
+c.execute("PRAGMA user_version=%d" % int(sys.argv[2]))
+c.commit(); c.close()' "$1" "$2"
+}
+
+gate_fixture() {   # <dir> <user_version> <migrate_rc> <check_rc>
+    rm -rf "$1"; mkdir -p "$1"
+    mkdb "$1/denso.db" "$2"
+    echo "$3" > "$STUBDIR/migrate_rc"
+    echo "$4" > "$STUBDIR/check_rc"
+    echo 1     > "$STUBDIR/running_rc"      # 1 = definitely not running
+    rm -f "$STUBDIR/delete_db" "$STUBDIR/rewind_db"
+}
+
+# ── denso-db-helper on its own ───────────────────────────────────────────────
+H="$T/helper"; mkdir -p "$H"; mkdb "$H/src.db" 7
+
+is "helper: user-version reads the schema" \
+   "$(python3 "$HELPER" user-version "$H/src.db")" "7"
+is "helper: integrity-check reports ok" \
+   "$(python3 "$HELPER" integrity-check "$H/src.db")" "ok"
+
+# The property that makes a mistyped path safe: mode=rw, never rwc.
+python3 "$HELPER" user-version "$H/missing.db" >/dev/null 2>&1
+rc_is "helper: user-version REFUSES a missing database" $? 1
+[ -e "$H/missing.db" ] \
+    && bad "helper: a missing database is NOT implicitly created" \
+    || ok  "helper: a missing database is NOT implicitly created"
+
+python3 "$HELPER" backup "$H/src.db" "$H/out.db" >/dev/null 2>&1
+rc_is "helper: backup succeeds" $? 0
+is "helper: the snapshot carries the source schema" \
+   "$(python3 "$HELPER" user-version "$H/out.db")" "7"
+is "helper: the snapshot is sound" \
+   "$(python3 "$HELPER" integrity-check "$H/out.db")" "ok"
+
+# Refusing an existing destination is what lets the caller trust its own
+# .partial staging: a leftover file is never silently reused.
+python3 "$HELPER" backup "$H/src.db" "$H/out.db" >/dev/null 2>&1
+rc_is "helper: backup REFUSES an existing destination" $? 1
+
+python3 "$HELPER" backup "$H/missing.db" "$H/never.db" >/dev/null 2>&1
+rc_is "helper: backup REFUSES a missing source" $? 1
+[ -e "$H/never.db" ] \
+    && bad "helper: a refused backup creates no destination" \
+    || ok  "helper: a refused backup creates no destination"
+
+printf 'this is not a database' > "$H/corrupt.db"
+python3 "$HELPER" integrity-check "$H/corrupt.db" >/dev/null 2>&1
+rc_is "helper: integrity-check REJECTS a corrupt file" $? 1
+python3 "$HELPER" user-version "$H/corrupt.db" >/dev/null 2>&1
+rc_is "helper: user-version REJECTS a corrupt file" $? 1
+python3 "$HELPER" >/dev/null 2>&1
+rc_is "helper: no subcommand is a usage error" $? 2
+python3 "$HELPER" backup "$H/src.db" >/dev/null 2>&1
+rc_is "helper: backup with one argument is a usage error" $? 2
+
+# ── the gate ─────────────────────────────────────────────────────────────────
+
+# (1) Happy path.
+G="$T/g1"; gate_fixture "$G" 3 0 0
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g1.out" 2>&1
+rc_is "gate: happy path proceeds" $? 0
+[ -f "$G/denso.db.pre-v3" ] \
+    && ok "gate: backup is named for the schema version being LEFT" \
+    || bad "gate: backup is named for the schema version being LEFT"
+is "gate: the backup is a valid database at the pre-migration schema" \
+   "$(python3 "$HELPER" user-version "$G/denso.db.pre-v3")" "3"
+is "gate: the backup is sound" \
+   "$(python3 "$HELPER" integrity-check "$G/denso.db.pre-v3")" "ok"
+ls "$G"/*.partial >/dev/null 2>&1 \
+    && bad "gate: no .partial staging file survives success" \
+    || ok  "gate: no .partial staging file survives success"
+
+# (2) Retry idempotence — the property the deterministic name exists for.
+B1="$(sha256sum < "$G/denso.db.pre-v3")"
+python3 -c 'import sqlite3,sys
+c=sqlite3.connect(sys.argv[1]); c.execute("INSERT INTO reading VALUES (999)")
+c.commit(); c.close()' "$G/denso.db"
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g2.out" 2>&1
+rc_is "gate: a retry still proceeds" $? 0
+is "gate: the retry does NOT overwrite the existing backup" \
+   "$(sha256sum < "$G/denso.db.pre-v3")" "$B1"
+grep -q "keeping it unchanged" "$T/g2.out" \
+    && ok "gate: the retry says it kept the existing backup" \
+    || bad "gate: the retry says it kept the existing backup"
+is "gate: exactly one backup exists after the retry" \
+   "$(ls "$G" | grep -c '^denso\.db\.pre-v')" "1"
+
+# (3) Migration blocked (rc 78) — the forward-only / newer-database case.
+G="$T/g3"; gate_fixture "$G" 5 78 0
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g3.out" 2>&1
+rc_is "gate: a blocked migration HALTS the upgrade" $? 1
+[ -f "$G/denso.db.pre-v5" ] \
+    && ok "gate: the backup is retained after a blocked migration" \
+    || bad "gate: the backup is retained after a blocked migration"
+grep -q "denso.db.pre-v5" "$T/g3.out" \
+    && ok "gate: the halt message names the backup path" \
+    || bad "gate: the halt message names the backup path"
+grep -q "NOT restored automatically" "$T/g3.out" \
+    && ok "gate: the halt message states there was no automatic rollback" \
+    || bad "gate: the halt message states there was no automatic rollback"
+grep -q "dpkg --configure -a" "$T/g3.out" \
+    && ok "gate: the halt message gives the retry command" \
+    || bad "gate: the halt message gives the retry command"
+grep -q "must stay stopped" "$T/g3.out" \
+    && ok "gate: the halt message says the app must stay stopped" \
+    || bad "gate: the halt message says the app must stay stopped"
+
+# (4) An unexpected migration rc is just as fatal as a blocked one.
+G="$T/g4"; gate_fixture "$G" 2 1 0
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g4.out" 2>&1
+rc_is "gate: an unexpected migration rc HALTS the upgrade" $? 1
+
+# (5) Degraded integrity (rc 10) is NOT an upgrade failure.
+G="$T/g5"; gate_fixture "$G" 4 0 10
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g5.out" 2>&1
+rc_is "gate: DEGRADED integrity still proceeds" $? 0
+grep -q "DEGRADED" "$T/g5.out" \
+    && ok "gate: degraded integrity is reported, not swallowed" \
+    || bad "gate: degraded integrity is reported, not swallowed"
+
+# (6) Blocked integrity (rc 78) IS fatal; so is an unmodelled code.
+G="$T/g6"; gate_fixture "$G" 4 0 78
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g6.out" 2>&1
+rc_is "gate: BLOCKED integrity HALTS the upgrade" $? 1
+G="$T/g6b"; gate_fixture "$G" 4 0 3
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g6b.out" 2>&1
+rc_is "gate: an unmodelled --check rc HALTS the upgrade" $? 1
+
+# (7) An empty runner would silently mean "as root". Refuse before touching
+#     anything: root-owned -wal/-shm in an operator-owned data dir is the
+#     documented way this appliance breaks.
+G="$T/g7"; gate_fixture "$G" 3 0 0
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "" "$HELPER" > "$T/g7.out" 2>&1
+rc_is "gate: an empty (root) runner is REFUSED" $? 1
+[ -f "$G/denso.db.pre-v3" ] \
+    && bad "gate: a refused runner creates no backup" \
+    || ok  "gate: a refused runner creates no backup"
+
+# (8) Missing binaries halt before any database work.
+G="$T/g8"; gate_fixture "$G" 3 0 0
+db_upgrade_gate "$G" "$G/denso.db" "$G/no-such-denso" "env" "$HELPER" > "$T/g8.out" 2>&1
+rc_is "gate: a missing denso binary HALTS the upgrade" $? 1
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$G/no-such-helper" > "$T/g8b.out" 2>&1
+rc_is "gate: a missing db helper HALTS the upgrade" $? 1
+
+# (9) An unreadable/corrupt database: no trustworthy version, so no backup name
+#     and nothing migrated.
+G="$T/g9"; gate_fixture "$G" 3 0 0
+printf 'this is not a database' > "$G/denso.db"
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g9.out" 2>&1
+rc_is "gate: a corrupt database HALTS the upgrade" $? 1
+ls "$G"/denso.db.pre-v* >/dev/null 2>&1 \
+    && bad "gate: a corrupt database produces no backup file" \
+    || ok  "gate: a corrupt database produces no backup file"
+
+# (10) A backup the helper cannot create AND verify must not be promoted, and
+#      must leave no half-written file behind.
+G="$T/g10"; gate_fixture "$G" 6 0 0
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$GB/helper-failbackup" > "$T/g10.out" 2>&1
+rc_is "gate: an unverifiable backup HALTS the upgrade" $? 1
+# Prove the halt happened AT THE BACKUP, not earlier. Without this, a wrapper
+# that broke the first helper call would still "pass" the rc check above while
+# testing nothing — which is exactly what an earlier shell-script wrapper did.
+grep -q "backing up the database" "$T/g10.out" \
+    && ok "gate: the run reached the backup stage before halting" \
+    || bad "gate: the run reached the backup stage before halting"
+[ -f "$G/denso.db.pre-v6" ] \
+    && bad "gate: an unverified backup is not promoted to the recovery point" \
+    || ok  "gate: an unverified backup is not promoted to the recovery point"
+ls "$G"/*.partial >/dev/null 2>&1 \
+    && bad "gate: a failed backup leaves no .partial behind" \
+    || ok  "gate: a failed backup leaves no .partial behind"
+grep -q "could not be created and verified" "$T/g10.out" \
+    && ok "gate: the halt message names the backup failure" \
+    || bad "gate: the halt message names the backup failure"
+
+# (11) A halted upgrade never restores and never touches the live database.
+G="$T/g11"; gate_fixture "$G" 3 78 0
+LIVE_BEFORE="$(sha256sum < "$G/denso.db")"
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > /dev/null 2>&1
+is "gate: a halted upgrade leaves the live database exactly as it found it" \
+   "$(sha256sum < "$G/denso.db")" "$LIVE_BEFORE"
+
+# (12) The application must be stopped. --check-running is TRI-STATE: only 1
+#      (definitely not running) may proceed. Treating 4 as safe is the unsafe
+#      upgrade the tri-state exists to prevent.
+G="$T/g12"; gate_fixture "$G" 3 0 0; echo 0 > "$STUBDIR/running_rc"
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g12.out" 2>&1
+rc_is "gate: a RUNNING application HALTS the upgrade" $? 1
+[ -f "$G/denso.db.pre-v3" ] \
+    && bad "gate: a running application means no backup is taken" \
+    || ok  "gate: a running application means no backup is taken"
+G="$T/g12b"; gate_fixture "$G" 3 0 0; echo 4 > "$STUBDIR/running_rc"
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g12b.out" 2>&1
+rc_is "gate: an INDETERMINATE running check HALTS the upgrade" $? 1
+
+# (13) Absent at initial classification is a fresh install (postinst never calls
+#      the gate). Absent AFTER classification is a different event: the database
+#      existed, was backed up, and has since gone. --apply-migrations returns 0
+#      and calls it a fresh install, so accepting the exit code alone would
+#      report a successful upgrade of a database that no longer exists.
+G="$T/g13"; gate_fixture "$G" 8 0 0; touch "$STUBDIR/delete_db"
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g13.out" 2>&1
+rc_is "gate: a database that DISAPPEARS during migration HALTS the upgrade" $? 1
+grep -q "disappeared during migration" "$T/g13.out" \
+    && ok "gate: the disappearance is named, not reported as a fresh install" \
+    || bad "gate: the disappearance is named, not reported as a fresh install"
+grep -q "not a fresh install" "$T/g13.out" \
+    && ok "gate: the halt message rejects the fresh-install reading" \
+    || bad "gate: the halt message rejects the fresh-install reading"
+[ -f "$G/denso.db.pre-v8" ] \
+    && ok "gate: the backup survives a disappearing database" \
+    || bad "gate: the backup survives a disappearing database"
+rm -f "$STUBDIR/delete_db"
+
+# (14) A schema that goes BACKWARDS is not a successful migration.
+G="$T/g14"; gate_fixture "$G" 9 0 0; touch "$STUBDIR/rewind_db"
+db_upgrade_gate "$G" "$G/denso.db" "$GB/denso" "env" "$HELPER" > "$T/g14.out" 2>&1
+rc_is "gate: a schema that goes BACKWARDS HALTS the upgrade" $? 1
+grep -q "BACKWARDS" "$T/g14.out" \
+    && ok "gate: the backwards migration is named" \
+    || bad "gate: the backwards migration is named"
+rm -f "$STUBDIR/rewind_db"
+
+fi  # python3 available (db_upgrade_gate)
+
 # ── seed_decision: never silently overwrite an operator's engine.
 mkdir -p "$T/s" "$T/d"
 printf 'aaa' > "$T/s/m.engine"; printf '{"0":"a"}' > "$T/s/m.names.json"

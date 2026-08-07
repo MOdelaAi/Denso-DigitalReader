@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Database primitives for the packaging upgrade gate.
+
+Uses the Python 3 standard-library `sqlite3` module, NOT the `sqlite3` CLI.
+`python3` is already a package dependency; the CLI is not installed on the
+target appliance, and adding it would put an apt fetch in the middle of an
+offline .deb upgrade. Nothing here needs the CLI's shell surface.
+
+  denso-db-helper user-version    <db>
+  denso-db-helper integrity-check <db>
+  denso-db-helper backup          <src> <dest>
+
+`backup` uses sqlite3.Connection.backup() — the SQLite online backup API — which
+is consistent under WAL. It is deliberately NOT a copy of denso.db/-wal/-shm: a
+three-file copy is only as good as the assumption that nothing is mid-commit,
+and it silently produces a torn set when that assumption is wrong.
+
+Exit codes: 0 success, 1 failure (message on stderr), 2 usage.
+
+Run this as the account that owns the data directory, never as root: opening a
+WAL database creates -wal/-shm beside it, and a root-owned artifact in an
+operator-owned data dir is one the application can no longer write.
+"""
+
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+
+def fail(msg):
+    sys.stderr.write("denso-db-helper: %s\n" % msg)
+    raise SystemExit(1)
+
+
+def open_existing(path):
+    """Open a database that must ALREADY exist.
+
+    mode=rw, never rwc. An implicitly created empty database is the failure mode
+    that makes a mistyped path look like success — it migrates cleanly, reports
+    ok, and is not the operator's data.
+    """
+    if not os.path.isfile(path):
+        fail("no such database: %s" % path)
+    try:
+        return sqlite3.connect(Path(path).absolute().as_uri() + "?mode=rw", uri=True)
+    except sqlite3.Error as e:
+        fail("cannot open %s: %s" % (path, e))
+
+
+def scalar(con, pragma, path):
+    try:
+        row = con.execute(pragma).fetchone()
+    except sqlite3.Error as e:
+        fail("%s failed on %s: %s" % (pragma, path, e))
+    if row is None:
+        fail("%s returned no row on %s" % (pragma, path))
+    return row[0]
+
+
+def cmd_user_version(path):
+    con = open_existing(path)
+    try:
+        print(scalar(con, "PRAGMA user_version", path))
+    finally:
+        con.close()
+
+
+def cmd_integrity_check(path):
+    con = open_existing(path)
+    try:
+        result = scalar(con, "PRAGMA integrity_check", path)
+    finally:
+        con.close()
+    print(result)
+    if result != "ok":
+        fail("integrity check FAILED on %s: %s" % (path, result))
+
+
+def cmd_backup(src_path, dest_path):
+    # Refuse an existing destination rather than backing up into it. The caller
+    # stages under a .partial name and renames only after this returns 0, so a
+    # destination that already exists means a stale file the caller did not
+    # clear — promoting it would hand the operator someone else's snapshot.
+    if os.path.exists(dest_path):
+        fail("backup destination already exists: %s" % dest_path)
+
+    src = open_existing(src_path)
+    try:
+        src_version = scalar(src, "PRAGMA user_version", src_path)
+        try:
+            dest = sqlite3.connect(dest_path)
+        except sqlite3.Error as e:
+            fail("cannot create %s: %s" % (dest_path, e))
+        try:
+            src.backup(dest)          # SQLite online backup API: WAL-consistent
+        except sqlite3.Error as e:
+            dest.close()
+            # Do not leave a half-written snapshot that a retry might trust.
+            try:
+                os.unlink(dest_path)
+            except OSError:
+                pass
+            fail("backup failed %s -> %s: %s" % (src_path, dest_path, e))
+        dest.close()
+    finally:
+        src.close()
+
+    # Verify the SNAPSHOT, not the source. An unverified backup is a false
+    # promise, and this runs before anything is allowed to write to the live
+    # database.
+    check = open_existing(dest_path)
+    try:
+        integrity = scalar(check, "PRAGMA integrity_check", dest_path)
+        dest_version = scalar(check, "PRAGMA user_version", dest_path)
+    finally:
+        check.close()
+
+    if integrity != "ok":
+        fail("backup %s failed its integrity check: %s" % (dest_path, integrity))
+    if dest_version != src_version:
+        fail("backup %s is at schema v%s but the source is v%s"
+             % (dest_path, dest_version, src_version))
+
+    print("backup ok src=%s dest=%s schema=%s integrity=ok"
+          % (src_path, dest_path, src_version))
+
+
+def main(argv):
+    if len(argv) < 2:
+        sys.stderr.write(__doc__)
+        return 2
+    cmd, args = argv[1], argv[2:]
+    if cmd == "user-version" and len(args) == 1:
+        cmd_user_version(args[0])
+    elif cmd == "integrity-check" and len(args) == 1:
+        cmd_integrity_check(args[0])
+    elif cmd == "backup" and len(args) == 2:
+        cmd_backup(args[0], args[1])
+    else:
+        sys.stderr.write("denso-db-helper: bad usage\n\n")
+        sys.stderr.write(__doc__)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

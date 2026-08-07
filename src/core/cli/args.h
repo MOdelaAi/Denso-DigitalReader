@@ -15,7 +15,8 @@ enum class Mode {
     Version,          ///< --version
     Check,            ///< --check
     CheckRunning,     ///< --check-running
-    CheckMigrations,  ///< --check-migrations <db-path>
+    CheckMigrations,  ///< --check-migrations <db-path> (a COPY; never the primary)
+    ApplyMigrations,  ///< --apply-migrations (the PRIMARY db; takes no path)
     MigrateModel,     ///< --migrate-model --old <f> --new <f> --camera <id>...
     Error,            ///< bad usage; `error` says why
 };

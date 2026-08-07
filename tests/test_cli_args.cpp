@@ -24,8 +24,35 @@ TEST_CASE("every non-GUI mode is headless", "[cli]") {
     REQUIRE(is_headless(Mode::Check));
     REQUIRE(is_headless(Mode::CheckRunning));
     REQUIRE(is_headless(Mode::CheckMigrations));
+    REQUIRE(is_headless(Mode::ApplyMigrations));
     // Error prints usage and exits — it must not open a window either.
     REQUIRE(is_headless(Mode::Error));
+}
+
+TEST_CASE("parse: --apply-migrations takes no path", "[cli]") {
+    const Command c = parse({QStringLiteral("--apply-migrations")});
+    REQUIRE(c.mode == Mode::ApplyMigrations);
+    REQUIRE(c.arg.isEmpty());
+}
+
+// The safety property of the whole primitive: the in-place migrator cannot be
+// aimed at an arbitrary file. Passing a path is the natural mistake, since
+// --check-migrations one line above REQUIRES one — so it must be a hard error,
+// never a migration of something else.
+TEST_CASE("parse: --apply-migrations REFUSES a path", "[cli]") {
+    const Command c = parse({QStringLiteral("--apply-migrations"),
+                             QStringLiteral("/opt/denso/data/denso.db")});
+    REQUIRE(c.mode == Mode::Error);
+    REQUIRE_FALSE(c.error.isEmpty());
+    // The message must name the copy-only alternative, or the operator's next
+    // guess is to force it some other way.
+    REQUIRE(c.error.contains(QStringLiteral("--check-migrations")));
+}
+
+TEST_CASE("parse: the copy-only and in-place migrators are distinct modes", "[cli]") {
+    REQUIRE(parse({QStringLiteral("--check-migrations"), QStringLiteral("/tmp/c.db")}).mode
+            == Mode::CheckMigrations);
+    REQUIRE(parse({QStringLiteral("--apply-migrations")}).mode == Mode::ApplyMigrations);
 }
 
 TEST_CASE("parse: --check-migrations carries its db path", "[cli]") {
