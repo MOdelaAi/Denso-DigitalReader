@@ -283,7 +283,8 @@ after adding or replacing an ONNX**. On Linux nothing is copied at build time; t
 operator places the engine + sidecar in the data dir's `models/`.
 
 `packaging/models.approved` approves deployable `.engine` + `.names.json` pairs by
-SHA-256, and `tools/build_package.sh --model` refuses anything not listed.
+SHA-256, and `tools/build_package.sh` refuses anything not listed — whichever
+selector you use, `--models-dir` or `--model`.
 
 ## Run from source
 
@@ -369,6 +370,67 @@ so the count differs between Windows and Linux.
 Testing on the real target: connection details, credentials and the
 platform/toolchain versions live in `d:\workspace\devices.md`, the shared device
 registry outside this repo.
+
+## Manual upgrade — the short version
+
+Denso is an **embedded appliance updated manually by an administrator**. There is
+**no automatic updater**. To upgrade an appliance that already has Denso
+installed:
+
+```bash
+# 1. Stop Denso.
+
+# 2. Confirm it really stopped — TRI-STATE, only rc 1 is safe to continue:
+denso-digitalreader --check-running     # 1 = stopped  (0 = running, 4 = cannot tell)
+
+# 3. Run the release preflight guard against the .deb it was generated for:
+sudo ./preflight-denso-<version>.sh ./denso-digitalreader_<version>_arm64.deb
+
+# 4. Install — this performs the upgrade in place:
+sudo apt install ./denso-digitalreader_<version>_arm64.deb
+
+# 5. The installer automatically takes a verified pre-migration backup and runs
+#    the forward migration if the schema needs one. Nothing to do by hand.
+
+# 6. Verify:
+denso-digitalreader --check             # 0 Ready, 10 Degraded-serviceable
+
+# 7. Start Denso through the existing launch mechanism (the menu entry, or
+#    /usr/bin/denso-digitalreader).
+```
+
+What to know before you run it:
+
+- **No uninstall is needed.** Do not `apt remove` the old package first — upgrade
+  in place.
+- **Your database is preserved.** dpkg never touches `/opt/denso/data`.
+- **The migration backup is automatic** whenever a schema migration is required:
+  `/opt/denso/data/denso.db.pre-v<schema>`, created *and verified* before
+  anything writes to the live database.
+- **If migration or integrity verification fails, package configuration fails and
+  Denso stays stopped.** That is deliberate. The message names the backup path.
+  Fix the cause, then `sudo dpkg --configure -a` — it reuses the same backup
+  rather than overwriting it.
+- **Recovery is manual.** Nothing is ever restored or rolled back automatically,
+  and no backup is ever deleted automatically.
+- **Never `apt purge`** if `/opt/denso/data` must be retained — purge deletes the
+  database, the operator's engines and every `denso.db.pre-v*` backup.
+- **Use `apt install`, never a bare `dpkg -i`** — `dpkg -i` does not resolve
+  dependencies.
+
+The rest of this section covers building the package and the full first-install
+procedure.
+
+> **Validated end to end** on the development/release-test Jetson (192.168.1.15,
+> 2026-08-07) with package `0.1.0+r443.gf8520bf` from source
+> `f8520bf7f6af949a148c925c0a217f2774c19421`: `apt install` upgrade from
+> `0.1.0+r437.gf6ab501` → automatic pre-migration backup → schema **v15 → v16** →
+> backup integrity ok → production integrity ok → `denso --check` **READY / rc 0**
+> → application launched successfully on the migrated database. Also verified: the
+> complete three-model / six-file payload, both modes' compatibility at runtime,
+> and a real-root + real-`runuser` gate rehearsal on synthetic data (35/35).
+> This is validation history — always install the version you actually have, not
+> this one.
 
 ## Build and deploy the Debian package
 

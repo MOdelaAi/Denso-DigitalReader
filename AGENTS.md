@@ -199,12 +199,75 @@ Catch2 v3 is fetched at first configure (needs net once).
 ## Deployment — SHIPPED (`.deb`)
 
 Built **on an aarch64 Jetson** (no cross-toolchain; engines are `sm_87`/TRT 10.3
-pinned). `tools/build_package.sh --model models/digitv3.engine` → `dist/`.
+pinned). Release build: **`tools/build_package.sh --models-dir models`** → `dist/`.
 Install: `sudo ./dist/preflight-denso-<ver>.sh <deb>` (bound to that exact `.deb`
 by SHA-256; guards the JetPack stack) → `sudo apt install --no-install-recommends
 ./dist/<deb>` → `sudo denso-setup configure --user <u>` → `sudo denso-setup verify`
 (`cmd_verify` calls `need_root`; a non-sudo `verify` cannot work).
 **Never `dpkg -i`** — no dependency resolution.
+
+### The deployment model — read this before proposing anything
+
+Denso Digital Reader is an **embedded appliance application**. Software updates
+are **administrator-managed MANUAL `.deb` upgrades**. **There is no automatic
+updater, and none is wanted.** The lifecycle is:
+
+```
+development → tests → clean commit → clean .deb build → remote maintenance
+→ stop Denso → preflight → sudo apt install ./new.deb → verify → start Denso
+```
+
+Do **not** propose or recreate a transactional automatic-update architecture, an
+auto-rollback mechanism, or unattended crash recovery. Those were considered and
+deliberately rejected; recovery is manual and explicit by design.
+
+**Upgrading.** Use `sudo apt install ./denso-digitalreader_<version>_arm64.deb`.
+Do **not** remove the old package first, do **not** use `dpkg -i` as the normal
+workflow, and do **not** use `apt purge` when operator data must be preserved.
+The `.deb` replaces application/package files while preserving operator data.
+
+**Persistent data.** Operator data lives under `/opt/denso/data`; the primary
+database is `/opt/denso/data/denso.db`. The package must **never own** the
+production database, its WAL/SHM, or generated migration backups — re-verify that
+after any packaging change. Every database operation runs **as the recorded
+target user (`modela`), never as root**: a root-owned WAL/SHM/lock file in an
+operator-owned data dir is the documented way this appliance breaks (`prerm` then
+sees `--check-running` return 4 forever).
+
+**Forward-only migration.** `postinst` runs the shared gate in
+`packaging/lib/policy.sh` (`db_upgrade_gate`), which: confirms Denso is stopped
+(tri-state — only rc 1 proceeds); classifies the schema; **refuses a database
+newer than the binary**; creates **one verified** pre-migration backup
+(`denso.db.pre-v<schema>`) when migration is required; reuses that same backup on
+`dpkg --configure -a` retries instead of overwriting it; calls the narrow
+`--apply-migrations` primitive; re-checks that the database survived and that its
+schema did not regress; then runs `denso --check`, accepting **0 Ready** and **10
+Degraded**, refusing **78 Blocked** and any unmodelled code. Denso is left
+**stopped** after installation. **No automatic rollback. Recovery is manual.**
+
+**Migration primitives — do not confuse them.**
+`--check-migrations <path>` is **COPY-ONLY**. Never document or run it against
+the live production database. `--apply-migrations` is the narrow production entry
+point: it takes **no** database path and operates on the primary database
+resolved from `DENSO_DATA_DIR`, so it cannot be aimed elsewhere by a typo.
+
+**Models.** The canonical package contains exactly six files —
+`digitv3.engine`/`.names.json`, `float-small.engine`/`.names.json`,
+`float-big.engine`/`.names.json`. Production packaging is **TensorRT `.engine`
+only**; never require or package `.pt` or `.onnx`. Compatibility is fixed by the
+registry in `src/core/models/compatibility.cpp`: Digital Number Reader accepts
+**digitv3 only**; Floating Ball Leveler accepts **float-small and float-big
+only**; neither mode is offered the other's models. The canonical build input is
+the **repository** `models/` directory — never the installed `/opt/denso/models`.
+
+**Building.** A release candidate is built from a **clean commit**; never
+`--allow-dirty` for a release artifact. `--models-dir` fails the build if the
+canonical set is incomplete or an unexpected model artifact is present.
+
+**Target safety.** `192.168.1.15` is the validated development/release-test
+Jetson. **`192.168.1.81` must not be accessed unless the operator explicitly
+authorizes it.** Do not revive the abandoned EXEC-SPEC / Revision-6.x exercise
+unless explicitly asked.
 
 To install on **another compatible, validated appliance** — not merely any box
 that is not the build host; see the engine-compatibility note below — move the
@@ -233,9 +296,10 @@ MANIFEST's `ldd` output** — that one alone re-randomized the .deb on every
 build and is invisible, since only the hex changes.
 
 **Testing this tree** — it is shell, so **`ctest` does not cover it**:
-`tests/packaging/run.sh` (216 assertions natively on the Jetson; the file-mode
+`tests/packaging/run.sh` (312 assertions natively on the Jetson; the file-mode
 ones are Linux-only and skip elsewhere) is the harness to run for *any* packaging
-change, and `tests/manual/repro_build.sh <engine>...` is the Jetson-only
+change — it covers the upgrade gate, `denso-db-helper` and the canonical model
+set end to end — and `tests/manual/repro_build.sh <engine>...` is the Jetson-only
 reproducibility gate (19). The latter must run **exclusively**: it refuses a dirty tree, then makes and
 reverts its own edits to `packaging/lib/policy.sh`, so a concurrent edit to that
 file is discarded by its restore. Design rationale for all of the above is
@@ -250,7 +314,25 @@ the stable public command; it exports `DENSO_DATA_DIR`) · `/usr/bin/denso-setup
 `apt purge` removes it. Bundle + reproducibility gated natively 2026-07-21
 (packaging 130/130, repro 19/19, ctest 485/485).
 
-**Second-appliance bundle install verified** (192.168.1.81, 2026-07-21) — the
+**Manual upgrade workflow verified end to end** (192.168.1.15, 2026-08-07) with
+package `0.1.0+r443.gf8520bf` from source `f8520bf7f6af949a148c925c0a217f2774c19421`:
+`apt install` upgrade from `0.1.0+r437.gf6ab501` → automatic pre-migration backup
+→ schema **v15 → v16** → backup integrity ok → production integrity ok →
+`denso --check` **READY / rc 0** → application launched successfully on the
+migrated database. Also verified: the complete three-model / six-file payload,
+Digital and Floating mode compatibility observed at runtime (each mode's warmup
+loads its own models and logs `not permitted by the compatibility policy` for the
+other's), and a real-root + real-`runuser` gate rehearsal on synthetic data
+(**35/35**). This is **validation history** — do not hardcode this version into
+operational commands.
+
+**Second-appliance bundle install verified** — HISTORICAL RECORD ONLY.
+> `192.168.1.81` is **not** an authorized target. Do not connect to it, deploy to
+> it, or test against it unless the operator explicitly authorizes that host in
+> the current task. The paragraph below records what was proven there once, in
+> 2026-07-21; it is not standing permission.
+
+(192.168.1.81, 2026-07-21) — the
 first time the `.deb` was ever installed on a box that did not build it. Exact
 sequence that passed: transfer + `tar xzf` → `sha256sum -c SHA256SUMS` (both
 entries OK) → `sudo ./preflight-denso-<ver>.sh ./<deb>` → **PASS** → `sudo apt

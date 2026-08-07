@@ -165,7 +165,8 @@ under a `QCoreApplication`, so none needs a display. They are the gates the
 | `--version` | prints `APP_VERSION`; takes no lock; no mutation |
 | `--check [--engine <file>]...` | validates the data dir + every model the DB references **and** each `--engine` named; **tri-state** exit (`0`/`10`/`78`, below); does not mutate the primary database or app-managed state — see the ownership caveat below |
 | `--check-running` | liveness; **the sole mode that takes the lock** — answering requires `tryLock` |
-| `--check-migrations <db-path>` | runs the migration chain against **that path only** |
+| `--check-migrations <db-path>` | runs the migration chain against **that path only** — a throwaway **COPY**. Not read-only despite the name, and it *creates* a missing file, so a mistyped path yields a new empty database that migrates cleanly and reports ok. Never aim it at the live database. |
+| `--apply-migrations` | the **one production migration primitive**: migrates the primary database resolved from `DENSO_DATA_DIR`, in place. Takes **no path**, so it cannot be aimed elsewhere by a typo in a maintainer script and cannot conjure an empty database. Runs the read-only schema classifier *first*, so a DB written by a **newer** build is refused with **78** before the chain opens it for writing. Never rolls back. Exit **0** = at the supported schema (migrated, already current, or absent); **78** = blocked. |
 
 Exit codes (Slice 2's maintainer scripts depend on these): **0** ok — and for
 `--check-running`, *an instance is running*; **1** generic failure — and for
@@ -218,17 +219,116 @@ cameras, so it legitimately requires no engines) and is never created; a
 `attached_model_filenames` returns `{}` for both, which would let a corrupt
 database pass as a fresh install.
 
+## Upgrade architecture (manual `.deb`)
+
+Denso is an embedded appliance updated by an **administrator**, manually. There
+is **no automatic updater**.
+
+### Two ownership domains
+
+The whole design rests on one split, and dpkg respects it:
+
+| Domain | Paths | Owner | Lifecycle |
+|---|---|---|---|
+| **Package-owned / immutable application content** | `/opt/denso/bin`, `/opt/denso/lib`, `/opt/denso/models` | `root:root` | **Replaced** by the `.deb` on every upgrade |
+| **Operator data** | `/opt/denso/data` (`denso.db`, WAL/SHM, `denso.log`, `models/`, `denso.lock`, `denso.db.pre-v*`) | `modela` | **Persists** across normal package upgrades and `apt remove` |
+
+The package **does not own the operator database**, its WAL/SHM, or generated
+migration backups — dpkg never touches `/opt/denso/data`. That is precisely why
+mutable state lives there and not beside the root-owned, upgrade-replaced binary,
+and why `DENSO_DATA_DIR` exists.
+
+### Upgrade flow
+
+```
+Admin maintenance
+    ↓
+Denso stopped
+    ↓
+APT/dpkg package replacement
+    ↓
+postinst shared DB gate  (packaging/lib/policy.sh :: db_upgrade_gate)
+    ↓
+schema classification
+    ↓
+verified backup if migration required   (denso.db.pre-v<schema>)
+    ↓
+--apply-migrations
+    ↓
+integrity / runtime checks              (denso --check)
+    ↓
+application left stopped
+    ↓
+admin launches application
+```
+
+### Invariants
+
+- **Forward-only.** A database written by a *newer* build is refused before the
+  chain opens it for writing. Downgrades are not supported.
+- **Fail-closed.** `postinst` exits **non-zero** on a failed backup, migration or
+  integrity check — deliberately reversing its own older "structural only, never
+  fail" rule. dpkg then leaves the package unconfigured, which is the intended,
+  visible manual-recovery gate; `dpkg --configure -a` retries it.
+- **Manual recovery.** Nothing is ever automatically restored, and no backup is
+  ever automatically deleted or pruned. The halt message names the backup path.
+- **No automatic updater. No automatic rollback.**
+- **The package does not own the operator database.**
+- **`purge` is destructive to operator data by Debian package policy.**
+  `postrm purge` runs `rm -rf /opt/denso/data` — deleting the database, the
+  operator's engines and every `denso.db.pre-v*` recovery point — behind a
+  `readlink -f` guard that refuses if the path does not resolve to exactly
+  itself. `remove` and `upgrade` delete nothing.
+- **Never as root.** Every database operation runs through
+  `runuser -u <recorded-user> --`. Opening a WAL database creates `-wal`/`-shm`
+  beside it and `--check` writes a probe file into the data dir; a root-owned
+  artifact in an operator-owned data dir is the documented failure mode (`prerm`
+  then reads `--check-running` as 4 — "cannot determine" — forever).
+- **Backup naming is deterministic** (`denso.db.pre-v<schema>`, no timestamp) so
+  a `dpkg --configure -a` retry finds and *keeps* the existing recovery point
+  instead of overwriting it with a copy of the half-migrated database. It also
+  bounds the backup count by schema version, which is what makes "no automatic
+  pruning" safe to promise.
+
+`packaging/denso-db-helper` performs the backup and the `user_version` /
+`integrity_check` reads using the **Python 3 standard-library `sqlite3` module**
+— `Connection.backup()`, the SQLite online backup API, which is consistent under
+WAL. It is deliberately not a copy of `denso.db`/`-wal`/`-shm`, and deliberately
+not the `sqlite3` CLI: that CLI is absent from the Jetson image, and depending on
+it would put an apt fetch in the middle of an offline `.deb` upgrade.
+
+### Operating modes and model payload
+
+The package ships the canonical **six-file** model set — `digitv3`,
+`float-small`, `float-big`, each `.engine` plus its `.names.json` sidecar.
+Production packaging is TensorRT-engine only; no `.pt` or `.onnx` is required or
+shipped.
+
+| Mode | Models | Family |
+|---|---|---|
+| Digital Number Reader | `digitv3` only | `digit_numeric` |
+| Floating Ball Leveler | `float-small`, `float-big` only | `float_ball` |
+
+Carrying all three models does not let either mode load the wrong one: the
+`canonical_id → family → allowed modes` registry in
+`src/core/models/compatibility.cpp` is the sole grantor of authority, a
+`static_assert` forbids any family from being allowed in both modes, and the
+manifest never states privileges — so an operator edit under the models
+directory cannot widen what a model may do. At runtime the warmup logs
+`skipping <engine> (not permitted by the compatibility policy in the current
+mode)` for the other mode's models.
+
 ## Packaging & ship pipeline (`packaging/`, `tools/`)
 
 Not CMake targets: POSIX shell, so they are proven by their own harnesses rather
-than ctest — `tests/packaging/run.sh` (216 assertions natively on the Jetson; the
+than ctest — `tests/packaging/run.sh` (312 assertions natively on the Jetson; the
 file-mode ones are Linux-only and skip elsewhere) and, Jetson-only,
 `tests/manual/repro_build.sh` (19). AGENTS.md holds the operator runbook and the derived-dependency rules;
 README.md holds the copy-paste install. This section is the *why*.
 
 | Path | Role |
 |---|---|
-| `tools/build_package.sh` | The whole build. Refuses a non-aarch64 host outright and a dirty tree unless `--allow-dirty`, stages `/opt/denso`, derives deps via `dpkg-shlibdeps`, emits `dist/` = `<deb>` + `<deb>.sha256` + `preflight-denso-<ver>.sh` + `<name>.tar.gz`. |
+| `tools/build_package.sh` | The whole build. Release invocation is `--models-dir <repo-models-dir>`, which requires **exactly** the canonical six-file set in reviewed manifest order and refuses a missing engine, a missing sidecar, an unexpected fourth engine or any `.pt`/`.onnx` (`resolve_models_dir` in `policy.sh`, so the rule is testable off-Jetson). `--model` remains for one-off/diagnostic builds and is mutually exclusive with it. Refuses a non-aarch64 host outright and a dirty tree unless `--allow-dirty` — never use `--allow-dirty` for a release artifact. Stages `/opt/denso`, derives deps via `dpkg-shlibdeps`, emits `dist/` = `<deb>` + `<deb>.sha256` + `preflight-denso-<ver>.sh` + `<name>.tar.gz`. |
 | `packaging/lib/policy.sh` | The ONE definition of "would this transaction damage the JetPack stack?" (`apt_plan_ok`). |
 | `packaging/lib/gen_preflight.sh` | Emits the standalone preflight guard. |
 | `packaging/lib/gen_bundle.sh` | Emits the transport bundle. |

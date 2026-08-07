@@ -76,8 +76,8 @@ Two trees sit **outside** the CMake graph and so outside `ctest`:
 
 | Path | Role |
 |---|---|
-| `packaging/`, `tools/` | The POSIX-shell `.deb` ship pipeline: `tools/build_package.sh` (the whole build), `packaging/lib/` (`policy.sh` = the one JetPack-damage rule + the `gen_preflight.sh`/`gen_bundle.sh` emitters), `packaging/denso-setup`, `packaging/debian/`. |
-| `tests/packaging/`, `tests/manual/` | Their harnesses: `run.sh` (216 assertions natively on the Jetson; the file-mode ones are Linux-only and skip elsewhere) and the Jetson-only `repro_build.sh` (19 — proves clean builds are byte-reproducible). |
+| `packaging/`, `tools/` | The POSIX-shell `.deb` ship pipeline: `tools/build_package.sh` (the whole build), `packaging/lib/` (`policy.sh` = the JetPack-damage rule, the forward-only **`db_upgrade_gate`**, the canonical-model-set rule + the `gen_preflight.sh`/`gen_bundle.sh`/`gen_payload.sh` emitters), `packaging/denso-db-helper` (Python 3 stdlib `sqlite3`: online backup / `user_version` / `integrity_check` — **no `sqlite3` CLI dependency**), `packaging/denso-setup`, `packaging/debian/`. |
+| `tests/packaging/`, `tests/manual/` | Their harnesses: `run.sh` (312 assertions natively on the Jetson; the file-mode ones are Linux-only and skip elsewhere) and the Jetson-only `repro_build.sh` (19 — proves clean builds are byte-reproducible). |
 
 Run `tests/packaging/run.sh` for any packaging change — a green `ctest` says
 nothing about that tree. See **Packaging & ship pipeline** in
@@ -276,6 +276,52 @@ touching anything below. The rules, condensed:
   `camera_area`, and asks only for its one Float engine. Still deliberately
   absent (Lean V1): `HoldingLastValid`, the status-file `level` array, backend
   level reporting, historical persistence.
+
+## Deployment model — manual `.deb` upgrades
+
+This is an **embedded appliance**. Updates are **administrator-managed MANUAL
+`.deb` upgrades**; there is **no automatic updater and none is wanted**:
+
+```
+development → tests → clean commit → clean .deb build → remote maintenance
+→ stop Denso → preflight → sudo apt install ./new.deb → verify → start Denso
+```
+
+**Do not propose or recreate** a transactional automatic-update architecture,
+automatic rollback, or unattended crash recovery. They were considered and
+deliberately rejected — recovery is manual and explicit.
+
+- **Upgrade with `sudo apt install ./denso-digitalreader_<version>_arm64.deb`.**
+  Never remove the old package first, never make `dpkg -i` the normal workflow,
+  never `apt purge` when operator data must survive. The `.deb` replaces
+  application files and preserves operator data.
+- **Operator data is `/opt/denso/data`** (primary DB `denso.db`). The package
+  **must not own** the database, its WAL/SHM, or generated migration backups.
+  Database files are operated **as `modela`, never as root** — a root-owned
+  WAL/SHM/lock in an operator-owned data dir is how this appliance breaks.
+- **Migration is forward-only and fail-closed.** `postinst` runs
+  `db_upgrade_gate` (`packaging/lib/policy.sh`): confirm stopped → classify
+  schema → refuse a DB newer than the binary → one verified pre-migration backup
+  (`denso.db.pre-v<schema>`, reused on `dpkg --configure -a` retries, never
+  overwritten) → `--apply-migrations` → verify schema/integrity → `denso --check`
+  (accept **0** Ready and **10** Degraded; refuse **78** Blocked and anything
+  unmodelled) → leave Denso **stopped**. No automatic rollback.
+- **`--check-migrations` is COPY-ONLY** — never document or run it against the
+  live production database. **`--apply-migrations`** is the narrow production
+  entry point; it takes no path and resolves the primary DB from
+  `DENSO_DATA_DIR`.
+- **Six canonical model files**, TensorRT `.engine` only (never `.pt`/`.onnx`):
+  `digitv3`, `float-small`, `float-big` — each `.engine` + `.names.json`. Digital
+  Number Reader accepts **digitv3 only**; Floating Ball Leveler accepts
+  **float-small and float-big only**. Never offer a model across modes.
+- **Release build:** `tools/build_package.sh --models-dir models` from a **clean
+  commit**; never `--allow-dirty` for a release artifact. The canonical input is
+  the **repository** `models/` dir, never the installed `/opt/denso/models`. The
+  build fails if the set is incomplete or an unexpected model artifact appears.
+- **`192.168.1.15`** is the validated development/release-test Jetson.
+  **`192.168.1.81` must not be accessed** unless the operator explicitly
+  authorizes it in the current task. Do not revive the abandoned EXEC-SPEC /
+  Revision-6.x exercise unless explicitly asked.
 
 ## Hard rules
 
