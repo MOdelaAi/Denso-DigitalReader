@@ -22,6 +22,12 @@ set -e
 
 DATA=/opt/denso/data
 STATE=/opt/denso/install-state
+# The packaged (read-only, dpkg-owned) side of the model store. Same values as
+# denso-setup's PKG_MODELS/PKG_MANIFEST; both feed seed_manifest_decide.
+PKG_MODELS=/opt/denso/models
+PKG_MANIFEST=/opt/denso/lib/manifest.json
+# "a fresh install started here and never finished" — see install_branch.
+PENDING="$STATE/fresh-install-pending"
 DB="$DATA/denso.db"
 DENSO=/opt/denso/bin/denso
 POLICY=/opt/denso/lib/policy.sh
@@ -40,15 +46,19 @@ case "$1" in
     # (wrong — should be `id -gn`), and swallowed failure with `|| true`.
     # `denso-setup configure` owns initial ownership and repair instead.
 
-    # EXISTING vs FRESH is decided by $STATE/user FIRST, and only then by the
-    # database. They answer different questions: an install that was configured
-    # but never launched has a recorded user and no database yet, and treating
-    # that as "fresh" would re-run the operator resolution and could hand the
-    # appliance to a different administrator. A database with no recorded user
-    # is the other anomaly, handled below.
-    if [ -r "$STATE/user" ] || [ -e "$DB" ]; then
-        . "$POLICY"
-
+    # EXISTING vs FRESH is decided by the recorded user FIRST, and only then by
+    # the database. They answer different questions: an install that was
+    # configured but never launched has a recorded user and no database yet, and
+    # treating that as "fresh" would re-run the operator resolution and could
+    # hand the appliance to a different administrator. A database with no
+    # recorded user is the other anomaly, handled below.
+    #
+    # The third input is the fresh-install-pending marker, and it OVERRIDES both:
+    # a fresh install that failed after configure recorded the user must resume
+    # the fresh path on retry, not be laundered into an upgrade. The decision
+    # itself lives in policy.sh, where the suite drives it directly.
+    . "$POLICY"
+    if [ "$(install_branch "$STATE/user" "$DB" "$PENDING")" = "upgrade" ]; then
         # Which account owns the data. Every database operation runs as this
         # user, never as root — see db_upgrade_gate's `runner` parameter.
         if [ -r "$STATE/user" ]; then
@@ -118,10 +128,15 @@ case "$1" in
         # A normal install must complete with `sudo apt install ./x.deb` alone,
         # so everything the operator used to run by hand happens here.
         #
-        # Discriminated on $STATE/user (checked above), NOT on $DB: "has a
+        # Discriminated by install_branch (above), NOT on $DB alone: "has a
         # database" and "is configured" are different questions, and an install
         # that was configured but never started has no database yet.
-        . "$POLICY"
+        #
+        # Mark the fresh install IN PROGRESS before anything durable is written.
+        # Everything below - the recorded user, the data-dir ownership, the model
+        # pairs, the enable symlink - outlives a failure, and $STATE/user alone
+        # would make the next invocation believe this box was already configured.
+        : > "$PENDING" || { echo "denso: cannot write $PENDING" >&2; exit 1; }
 
         # Local, ACTIVE, NON-REMOTE sessions belonging to a real user. Each
         # filter earns its place on this appliance: Class=user drops the GDM
@@ -140,8 +155,15 @@ case "$1" in
             done
         fi
 
+        # The recorded user is passed FIRST so a retry of an unfinished fresh
+        # install resolves to the account this box was already configured for.
+        # `dpkg --configure -a` runs with no SUDO_USER and no session of its own,
+        # so without this a retry could not resolve an operator at all. An
+        # invalid recorded user still hard-fails inside resolve_operator_user -
+        # it never falls through to whoever ran sudo.
+        recorded="$(cat "$STATE/user" 2>/dev/null || true)"
         # shellcheck disable=SC2086
-        if ! resolved="$(resolve_operator_user /etc/passwd "" "${SUDO_USER-}" $sessions)"; then
+        if ! resolved="$(resolve_operator_user /etc/passwd "$recorded" "${SUDO_USER-}" $sessions)"; then
             echo "denso: INSTALLATION HALTED: no operator user could be determined." >&2
             echo "denso: Denso will not install itself against root or a guessed account." >&2
             echo "denso: Re-run as 'sudo apt install ./<deb>' from the operator's own" >&2
@@ -167,6 +189,43 @@ case "$1" in
             exit 1
         fi
 
+        # ── manifest seeding ───────────────────────────────────────────
+        # `configure` has just placed the packaged engine+sidecar pairs. Without
+        # manifest.json BESIDE them every artifact reads back as
+        # `model_undeclared`: the camera wizard offers nothing, `--check` reports
+        # DEGRADED, and the install still looks successful. That combination
+        # shipped, and cost an appliance its first hour.
+        #
+        # Scoped to THIS branch deliberately. The "operator-invoked only" rule
+        # (denso-setup, cmd_seed_manifest) exists so package-delivered
+        # enforcement cannot declare artifacts an OPERATOR placed. On a fresh
+        # install there is no operator history to respect - this same run seeded
+        # those exact bytes from this same package - and seed_manifest_decide
+        # still refuses independently the moment anything in the data dir is not
+        # the packaged artifact. Upgrades are untouched and still require an
+        # explicit `sudo denso-setup seed-manifest`.
+        fail=""
+        set +e
+        sm_decision="$(seed_manifest_decide "$PKG_MANIFEST" "$PKG_MODELS" \
+                                            "$DATA/models" "$DATA/models/manifest.json")"
+        set -e
+        case "$(fresh_seed_action "$sm_decision")" in
+            act)
+                denso-setup seed-manifest \
+                    || fail="$fail\n  seeding $DATA/models/manifest.json failed (decision '$sm_decision')" ;;
+            warn)
+                # Refusing to seed is the CORRECT outcome here, so this is not a
+                # failure - but it is not silence either: the box boots with
+                # undeclared models and the operator has to know why.
+                echo "denso: NOTE  models/manifest.json was NOT seeded ($sm_decision)." >&2
+                echo "denso:       An artifact in $DATA/models is not the packaged one, so the" >&2
+                echo "denso:       packaged manifest would misdescribe it. Nothing was overwritten." >&2
+                echo "denso:       Models stay undeclared until you resolve that and run:" >&2
+                echo "denso:         sudo denso-setup seed-manifest" >&2 ;;
+            *)
+                fail="$fail\n  the packaged model manifest is unusable ($sm_decision)" ;;
+        esac
+
         # ── setup verification ───────────────────────────────────────────────
         # Deliberately NOT `denso-setup verify`: that asserts L4T/TensorRT/CUDA
         # versions, probes GStreamer elements and deep-loads every engine. Those
@@ -174,7 +233,6 @@ case "$1" in
         # them would reject a correctly-installed package for reasons that have
         # nothing to do with whether setup completed. What is checked here is
         # exactly "did setup complete", plus the app's own health verdict.
-        fail=""
         [ "$(cat "$STATE/user" 2>/dev/null || true)" = "$user" ] \
             || fail="$fail\n  the operator user was not recorded in $STATE/user"
         [ "$(stat -c %U "$DATA" 2>/dev/null || true)" = "$user" ] \
@@ -211,6 +269,16 @@ case "$1" in
             exit 1
         fi
 
+        # Verified. Clearing the marker is what makes this install "finished":
+        # until this line runs, every retry resumes the fresh path. It is
+        # deliberately AFTER the $fail gate above and BEFORE the success banner,
+        # so no path can announce success with the marker still present.
+        rm -f "$PENDING" || {
+            echo "denso: INSTALLATION HALTED: cannot clear $PENDING" >&2
+            echo "denso: After fixing the cause, re-run: sudo dpkg --configure -a" >&2
+            exit 1
+        }
+
         # A fresh install is already on the systemd architecture, so record the
         # migration as done. Without this, the NEXT upgrade would run the legacy
         # migration, find no XDG entry, and log a misleading
@@ -221,8 +289,11 @@ case "$1" in
         echo "denso: operator user: $user"
         echo "denso: autostart: enabled"
         echo "denso: autologin: unchanged"
-        [ "$verdict" = "degraded" ] && \
-            echo "denso: health: DEGRADED (serviceable) — run 'sudo denso-setup verify' for detail."
+        if [ "$verdict" = "degraded" ]; then
+            echo "denso: health: DEGRADED (serviceable) — at least one model is not usable."
+            echo "denso:   'sudo denso-setup verify' says which. If models report"
+            echo "denso:   model_undeclared, run 'sudo denso-setup seed-manifest'."
+        fi
         case "$rule" in
             sudo_user) : ;;
             session)   echo "denso: (operator resolved from the active local session)" ;;

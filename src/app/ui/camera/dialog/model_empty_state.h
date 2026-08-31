@@ -41,8 +41,16 @@ struct RejectedModelNote {
 /// The returned text always contains the raw reason code(s), because those are a
 /// stable, greppable file-format-grade vocabulary shared with status.json: the
 /// operator quotes them and the log confirms them.
+/// `manifest_declares_nothing` is the ManifestView's own answer to "did any
+/// manifest load at all" (no generations — absent, or unparseable and collapsed
+/// to empty). It gates the seeding remedy and nothing else. It is NOT a
+/// compatibility input: a reason code says a model was refused, this says whether
+/// installing the packaged manifest could possibly change that. A manifest that
+/// loaded and simply does not cover one artifact is a different fault, and
+/// seed-manifest would correctly refuse to "fix" it.
 QString model_empty_state_text(denso::mode::TargetMode mode,
-                               const std::vector<RejectedModelNote>& rejected);
+                               const std::vector<RejectedModelNote>& rejected,
+                               bool manifest_declares_nothing);
 
 /// The one-line operator explanation for a single stable reason code. Exposed for
 /// tests and for reuse anywhere a single model's refusal is reported. An

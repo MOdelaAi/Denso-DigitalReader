@@ -48,7 +48,8 @@ QString model_reason_text(const std::string& reason_code) {
 }
 
 QString model_empty_state_text(denso::mode::TargetMode mode,
-                               const std::vector<RejectedModelNote>& rejected) {
+                               const std::vector<RejectedModelNote>& rejected,
+                               bool manifest_declares_nothing) {
     const QString mode_name = mode_label(mode);
 
     if (rejected.empty()) {
@@ -73,14 +74,45 @@ QString model_empty_state_text(denso::mode::TargetMode mode,
     // Lead with the mode, because that is the question the operator is actually
     // asking, then give the per-model reason. The count is stated so a truncated
     // or scrolled list cannot read as the whole story.
-    return QStringLiteral(
-               "No compatible models for %1.\n\n"
-               "%2 model%3 in the catalog %4 not selectable here:\n%5")
-        .arg(mode_name)
-        .arg(rejected.size())
-        .arg(rejected.size() == 1 ? QString() : QStringLiteral("s"),
-             rejected.size() == 1 ? QStringLiteral("is") : QStringLiteral("are"),
-             lines.join(QStringLiteral("\n")));
+    QString text =
+        QStringLiteral(
+            "No compatible models for %1.\n\n"
+            "%2 model%3 in the catalog %4 not selectable here:\n%5")
+            .arg(mode_name)
+            .arg(rejected.size())
+            .arg(rejected.size() == 1 ? QString() : QStringLiteral("s"),
+                 rejected.size() == 1 ? QStringLiteral("is") : QStringLiteral("are"),
+                 lines.join(QStringLiteral("\n")));
+
+    // A remedy, under TWO conditions that are both necessary.
+    //
+    // `model_undeclared` alone is NOT enough, and assuming it was is a mistake
+    // this comment exists to prevent. That code means "the manifest does not
+    // cover this artifact", which includes a perfectly good manifest that simply
+    // does not describe an engine the operator put there themselves. Seeding
+    // cannot help that box: seed-manifest inspects the same state and refuses,
+    // so recommending it would hand the operator a command that fails - the
+    // broken remedy this is meant to avoid, arrived at from the other direction.
+    //
+    // The second condition is the manifest's own emptiness, which is the state
+    // seeding actually fixes and the one that shipped: engines present, no
+    // manifest beside them, every row undeclared.
+    //
+    // Still no compatibility knowledge here: one input is a reason code the
+    // policy handed us, the other is a fact about the manifest the caller read.
+    const bool any_undeclared =
+        std::any_of(rejected.begin(), rejected.end(), [](const RejectedModelNote& r) {
+            return r.reason_code == "model_undeclared";
+        });
+    if (any_undeclared && manifest_declares_nothing) {
+        text += QStringLiteral(
+            "\n\nA model is declared by the manifest stored beside it. If the "
+            "manifest was never installed, an administrator can place the "
+            "packaged one on the appliance with:\n"
+            "  sudo denso-setup seed-manifest");
+    }
+
+    return text;
 }
 
 }  // namespace denso::ui

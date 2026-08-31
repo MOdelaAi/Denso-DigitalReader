@@ -42,7 +42,7 @@ RejectedModelNote note(const char* display, const char* code) {
 
 TEST_CASE("an empty catalog reports an empty catalog, not a mode problem",
           "[model_empty_state]") {
-    const QString t = model_empty_state_text(TargetMode::DigitReader, {});
+    const QString t = model_empty_state_text(TargetMode::DigitReader, {}, true);
     REQUIRE_FALSE(t.isEmpty());
     CHECK(t.contains(QStringLiteral("No detection models are installed")));
     CHECK(t.contains(QStringLiteral("digit_reader")));
@@ -54,7 +54,7 @@ TEST_CASE("an empty catalog reports an empty catalog, not a mode problem",
 TEST_CASE("a missing manifest is reported as model_undeclared, verbatim",
           "[model_empty_state]") {
     const QString t = model_empty_state_text(
-        TargetMode::DigitReader, {note("digitv3.engine (catalog #1)", "model_undeclared")});
+        TargetMode::DigitReader, {note("digitv3.engine (catalog #1)", "model_undeclared")}, true);
     CHECK(t.contains(QStringLiteral("No compatible models for digit_reader")));
     CHECK(t.contains(QStringLiteral("digitv3.engine (catalog #1)")));
     // The stable code itself must survive into the text: it is the token the
@@ -68,7 +68,8 @@ TEST_CASE("a provenance failure is reported as provenance, not as a mode fault",
     const QString t = model_empty_state_text(
         TargetMode::BallLeveler,
         {note("float-small.engine (catalog #2)", "model_provenance_failed"),
-         note("float-big.engine (catalog #3)", "model_provenance_failed")});
+         note("float-big.engine (catalog #3)", "model_provenance_failed")},
+        false);
     CHECK(t.contains(QStringLiteral("ball_leveler")));
     CHECK(t.contains(QStringLiteral("model_provenance_failed")));
     CHECK(t.contains(QStringLiteral("float-small.engine (catalog #2)")));
@@ -83,7 +84,7 @@ TEST_CASE("a wrong-mode model says so, and names the mode it is refused in",
           "[model_empty_state]") {
     const QString t = model_empty_state_text(
         TargetMode::BallLeveler,
-        {note("digitv3.engine (catalog #1)", "model_mode_incompatible")});
+        {note("digitv3.engine (catalog #1)", "model_mode_incompatible")}, false);
     CHECK(t.contains(QStringLiteral("No compatible models for ball_leveler")));
     CHECK(t.contains(QStringLiteral("model_mode_incompatible")));
     CHECK(t.contains(QStringLiteral("not allowed in this operating mode")));
@@ -96,7 +97,8 @@ TEST_CASE("mixed reasons are reported per model, not collapsed to one cause",
     const QString t = model_empty_state_text(
         TargetMode::DigitReader,
         {note("float-small.engine (catalog #2)", "model_mode_incompatible"),
-         note("weird.engine (catalog #7)", "model_provenance_failed")});
+         note("weird.engine (catalog #7)", "model_provenance_failed")},
+        false);
     CHECK(t.contains(QStringLiteral("model_mode_incompatible")));
     CHECK(t.contains(QStringLiteral("model_provenance_failed")));
     CHECK(t.contains(QStringLiteral("2 models in the catalog are")));
@@ -109,8 +111,81 @@ TEST_CASE("an unrecognised reason code is passed through, never guessed at",
     CHECK(model_reason_text("model_something_new_2030") ==
           QStringLiteral("model_something_new_2030"));
     const QString t = model_empty_state_text(
-        TargetMode::DigitReader, {note("x.engine (catalog #9)", "model_something_new_2030")});
+        TargetMode::DigitReader,
+        {note("x.engine (catalog #9)", "model_something_new_2030")}, false);
     CHECK(t.contains(QStringLiteral("model_something_new_2030")));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The remedy line: offered for the one code it actually fixes, and no other.
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("an undeclared model with NO manifest names the command that seeds one",
+          "[model_empty_state]") {
+    // The incident this closes: a fresh appliance showed three undeclared models
+    // and no way to act on them. The message stated the fault and stopped.
+    const QString t = model_empty_state_text(
+        TargetMode::DigitReader,
+        {note("digitv3.engine (catalog #1)", "model_undeclared"),
+         note("float-big.engine (catalog #2)", "model_undeclared")},
+        /*manifest_declares_nothing=*/true);
+    CHECK(t.contains(QStringLiteral("sudo denso-setup seed-manifest")));
+    // The diagnosis must survive alongside the remedy, not be replaced by it.
+    CHECK(t.contains(QStringLiteral("model_undeclared")));
+}
+
+TEST_CASE("an undeclared model is NOT offered seeding when a manifest already loaded",
+          "[model_empty_state]") {
+    // The counterexample that matters: `model_undeclared` says "the manifest does
+    // not cover this artifact", which a perfectly good manifest also says about an
+    // engine the operator dropped in themselves. seed-manifest inspects the same
+    // state and REFUSES (data-artifact-orphan / target-differs), so recommending
+    // it here would hand the operator a command that deterministically fails.
+    const QString t = model_empty_state_text(
+        TargetMode::DigitReader,
+        {note("mine.engine (catalog #4)", "model_undeclared")},
+        /*manifest_declares_nothing=*/false);
+    CHECK(t.contains(QStringLiteral("model_undeclared")));
+    CHECK_FALSE(t.contains(QStringLiteral("seed-manifest")));
+}
+
+TEST_CASE("the remedy is offered for a MIXED list containing an undeclared model",
+          "[model_empty_state]") {
+    // One undeclared model against an empty manifest is enough: seeding is a
+    // real, correct action for that row even though it does nothing for the other.
+    const QString t = model_empty_state_text(
+        TargetMode::DigitReader,
+        {note("a.engine (catalog #1)", "model_provenance_failed"),
+         note("b.engine (catalog #2)", "model_undeclared")},
+        /*manifest_declares_nothing=*/true);
+    CHECK(t.contains(QStringLiteral("sudo denso-setup seed-manifest")));
+}
+
+TEST_CASE("the remedy is NOT offered for failures seeding cannot fix",
+          "[model_empty_state]") {
+    // seed-manifest would correctly refuse for each of these. Offered even with
+    // an empty manifest, the suggestion would still be wrong: none of these rows
+    // becomes selectable because a manifest arrived.
+    for (const char* code : {"model_provenance_failed", "model_mode_incompatible",
+                             "model_unknown_id", "model_family_mismatch",
+                             "model_shape_unsupported", "model_classes_mismatch"}) {
+        for (bool empty_manifest : {true, false}) {
+            const QString t = model_empty_state_text(
+                TargetMode::BallLeveler, {note("x.engine (catalog #1)", code)},
+                empty_manifest);
+            INFO("remedy wrongly offered for: " << code
+                 << " (manifest_declares_nothing=" << empty_manifest << ")");
+            CHECK_FALSE(t.contains(QStringLiteral("seed-manifest")));
+        }
+    }
+}
+
+TEST_CASE("an empty catalog is not offered the seeding remedy",
+          "[model_empty_state]") {
+    // Nothing to declare: there are no artifacts, so a manifest describing none
+    // of them changes nothing the operator can see.
+    const QString t = model_empty_state_text(TargetMode::DigitReader, {}, true);
+    CHECK_FALSE(t.contains(QStringLiteral("seed-manifest")));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -152,7 +152,12 @@ void ModelsPage::load_for(int64_t camera_id, denso::mode::TargetMode mode,
     // Never a blank page. When nothing is offered, say which mode this is and why
     // each catalog model was refused, in the policy's own stable reason codes.
     if (offered_.empty()) {
-        empty_state_->setText(model_empty_state_text(mode, rejected));
+        // The view's own answer, not a second guess: no generations means no
+        // manifest was loaded at all, which is the only state the seeding
+        // remedy can fix. A manifest that loaded and merely fails to cover an
+        // artifact is a different fault with a different remedy.
+        empty_state_->setText(model_empty_state_text(
+            mode, rejected, view.manifest().generations.empty()));
         empty_state_->show();
     } else {
         empty_state_->clear();

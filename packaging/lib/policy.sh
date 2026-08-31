@@ -883,6 +883,61 @@ seed_manifest_decide() (
     echo "seed"; return 0
 )
 
+# --- install_branch <state_user> <db> <pending_marker> ----------------------
+# Which path a postinst `configure` belongs on: `fresh` or `upgrade`.
+#
+# EXISTING vs FRESH is still decided by the recorded user first and the database
+# second - with one correction. `denso-setup configure` records the operator user
+# EARLY (denso-setup, cmd_configure), long before seeding and verification have
+# proved the install good. So a fresh install that failed AFTER that write
+# already looked like a configured box to the next invocation: `dpkg --configure
+# -a` - the very command the failure message tells the operator to run - took the
+# UPGRADE path, skipped every fresh check, printed "upgrade complete" and exited
+# 0. A genuine package defect was thereby reported as a configured install.
+#
+# The pending marker closes that. It is written before configure and cleared only
+# once the fresh path has fully verified, so its presence means exactly "a fresh
+# install started here and never finished". While it exists, a retry RESUMES the
+# fresh path instead of being laundered into an upgrade.
+#
+# The marker is only ever written on the fresh path, so an upgrade from any older
+# version - which has no marker - is unaffected.
+install_branch() (
+    state_user="${1-}"; db="${2-}"; pending="${3-}"
+    if [ -e "$pending" ]; then echo fresh; return 0; fi
+    if [ -r "$state_user" ] || [ -e "$db" ]; then echo upgrade; return 0; fi
+    echo fresh
+)
+
+# --- fresh_seed_action <decision> --------------------------------------------
+# Classify a seed_manifest_decide token for the FRESH-INSTALL path, where the
+# manifest is seeded automatically by postinst rather than by an operator.
+#
+# Three outcomes, because the refusals do not all mean the same thing:
+#   act   seed it, or it is already current. Anything but success is then a bug.
+#   warn  the refusal is CORRECT. A data-dir artifact is not the packaged one, so
+#         the packaged manifest would misdescribe it. The operator owns that
+#         artifact: the install must neither overwrite it nor fail over it.
+#   halt  the PACKAGE is unusable - no template, a template that disagrees with
+#         its own models, a broken packaged pair, or a packaged pair that never
+#         reached the data dir. A fresh install that cannot declare its own
+#         models has not succeeded and must not report that it did.
+#
+# Unknown or empty fails closed to `halt`, for the same reason check_verdict
+# refuses to continue on an unrecognised exit code: an unclassified state is not
+# evidence of a healthy one.
+fresh_seed_action() (
+    case "${1-}" in
+        seed|current)                                     echo act ;;
+        data-artifact-differs:*|data-artifact-orphan:*)   echo warn ;;
+        target-symlink|target-not-regular)                echo warn ;;
+        target-differs|target-unreadable)                 echo warn ;;
+        no-packaged-manifest|packaged-manifest-mismatch)  echo halt ;;
+        packaged-pair-broken:*|data-artifact-absent:*)    echo halt ;;
+        *)                                                echo halt ;;
+    esac
+)
+
 # --- gdm_set_autologin <conf> <user> ----------------------------------------
 # Edits ONLY the [daemon] section's two keys. Never templates the file: GDM's
 # config carries admin settings we must not touch. Idempotent — dpkg may

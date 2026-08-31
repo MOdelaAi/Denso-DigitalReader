@@ -1481,12 +1481,19 @@ sed 's/#.*//' "$REPO/packaging/denso-setup" | grep -Eq 'repair' \
     && bad "slice5: no verify --repair entry point exists" \
     || ok "slice5: no verify --repair entry point exists"
 
-# (25) NO maintainer script invokes seed-manifest, and no OTHER cmd_* function in
-#      denso-setup CALLS cmd_seed_manifest. A user-facing NOTE that mentions the
-#      external 'denso-setup seed-manifest' command in help text is allowed; a
-#      call to the internal cmd_seed_manifest function is not.
+# (25) Seeding stays scoped. The original rule was "NO maintainer script invokes
+#      seed-manifest"; it is now "no maintainer script invokes it EXCEPT the
+#      fresh-install path of postinst", because a fresh install that cannot
+#      declare its own packaged models is not a working install. The three parts
+#      of the rule that did NOT change are asserted individually, so a future
+#      edit cannot quietly widen the exception:
+#        * prerm/postrm still never mention it (removal declares nothing);
+#        * postinst's UPGRADE region still never mentions it - an upgrade must
+#          not adopt an operator's models behind their back;
+#        * no other cmd_* in denso-setup calls the internal cmd_seed_manifest.
+#      A user-facing NOTE naming the external command in help text is allowed.
 INVOKERS=0
-for f in "$REPO/packaging/debian/postinst" "$REPO/packaging/debian/prerm" "$REPO/packaging/debian/postrm"; do
+for f in "$REPO/packaging/debian/prerm" "$REPO/packaging/debian/postrm"; do
     grep -Eq 'seed[-_]manifest' "$f" && INVOKERS=$((INVOKERS+1))
 done
 for fn in cmd_configure cmd_verify cmd_preflight cmd_unconfigure cmd_replace_model; do
@@ -1494,7 +1501,252 @@ for fn in cmd_configure cmd_verify cmd_preflight cmd_unconfigure cmd_replace_mod
         "$REPO/packaging/denso-setup" | grep -Eq 'cmd_seed_manifest' \
         && INVOKERS=$((INVOKERS+1))
 done
-is "slice5: no maintainer script / configure / verify invokes seed-manifest" "$INVOKERS" "0"
+is "slice5: removal scripts / configure / verify still never invoke seed-manifest" "$INVOKERS" "0"
+
+# The postinst regions, split at the FRESH INSTALL marker. Comments are STRIPPED
+# first: a comment that names seed_manifest_decide (there is one, explaining the
+# packaged paths) is prose, not an invocation, and must not fail the guard it
+# documents.
+PI="$REPO/packaging/debian/postinst"
+UPGRADE_REGION="$(awk '/FRESH INSTALL/{exit} {print}' "$PI" | sed 's/#.*//')"
+FRESH_REGION="$(awk '/FRESH INSTALL/{inb=1} inb{print}' "$PI" | sed 's/#.*//')"
+printf '%s\n' "$UPGRADE_REGION" | grep -Eq 'seed[-_]manifest' \
+    && bad "slice5: postinst's upgrade path does not seed the manifest" \
+    || ok  "slice5: postinst's upgrade path does not seed the manifest"
+# The REGRESSION GUARD for the incident: deleting the seeding call from the
+# fresh-install path must fail a test, not ship a silently unusable appliance.
+printf '%s\n' "$FRESH_REGION" | grep -Eq '^[[:space:]]*denso-setup seed-manifest' \
+    && ok  "slice5: postinst's FRESH-INSTALL path does seed the manifest" \
+    || bad "slice5: postinst's FRESH-INSTALL path does seed the manifest"
+
+# ── install_branch: the fresh/upgrade discriminator, including the RETRY that
+#    used to launder a failed fresh install into a reported-successful upgrade.
+IB="$T/branch"; mkdir -p "$IB"
+: > "$IB/user"; : > "$IB/db"; : > "$IB/pending"
+is "branch: nothing recorded -> fresh"                "$(install_branch "$IB/none" "$IB/nodb" "$IB/nopending")" "fresh"
+is "branch: a recorded user -> upgrade"               "$(install_branch "$IB/user" "$IB/nodb" "$IB/nopending")" "upgrade"
+is "branch: a database alone -> upgrade"              "$(install_branch "$IB/none" "$IB/db"   "$IB/nopending")" "upgrade"
+is "branch: user and database -> upgrade"             "$(install_branch "$IB/user" "$IB/db"   "$IB/nopending")" "upgrade"
+# THE REGRESSION. configure records the user EARLY; a later failure exits 1 and
+# tells the operator to run `dpkg --configure -a`. Without the marker that retry
+# saw a recorded user, took the upgrade path, skipped every fresh check and
+# exited 0 — reporting a genuine package defect as a configured install.
+is "branch: a pending marker RESUMES fresh despite a recorded user" \
+   "$(install_branch "$IB/user" "$IB/nodb" "$IB/pending")" "fresh"
+is "branch: a pending marker RESUMES fresh despite a database" \
+   "$(install_branch "$IB/user" "$IB/db"   "$IB/pending")" "fresh"
+is "branch: a pending marker alone -> fresh" \
+   "$(install_branch "$IB/none" "$IB/nodb" "$IB/pending")" "fresh"
+# An empty marker file is still a marker: presence is the signal, not content.
+is "branch: an EMPTY pending marker still means fresh" \
+   "$(install_branch "$IB/user" "$IB/db" "$IB/pending")" "fresh"
+
+# ── the ordering the marker's correctness depends on, asserted structurally.
+#    Comments stripped, so prose about the marker cannot satisfy these.
+PIB="$(sed 's/#.*//' "$REPO/packaging/debian/postinst")"
+PI_LINE() { printf '%s\n' "$PIB" | grep -n "$1" | head -1 | cut -d: -f1; }
+L_MARK="$(PI_LINE ': > "\$PENDING"')"
+# The real invocation, not the operator-facing error strings that quote the same
+# command earlier in the file — those live in the UPGRADE branch and would make
+# this ordering check pass or fail for the wrong reason.
+L_CONF="$(PI_LINE 'if ! denso-setup configure --user')"
+L_SEED="$(PI_LINE '^[[:space:]]*denso-setup seed-manifest')"
+L_GATE="$(PI_LINE 'INSTALLATION HALTED: setup did not verify')"
+L_CLR="$(PI_LINE 'rm -f "\$PENDING"')"
+L_BAN="$(PI_LINE 'fresh installation configured')"
+for v in L_MARK L_CONF L_SEED L_GATE L_CLR L_BAN; do
+    eval "[ -n \"\$$v\" ]" || bad "postinst: could not locate $v"
+done
+[ "$L_MARK" -lt "$L_CONF" ] \
+    && ok  "postinst: the pending marker is written BEFORE configure records anything" \
+    || bad "postinst: the pending marker is written BEFORE configure records anything"
+[ "$L_CONF" -lt "$L_SEED" ] \
+    && ok  "postinst: seeding happens AFTER configure has placed the pairs" \
+    || bad "postinst: seeding happens AFTER configure has placed the pairs"
+[ "$L_SEED" -lt "$L_GATE" ] \
+    && ok  "postinst: seeding is subject to the verification gate" \
+    || bad "postinst: seeding is subject to the verification gate"
+[ "$L_GATE" -lt "$L_CLR" ] \
+    && ok  "postinst: the marker is cleared only AFTER the failure gate" \
+    || bad "postinst: the marker is cleared only AFTER the failure gate"
+[ "$L_CLR" -lt "$L_BAN" ] \
+    && ok  "postinst: the marker is cleared BEFORE the success banner" \
+    || bad "postinst: the marker is cleared BEFORE the success banner"
+# The branch decision must come from policy.sh, not a re-implemented condition.
+printf '%s\n' "$PIB" | grep -q 'install_branch "\$STATE/user" "\$DB" "\$PENDING"' \
+    && ok  "postinst: the fresh/upgrade branch is decided by install_branch" \
+    || bad "postinst: the fresh/upgrade branch is decided by install_branch"
+# A retry must resolve the operator from the RECORDED user: `dpkg --configure -a`
+# has no SUDO_USER and no session of its own.
+printf '%s\n' "$PIB" | grep -q 'resolve_operator_user /etc/passwd "\$recorded"' \
+    && ok  "postinst: a retry resolves the operator from the recorded user" \
+    || bad "postinst: a retry resolves the operator from the recorded user"
+
+# ── fresh_seed_action: the fresh-install classification of every decision token.
+#    Three outcomes, and the distinction is the whole point: a package fault must
+#    stop an install, an operator-owned artifact must NOT (refusing to overwrite
+#    it is correct behaviour, not a failure).
+is "fresh: 'seed' -> act"                       "$(fresh_seed_action seed)"                        "act"
+is "fresh: 'current' -> act (idempotent)"       "$(fresh_seed_action current)"                     "act"
+is "fresh: an operator's differing pair -> warn" "$(fresh_seed_action data-artifact-differs:digitv3)" "warn"
+is "fresh: an unpackaged orphan -> warn"        "$(fresh_seed_action data-artifact-orphan:mine)"   "warn"
+is "fresh: a differing manifest -> warn"        "$(fresh_seed_action target-differs)"              "warn"
+is "fresh: an unreadable manifest -> warn"      "$(fresh_seed_action target-unreadable)"           "warn"
+is "fresh: a symlinked manifest -> warn"        "$(fresh_seed_action target-symlink)"              "warn"
+is "fresh: a non-regular manifest -> warn"      "$(fresh_seed_action target-not-regular)"          "warn"
+is "fresh: no packaged manifest -> halt"        "$(fresh_seed_action no-packaged-manifest)"        "halt"
+is "fresh: packaged manifest mismatch -> halt"  "$(fresh_seed_action packaged-manifest-mismatch)"  "halt"
+is "fresh: a broken packaged pair -> halt"      "$(fresh_seed_action packaged-pair-broken:digitv3)" "halt"
+is "fresh: a packaged pair never seeded -> halt" "$(fresh_seed_action data-artifact-absent:digitv3)" "halt"
+is "fresh: an unknown token fails closed"       "$(fresh_seed_action wat)"                         "halt"
+is "fresh: an empty token fails closed"         "$(fresh_seed_action)"                             "halt"
+
+# ── THE INCIDENT, end to end: postinst's own seeding block, run verbatim.
+#    The block is EXTRACTED FROM postinst rather than restated here, so this
+#    exercises whatever that file actually says today. Stubs stand in for the two
+#    things a test box cannot have: the installed `denso-setup` (whose seed path
+#    is already covered above) and root.
+#
+#    Fixture mirrors the real appliance: three packaged pairs, the exact set that
+#    shipped - a digit model and two float models.
+FI="$T/freshinstall"; mkdir -p "$FI/pkg" "$FI/bin"
+for stem in digitv3 float-big float-small; do
+    printf 'ENGINE-%s' "$stem" > "$FI/pkg/$stem.engine"
+    printf '["%s"]'    "$stem" > "$FI/pkg/$stem.names.json"
+done
+python3 - "$FI/pkgmanifest.json" "$FI/pkg" <<'PY'
+import hashlib, json, os, sys
+out, pkg = sys.argv[1], sys.argv[2]
+def h(p):
+    return hashlib.sha256(open(p, "rb").read()).hexdigest()
+gens = []
+for stem in ("digitv3", "float-big", "float-small"):
+    gens.append({"name": stem, "canonical_id": stem, "runtime": {"tensorrt": {
+        "engine": stem + ".engine", "engine_sha256": h(os.path.join(pkg, stem + ".engine")),
+        "sidecar": stem + ".names.json", "sidecar_sha256": h(os.path.join(pkg, stem + ".names.json"))}}})
+json.dump({"schema": 2, "generations": gens}, open(out, "w"))
+PY
+
+# The stub `denso-setup`: seed-manifest only, doing exactly what cmd_seed_manifest
+# does on its act path, minus need_root/runuser. It records that it was CALLED,
+# which is half of what these cases assert.
+cat > "$FI/bin/denso-setup" <<STUBEOF
+#!/bin/sh
+[ "\$1" = "seed-manifest" ] || { echo "stub: unexpected subcommand \$1" >&2; exit 64; }
+echo called >> "$FI/stub-calls"
+. "$REPO/packaging/lib/policy.sh"
+d="\$(seed_manifest_decide "\$PKG_MANIFEST" "\$PKG_MODELS" "\$DATA/models" "\$DATA/models/manifest.json")"
+case "\$d" in
+    seed)    install_manifest_atomic "\$PKG_MANIFEST" "\$DATA/models/manifest.json" ;;
+    current) exit 0 ;;
+    *)       exit 1 ;;
+esac
+STUBEOF
+chmod 0755 "$FI/bin/denso-setup"
+
+# Verbatim extraction: everything between the two banner comments in postinst.
+awk '/── manifest seeding ─/{inb=1} /── setup verification ─/{inb=0} inb{print}' \
+    "$REPO/packaging/debian/postinst" > "$FI/seed-block.sh"
+[ -s "$FI/seed-block.sh" ] \
+    && ok  "fresh: postinst's seeding block was extracted for execution" \
+    || bad "fresh: postinst's seeding block was extracted for execution"
+
+# Run that block against a fixture data dir. `fail` and the emitted NOTE are the
+# observable outputs, exactly as postinst consumes them.
+fi_run() {   # $1 = data dir; echoes "<fail-string>" and leaves stderr in $FI/err
+    DATA="$1" PKG_MODELS="$FI/pkg" PKG_MANIFEST="$FI/pkgmanifest.json" \
+    PATH="$FI/bin:$PATH" \
+    sh -c '
+        set -e
+        DATA="$DATA"; PKG_MODELS="$PKG_MODELS"; PKG_MANIFEST="$PKG_MANIFEST"
+        . '"$REPO"'/packaging/lib/policy.sh
+        . '"$FI"'/seed-block.sh
+        printf "%s" "$fail"
+    ' 2>"$FI/err"
+}
+
+# (A) THE REGRESSION. Fresh box: configure has seeded the three packaged pairs,
+#     nothing else exists. Before the fix nothing ran here and the appliance came
+#     up with every model undeclared.
+FD="$FI/data-fresh"; mkdir -p "$FD/models"
+for stem in digitv3 float-big float-small; do
+    install_pair "$FI/pkg/$stem.engine" "$FI/pkg/$stem.names.json" "$FD/models" >/dev/null 2>&1
+done
+rm -f "$FI/stub-calls"
+FI_FAIL="$(fi_run "$FD")"
+is "fresh: a clean fresh install reports no failure"        "$FI_FAIL" ""
+[ -f "$FI/stub-calls" ] \
+    && ok  "fresh: the fresh-install path actually invokes seed-manifest" \
+    || bad "fresh: the fresh-install path actually invokes seed-manifest"
+[ -f "$FD/models/manifest.json" ] \
+    && ok  "fresh: manifest.json exists WITHOUT anyone running seed-manifest by hand" \
+    || bad "fresh: manifest.json exists WITHOUT anyone running seed-manifest by hand"
+# The full contract the operator was promised: three pairs AND the manifest.
+FI_FILES="$(ls "$FD/models" | sort | tr '\n' ' ')"
+is "fresh: the data dir holds all seven required files" "$FI_FILES" \
+   "digitv3.engine digitv3.names.json float-big.engine float-big.names.json float-small.engine float-small.names.json manifest.json "
+# ...and every artifact is now DECLARED, which is what the wizard reads.
+manifest_matches_models_dir "$FD/models/manifest.json" "$FD/models" >/dev/null 2>&1 \
+    && ok  "fresh: the seeded manifest declares every artifact in the data dir" \
+    || bad "fresh: the seeded manifest declares every artifact in the data dir"
+
+# (B) Re-running it is a no-op: `apt install` twice, or `dpkg --configure -a`
+#     after a partial failure, must not rewrite or duplicate anything.
+MB="$(sha256sum "$FD/models/manifest.json" | cut -d' ' -f1)"
+MT="$(stat -c %Y "$FD/models/manifest.json")"
+is "fresh: re-running the seeding block reports no failure" "$(fi_run "$FD")" ""
+is "fresh: re-running leaves the manifest bytes untouched" "$(sha256sum "$FD/models/manifest.json" | cut -d' ' -f1)" "$MB"
+is "fresh: re-running leaves the manifest mtime untouched" "$(stat -c %Y "$FD/models/manifest.json")" "$MT"
+
+# (C) Remove + reinstall with /opt/denso/data preserved. postrm keeps the data
+#     dir on purpose, so this path re-enters the fresh branch with everything
+#     already in place: decision `current`, no write, no failure. Covered by (B)
+#     for the manifest; assert the decision token itself, which is what makes it
+#     a no-op rather than an overwrite.
+is "fresh: preserved data on reinstall decides 'current'" \
+   "$(seed_manifest_decide "$FI/pkgmanifest.json" "$FI/pkg" "$FD/models" "$FD/models/manifest.json")" "current"
+
+# (D) An operator's OWN engine in the data dir. Refusing to declare it is
+#     correct - the packaged manifest does not describe it - but the install must
+#     not fail, and above all must not overwrite anything.
+OD="$FI/data-orphan"; mkdir -p "$OD/models"
+for stem in digitv3 float-big float-small; do
+    install_pair "$FI/pkg/$stem.engine" "$FI/pkg/$stem.names.json" "$OD/models" >/dev/null 2>&1
+done
+printf 'MY-OWN-ENGINE'  > "$OD/models/operator.engine"
+printf '["mine"]'       > "$OD/models/operator.names.json"
+OSNAP="$(snap_models "$OD/models")"
+rm -f "$FI/stub-calls"
+is "fresh: an operator-owned engine does NOT fail the install" "$(fi_run "$OD")" ""
+[ -f "$FI/stub-calls" ] \
+    && bad "fresh: seed-manifest is not even attempted against an operator artifact" \
+    || ok  "fresh: seed-manifest is not even attempted against an operator artifact"
+[ -f "$OD/models/manifest.json" ] \
+    && bad "fresh: no manifest is written that would misdescribe an operator artifact" \
+    || ok  "fresh: no manifest is written that would misdescribe an operator artifact"
+is "fresh: the operator's artifacts are byte-for-byte untouched" "$(snap_models "$OD/models")" "$OSNAP"
+grep -q 'seed-manifest' "$FI/err" \
+    && ok  "fresh: the operator is told the remedy command" \
+    || bad "fresh: the operator is told the remedy command"
+grep -q 'NOT seeded' "$FI/err" \
+    && ok  "fresh: the operator is told the manifest was not seeded" \
+    || bad "fresh: the operator is told the manifest was not seeded"
+
+# (E) A BROKEN PACKAGE is the opposite call: no packaged manifest means the
+#     install cannot declare its own models, so it must be reported as a failure.
+BD="$FI/data-broken"; mkdir -p "$BD/models"
+BF="$(DATA="$BD" PKG_MODELS="$FI/pkg" PKG_MANIFEST="$FI/nonexistent.json" PATH="$FI/bin:$PATH" \
+      sh -c '
+        set -e
+        DATA="$DATA"; PKG_MODELS="$PKG_MODELS"; PKG_MANIFEST="$PKG_MANIFEST"
+        . '"$REPO"'/packaging/lib/policy.sh
+        . '"$FI"'/seed-block.sh
+        printf "%s" "$fail"
+      ' 2>/dev/null)"
+[ -n "$BF" ] \
+    && ok  "fresh: a package with no manifest template FAILS the install" \
+    || bad "fresh: a package with no manifest template FAILS the install"
+
 
 fi  # python3 available
 
