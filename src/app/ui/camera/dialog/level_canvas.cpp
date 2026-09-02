@@ -23,6 +23,19 @@ constexpr double kMinBandPx = 2.0;
 /// A press must land on the drawn frame, within this slack, to count.
 constexpr double kOnFramePx = 1.0;
 
+// The ghost palette, taken VERBATIM from roi_canvas.cpp rather than re-picked.
+// The digit Areas page already taught the operator what "recessive slate dashes"
+// mean; inventing a second ghost style here would make one appliance speak two
+// visual languages for one idea.
+const QColor kContextEdge(148, 163, 184, 170);  // slate — present but recessive
+const QColor kContextFill(148, 163, 184, 30);
+const QColor kLabelBg(17, 17, 17, 190);
+// The selected zone's reference lines, dimmed to the same recessive weight. The
+// HUES are kept (green = 100%, red = 0%) because they are how the operator reads
+// which line is which; only the emphasis drops.
+const QColor kContext100(102, 217, 160, 110);
+const QColor kContext0(232, 122, 122, 110);
+
 }  // namespace
 
 LevelCanvas::LevelCanvas(QWidget* parent) : QWidget(parent) {
@@ -39,6 +52,12 @@ void LevelCanvas::set_calibration(const denso::level::LevelCalibration& c,
                                   bool has_rect) {
     c_ = c;
     has_rect_ = has_rect;
+    update();
+}
+
+void LevelCanvas::set_context_zones(
+    const std::vector<denso::level::LevelZone>& others) {
+    context_ = others;
     update();
 }
 
@@ -216,6 +235,53 @@ void LevelCanvas::draw_calibration(QPainter& p, const QRectF& img) const {
     }
 }
 
+void LevelCanvas::draw_context(QPainter& p, const QRectF& img) const {
+    for (const denso::level::LevelZone& z : context_) {
+        const denso::level::LevelCalibration& c = z.calibration;
+        // A zone with no measurable rectangle has nothing to place on the frame.
+        // Drawing a zero-area box would read as a stray mark, not as a zone.
+        if (c.rect_w <= 0.0 || c.rect_h <= 0.0) {
+            continue;
+        }
+        const QRectF r(to_widget(QPointF(c.rect_x, c.rect_y), img),
+                       to_widget(QPointF(c.rect_x + c.rect_w, c.rect_y + c.rect_h),
+                                 img));
+
+        // Fill first, then a dashed outline: filled-and-dashed is what the digit
+        // page's context areas look like, so overlap reads the same way here.
+        p.setPen(Qt::NoPen);
+        p.setBrush(kContextFill);
+        p.drawRect(r);
+        p.setPen(QPen(kContextEdge, 1.5, Qt::DashLine));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(r);
+
+        // Enough calibration geometry to understand WHERE the zone measures,
+        // without the grab handles or the long labels the selected zone gets —
+        // a handle on something you cannot drag is a lie about affordance.
+        const double y100 = to_widget(QPointF(0.0, c.y_100), img).y();
+        const double y0 = to_widget(QPointF(0.0, c.y_0), img).y();
+        p.setPen(QPen(kContext100, 1.0, Qt::DashLine));
+        p.drawLine(QPointF(r.left(), y100), QPointF(r.right(), y100));
+        p.setPen(QPen(kContext0, 1.0, Qt::DashLine));
+        p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0));
+
+        // A small number, so the operator can name what they are looking at.
+        const QString label = QStringLiteral("Zone %1").arg(z.zone_no);
+        const QRectF box =
+            QRectF(p.fontMetrics().boundingRect(label))
+                .adjusted(-5, -3, 5, 3)
+                .translated(r.center() -
+                            QPointF(p.fontMetrics().horizontalAdvance(label) / 2.0,
+                                    0));
+        p.setPen(Qt::NoPen);
+        p.setBrush(kLabelBg);
+        p.drawRoundedRect(box, 4, 4);
+        p.setPen(QColor(226, 232, 240));
+        p.drawText(box, Qt::AlignCenter, label);
+    }
+}
+
 void LevelCanvas::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
@@ -227,6 +293,9 @@ void LevelCanvas::paintEvent(QPaintEvent*) {
         return;
     }
     p.drawImage(img, frame_);
+    // Context FIRST, so the selected zone is painted over the ghosts and always
+    // wins the overlap. Order is the whole of "must not visually compete".
+    draw_context(p, img);
     if (has_rect_) {
         draw_calibration(p, img);
     }

@@ -26,6 +26,7 @@
 // Lives in denso_integration_tests: it constructs real Qt widgets over denso_app.
 // Every camera seeded here points at a closed local port and no model file is
 // ever a real engine, so nothing is deserialized and no device is contacted.
+#include <QListWidget>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -504,6 +505,11 @@ QAbstractButton* find_button(const QWidget& w, const QString& object_name) {
     return nullptr;
 }
 
+/// Defined further down, next to the wizard cases that first needed it. Declared
+/// here because the calibration-page cases above it now raise modals too: a
+/// refused Save is a dialog, and a test that does not dismiss it hangs forever.
+QTimer* answer_next_modal(QMessageBox::StandardButton button, bool* seen);
+
 }  // namespace
 
 // The zone list, its buttons and the two spin boxes were added BESIDE the canvas.
@@ -653,22 +659,43 @@ TEST_CASE("the 0% line can never be dragged above the 100% line",
 // ═════════════════════════════════════════════════════════════════════════════
 // 3. SAVE IS GATED BY THE SAME VALIDATOR THE WRITE USES.
 // ═════════════════════════════════════════════════════════════════════════════
-TEST_CASE("Save is unavailable until a measurable rectangle exists",
+TEST_CASE("Save can be ATTEMPTED before a rectangle exists, and is refused",
           "[ball_wizard][ui]") {
     PageFixture f;
     QAbstractButton* save = find_button(f.page, QStringLiteral("levelSave"));
     REQUIRE(save != nullptr);
-    CHECK_FALSE(save->isEnabled());
+
+    // The inversion of the old rule. Save stays ENABLED while the set is
+    // unsaveable: a greyed-out button tells the operator nothing, and the whole
+    // point of pressing it is to find out what is wrong. Persistence is gated by
+    // attempt_save's re-check, never by the affordance.
+    CHECK(save->isEnabled());
+    REQUIRE(f.page.save_block().has_value());
 
     int emitted = 0;
     QObject::connect(&f.page, &LevelCalibrationPage::save_requested,
                      [&emitted](const std::vector<denso::level::LevelZone>&) { ++emitted; });
-    save->click();          // a disabled button must not be a way through
-    CHECK(emitted == 0);
+
+    bool warned = false;
+    QTimer* t = answer_next_modal(QMessageBox::Ok, &warned);
+    save->click();
+    t->stop();
+    t->deleteLater();
+    CHECK(warned);        // the operator was TOLD...
+    CHECK(emitted == 0);  // ...and nothing reached the write path
 
     drag(f.canvas(), QPointF(wx(0.25), wy(0.25)), QPointF(wx(0.75), wy(0.75)));
+    CHECK_FALSE(f.page.save_block().has_value());
     CHECK(save->isEnabled());
+
+    // A VALID set raises no dialog at all — the modal is a refusal, not a
+    // confirmation step bolted onto every save.
+    bool warned_again = false;
+    QTimer* t2 = answer_next_modal(QMessageBox::Ok, &warned_again);
     save->click();
+    t2->stop();
+    t2->deleteLater();
+    CHECK_FALSE(warned_again);
     CHECK(emitted == 1);
 }
 
@@ -686,7 +713,7 @@ TEST_CASE("a rectangle too short to measure through blocks Save and says why",
 
     QAbstractButton* save = find_button(f.page, QStringLiteral("levelSave"));
     REQUIRE(save != nullptr);
-    CHECK_FALSE(save->isEnabled());
+    CHECK(save->isEnabled());   // attemptable, and refused when attempted
 
     // The refusal is NAMED on screen, not just a dead button: an operator staring
     // at a greyed Save with no reason has no way to fix it.
@@ -694,6 +721,12 @@ TEST_CASE("a rectangle too short to measure through blocks Save and says why",
     REQUIRE(status != nullptr);
     CHECK_FALSE(status->text().isEmpty());
     CHECK(status->text().contains(QStringLiteral("tall"), Qt::CaseInsensitive));
+
+    // The inline line and the dialog are the SAME sentence, because they read
+    // the same authority. If these ever diverge, one of them is lying.
+    const auto blocked = f.page.save_block();
+    REQUIRE(blocked.has_value());
+    CHECK(blocked->message == status->text());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1116,4 +1149,113 @@ TEST_CASE("the camera dialog hosts and wires the level calibration step",
     // …and the page reaches the controller as one of its Pages, or none of the
     // above would ever be populated.
     CHECK(text.contains(QStringLiteral("areas_page_, level_page_")));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Spatial awareness: the camera's OTHER level zones stay visible, ghosted, while
+// one is edited — the same job RoiCanvas::set_context_areas does on the digit
+// Areas page, deliberately in the same visual language.
+//
+// Asserted on the canvas RENDER MODEL rather than on pixels. What must hold is
+// "the non-selected zones are present and the selected one is not among them",
+// and that survives any restyling; a screenshot comparison would not.
+// ═════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+denso::level::LevelZone ghost_zone(int no, double y_top, double y_bottom) {
+    denso::level::LevelZone z;
+    z.zone_no = no;
+    z.calibration.rect_x = 0.15;
+    z.calibration.rect_y = y_top;
+    z.calibration.rect_w = 0.70;
+    z.calibration.rect_h = y_bottom - y_top;
+    z.calibration.y_100 = y_top + 0.05;
+    z.calibration.y_0 = y_bottom - 0.05;
+    return z;
+}
+
+}  // namespace
+
+TEST_CASE("the camera's other Level Zones are ghosted while one is edited",
+          "[ball_wizard][ui][zone_ghost]") {
+    LevelCalibrationPage page;
+    page.resize(kW + 320, kH + 160);
+    page.set_background(test_frame());
+    page.load({ghost_zone(1, 0.10, 0.40), ghost_zone(2, 0.55, 0.90)}, {});
+    REQUIRE(page.canvas() != nullptr);
+    page.canvas()->resize(kW, kH);
+
+    auto* list = page.findChild<QListWidget*>(QStringLiteral("levelZoneList"));
+    REQUIRE(list != nullptr);
+    REQUIRE(list->count() == 2);
+
+    // The ghosted set is the COMPLEMENT of the selection, and it tracks it. The
+    // zone being edited is painted from the live draft, so it must never also
+    // appear as its own ghost — it would be drawn twice and fight itself.
+    list->setCurrentRow(0);
+    {
+        const auto ctx = page.canvas()->context_zones();
+        REQUIRE(ctx.size() == 1);
+        CHECK(ctx.at(0).zone_no == 2);
+    }
+    list->setCurrentRow(1);
+    {
+        const auto ctx = page.canvas()->context_zones();
+        REQUIRE(ctx.size() == 1);
+        CHECK(ctx.at(0).zone_no == 1);
+        // Enough geometry to place it: the rectangle AND both reference lines.
+        // Without the lines the operator sees a bare box and cannot tell what it
+        // measures, which is most of the reason for showing it at all.
+        CHECK(ctx.at(0).calibration.rect_h > 0.0);
+        CHECK(ctx.at(0).calibration.y_100 < ctx.at(0).calibration.y_0);
+    }
+}
+
+TEST_CASE("a lone Level Zone ghosts nothing", "[ball_wizard][ui][zone_ghost]") {
+    // The complement of a one-element set is empty. Worth pinning: an off-by-one
+    // here would ghost the selected zone underneath itself.
+    LevelCalibrationPage page;
+    page.resize(kW + 320, kH + 160);
+    page.set_background(test_frame());
+    page.load({ghost_zone(7, 0.20, 0.70)}, {});
+    REQUIRE(page.canvas() != nullptr);
+    CHECK(page.canvas()->context_zones().empty());
+}
+
+TEST_CASE("a ghosted Level Zone offers no handle and cannot be dragged",
+          "[ball_wizard][ui][zone_ghost]") {
+    LevelCalibrationPage page;
+    page.resize(kW + 320, kH + 160);
+    page.set_background(test_frame());
+    page.load({ghost_zone(1, 0.10, 0.40), ghost_zone(2, 0.55, 0.90)}, {});
+    REQUIRE(page.canvas() != nullptr);
+    page.canvas()->resize(kW, kH);
+
+    auto* list = page.findChild<QListWidget*>(QStringLiteral("levelZoneList"));
+    REQUIRE(list != nullptr);
+    list->setCurrentRow(0);              // editing Zone 1, at the top of the frame
+
+    const auto before_ctx = page.canvas()->context_zones();
+    REQUIRE(before_ctx.size() == 1);
+    const auto before_draft = page.draft().draft();
+
+    // Drag straight through the GHOST's 100% line, far from the selected zone's
+    // own lines. If context zones were hit-tested, this would grab a handle and
+    // move something the operator is not editing.
+    const double ghost_100 = before_ctx.at(0).calibration.y_100;
+    drag(page.canvas(), QPointF(wx(0.50), wy(ghost_100)),
+         QPointF(wx(0.50), wy(ghost_100 + 0.10)));
+
+    const auto after_ctx = page.canvas()->context_zones();
+    REQUIRE(after_ctx.size() == 1);
+    CHECK(after_ctx.at(0).calibration.y_100 == before_ctx.at(0).calibration.y_100);
+    CHECK(after_ctx.at(0).calibration.y_0 == before_ctx.at(0).calibration.y_0);
+    CHECK(after_ctx.at(0).calibration.rect_y == before_ctx.at(0).calibration.rect_y);
+
+    // ...and the SELECTED zone was not dragged either. The press landed nowhere
+    // near its lines, so the correct outcome is that the canvas did nothing at
+    // all — not that it grabbed whatever was nearest.
+    CHECK(page.draft().draft().y_100 == before_draft.y_100);
+    CHECK(page.draft().draft().y_0 == before_draft.y_0);
 }

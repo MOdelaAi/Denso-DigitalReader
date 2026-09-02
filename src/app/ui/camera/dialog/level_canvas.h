@@ -28,6 +28,8 @@
 #include <QPointF>
 #include <QWidget>
 
+#include <vector>
+
 class QString;
 
 namespace denso::ui {
@@ -49,6 +51,22 @@ public:
     /// The values to PAINT. `has_rect` false means no rectangle has been drawn
     /// yet, so neither it nor the reference lines are drawn.
     void set_calibration(const denso::level::LevelCalibration& c, bool has_rect);
+
+    /// The camera's OTHER level zones, drawn ghosted behind the selected one so
+    /// the operator can see overlap and relative placement while editing — the
+    /// same job RoiCanvas::set_context_areas does on the digit Areas page, and
+    /// deliberately the same visual language.
+    ///
+    /// Context zones are painted only. They are never hit-tested: line_at() and
+    /// every mouse handler read `c_` alone, so "not interactive" is structural
+    /// here rather than a flag someone can forget to check.
+    void set_context_zones(const std::vector<denso::level::LevelZone>& others);
+
+    /// What is currently ghosted. A test seam: asserting on the render MODEL is
+    /// stable, where asserting on pixels would break on any styling change.
+    const std::vector<denso::level::LevelZone>& context_zones() const {
+        return context_;
+    }
 
     void begin_draw();  // → Drawing (the operator asked to (re)draw)
     void begin_edit();  // → Editing (a rectangle exists)
@@ -80,10 +98,12 @@ private:
     /// than whichever was tested first.
     int line_at(const QPointF& widget_pt) const;
     void draw_calibration(QPainter& p, const QRectF& img) const;
+    void draw_context(QPainter& p, const QRectF& img) const;
     void draw_rubber_band(QPainter& p, const QRectF& img) const;
 
     QImage frame_;
     denso::level::LevelCalibration c_;
+    std::vector<denso::level::LevelZone> context_;  // the camera's other zones
     bool has_rect_ = false;
     Mode mode_ = Mode::Drawing;
 

@@ -155,6 +155,10 @@ add_executable(denso_integration_tests
     # The typed Zone-number field (1..99). A real Qt widget from denso_app,
     # driven offscreen: it is the acceptance rule the wizard Save is gated on.
     test_zone_number_edit.cpp
+    # The Save-REFUSAL contract shared by both zone-carrying wizard steps: an
+    # attempted save on a conflicting set must say so out loud and persist
+    # nothing. Drives the real pages from denso_app.
+    test_zone_save_refusal.cpp
     # Zone annotation: the values are burned into the camera frame, so this
     # drives the REAL frame processors and asserts on the delivered image.
     test_zone_frame_pipeline.cpp

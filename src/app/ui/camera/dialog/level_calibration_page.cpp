@@ -413,8 +413,73 @@ std::optional<int> LevelCalibrationPage::first_invalid_zone() const {
     return std::nullopt;
 }
 
+std::optional<LevelCalibrationPage::SaveBlock>
+LevelCalibrationPage::save_block() const {
+    // One title for every refusal on this page: the operator is being told the
+    // same thing each time — the set was not saved — and varying the title would
+    // suggest the outcomes differ.
+    const QString title = QStringLiteral("Cannot save zones");
+    const bool has_sel = selected_ >= 0;
+
+    if (zones_.empty()) {
+        return SaveBlock{title,
+                         QStringLiteral("Add at least one zone before saving.")};
+    }
+    // The typed field FIRST. It is the only check that knows the holder of a
+    // duplicate by name, so asking it first is what makes the refusal actionable
+    // rather than merely correct.
+    if (has_sel && !zone_edit_->is_valid()) {
+        return SaveBlock{
+            title, QStringLiteral("%1 Choose another Zone number before saving.")
+                       .arg(zone_edit_->problem())};
+    }
+    if (has_sel && !draft_.has_rect()) {
+        return SaveBlock{title,
+                         QStringLiteral("Drag out the rectangle the ball moves "
+                                        "within to begin.")};
+    }
+    if (has_sel) {
+        const auto check = draft_.check();
+        if (!check.ok) {
+            return SaveBlock{title, explain(check.reason_code)};
+        }
+    }
+    // Save covers the WHOLE set, so it is refused on the whole set. A zone the
+    // operator is not looking at is still one the chokepoint would roll the
+    // entire save back for.
+    if (const auto bad = first_invalid_zone()) {
+        return SaveBlock{title,
+                         QStringLiteral("Zone %1 is not finished. Select it and "
+                                        "draw its rectangle and lines.")
+                             .arg(*bad)};
+    }
+    for (const denso::level::LevelZone& z : zones_) {
+        if (!denso::camera::zone_in_range(z.zone_no)) {
+            return SaveBlock{title,
+                             QStringLiteral("Zone %1 does not exist. Zone numbers "
+                                            "run from %2 to %3.")
+                                 .arg(z.zone_no)
+                                 .arg(denso::camera::kMinZone)
+                                 .arg(denso::camera::kMaxZone)};
+        }
+    }
+    return std::nullopt;
+}
+
 void LevelCalibrationPage::sync() {
     canvas_->set_calibration(draft_.draft(), draft_.has_rect());
+    // Every zone EXCEPT the selected one, ghosted behind it. The selected zone
+    // is painted from the draft above, so it is the live one; these are the
+    // committed neighbours, which is exactly the spatial context the operator
+    // needs to spot an overlap before saving.
+    {
+        std::vector<denso::level::LevelZone> others;
+        others.reserve(zones_.size());
+        for (int i = 0; i < static_cast<int>(zones_.size()); ++i) {
+            if (i != selected_) others.push_back(zones_[static_cast<size_t>(i)]);
+        }
+        canvas_->set_context_zones(others);
+    }
 
     // Blocked: these setters exist to DISPLAY the draft. Letting them write back
     // would round a stored value through the widget's step/decimals, so merely
@@ -435,38 +500,15 @@ void LevelCalibrationPage::sync() {
     delete_btn_->setEnabled(has_sel && zones_.size() > 1);
     refresh_list();
 
-    // A zone number that is out of range, malformed or already held blocks the
-    // save exactly as an unfinished rectangle does — the chokepoint would refuse
-    // the whole set, losing every other zone's work with it.
-    if (has_sel && !zone_edit_->is_valid()) {
-        status_->setText(zone_edit_->problem());
-        save_btn_->setEnabled(false);
-        return;
-    }
-    if (has_sel && !draft_.has_rect()) {
-        status_->setText(QStringLiteral(
-            "Drag out the rectangle the ball moves within to begin."));
-        save_btn_->setEnabled(false);
-        return;
-    }
-    if (has_sel) {
-        const auto check = draft_.check();
-        if (!check.ok) {
-            status_->setText(explain(check.reason_code));
-            save_btn_->setEnabled(false);
-            return;
-        }
-    }
-    // Save covers the WHOLE set, so it is gated on the whole set. Offering it
-    // because the SELECTED zone is ready would let the operator submit a
-    // configuration the chokepoint rolls back entirely — and lose every zone's
-    // work to a fault in one of them.
-    if (const auto bad = first_invalid_zone()) {
-        status_->setText(
-            QStringLiteral("Zone %1 is not finished. Select it and draw its "
-                           "rectangle and lines.")
-                .arg(*bad));
-        save_btn_->setEnabled(false);
+    // The inline line is the refusal, verbatim. Save STAYS ENABLED even while
+    // refused: a disabled button explains nothing, and the operator who has just
+    // typed a duplicate needs to be TOLD why their configuration will not save,
+    // not left guessing at a greyed-out control. attempt_save() re-checks this
+    // same authority and refuses there, so an enabled button cannot persist an
+    // invalid set — it can only earn an explanation.
+    if (const auto blocked = save_block()) {
+        status_->setText(blocked->message);
+        save_btn_->setEnabled(true);
         return;
     }
     const auto& c = draft_.draft();
@@ -484,24 +526,13 @@ void LevelCalibrationPage::attempt_save() {
     // affordance, and this page is driven by signals a future caller could invoke
     // directly. The verdict is the draft's, which is the write path's.
     commit_selected();
-    if (zones_.empty() || first_invalid_zone().has_value() ||
-        !zone_edit_->is_valid()) {
-        sync();
-        return;
-    }
-    // The set numbers, not just the live field: a zone whose number came from a
-    // database written by another build would otherwise reach the chokepoint and
-    // be refused with no explanation on this page.
-    for (const denso::level::LevelZone& z : zones()) {
-        if (!denso::camera::zone_in_range(z.zone_no)) {
-            status_->setText(QStringLiteral("Zone %1 does not exist. Zone "
-                                            "numbers run from %2 to %3.")
-                                 .arg(z.zone_no)
-                                 .arg(denso::camera::kMinZone)
-                                 .arg(denso::camera::kMaxZone));
-            save_btn_->setEnabled(false);
-            return;
-        }
+    // ONE ask, ONE answer. The modal fires only from here — a real Save attempt —
+    // so typing a duplicate raises red text under the field and nothing else,
+    // and the dialog appears exactly when the operator asked for the save.
+    if (const auto blocked = save_block()) {
+        sync();   // keep the inline line in step with what the dialog says
+        QMessageBox::warning(this, blocked->title, blocked->message);
+        return;   // nothing emitted: the write path is never reached
     }
     emit save_requested(zones());
 }

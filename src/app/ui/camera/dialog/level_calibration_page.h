@@ -77,6 +77,25 @@ public:
     void show_refusal(const QString& reason_code,
                       std::optional<int> zone_no = std::nullopt);
 
+    /// Why a Save attempt would be refused RIGHT NOW, or nullopt when the whole
+    /// set is saveable.
+    ///
+    /// ONE authority, deliberately. `sync()` renders it as the inline status
+    /// line and `attempt_save()` raises it as a modal, so the red text under the
+    /// field and the dialog can never disagree — and there is no second set of
+    /// validation rules to drift from the first. The order below IS the existing
+    /// refusal order; nothing new decides anything here, it only reports.
+    ///
+    /// Public because it is the seam the tests read: asserting on the refusal a
+    /// page WOULD raise is stable, where driving a modal and scraping pixels is
+    /// not. Core stays authoritative regardless — this never permits a save, it
+    /// only explains a refusal.
+    struct SaveBlock {
+        QString title;
+        QString message;
+    };
+    std::optional<SaveBlock> save_block() const;
+
     /// The SELECTED zone's draft. Test seam and canvas source.
     const denso::level::CalibrationDraft& draft() const { return draft_; }
 

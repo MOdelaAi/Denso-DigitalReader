@@ -276,6 +276,7 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     footer->addWidget(refresh, 0);
 
     save_btn_ = new QPushButton(QStringLiteral("✓ Save areas"));
+    save_btn_->setObjectName(QStringLiteral("areasSave"));
     save_btn_->setProperty("gold", true);
     connect(save_btn_, &QPushButton::clicked, this,
             &CameraAreasPage::attempt_save);
@@ -767,8 +768,10 @@ void CameraAreasPage::attempt_save() {
     // value, so without this the operator would save something other than what
     // the field shows.
     if (!zone_edit_->is_valid()) {
-        QMessageBox::warning(this, QStringLiteral("Check the zone number"),
-                             zone_edit_->problem());
+        QMessageBox::warning(
+            this, QStringLiteral("Cannot save areas"),
+            QStringLiteral("%1 Choose another Zone number before saving.")
+                .arg(zone_edit_->problem()));
         return;
     }
 
@@ -777,9 +780,10 @@ void CameraAreasPage::attempt_save() {
     // replace_areas would refuse the save with no explanation.
     if (const auto bad = camera::find_zone_out_of_range(areas_)) {
         QMessageBox::warning(
-            this, QStringLiteral("Zone number out of range"),
-            QStringLiteral("“%1” is set to zone %2. Zone numbers run from %3 "
-                           "to %4.")
+            this, QStringLiteral("Cannot save areas"),
+            QStringLiteral("“%1” is set to zone %2, which does not exist. Zone "
+                           "numbers run from %3 to %4. Choose another Zone "
+                           "number before saving.")
                 .arg(QString::fromStdString(bad->area_name))
                 .arg(bad->zone)
                 .arg(camera::kMinZone)
@@ -789,17 +793,42 @@ void CameraAreasPage::attempt_save() {
 
     // Named here rather than surfacing as a generic write failure from the repo.
     if (const auto c = camera::find_zone_conflict(areas_, zones_taken_)) {
+        // find_zone_conflict names ONE of the two claimants and, for a
+        // cross-camera clash, the owning camera. "Zone 2 is already used" is
+        // true but unactionable — the operator needs to be told what to go and
+        // change — so both sides of the clash are named here.
+        //
+        // Both, not "the holder": within one camera neither area has a better
+        // claim than the other, and picking one would depend on the order
+        // `areas_` happens to be in. Naming both is order-independent and is
+        // also the more honest sentence — either one can be renumbered.
+        if (!c->owner.empty()) {
+            QMessageBox::warning(
+                this, QStringLiteral("Cannot save areas"),
+                QStringLiteral("Zone %1 is already used by “%2”. Choose another "
+                               "Zone number before saving.")
+                    .arg(c->zone)
+                    .arg(QString::fromStdString(c->owner)));
+            return;
+        }
+        QString other;   // the sibling sharing the number, if it can be named
+        for (const camera::CameraArea& a : areas_) {
+            if (a.zone && *a.zone == c->zone && a.name != c->area_name) {
+                other = QString::fromStdString(a.name);
+                break;
+            }
+        }
         QMessageBox::warning(
-            this, QStringLiteral("Zone already in use"),
-            c->owner.empty()
-                ? QStringLiteral("Two areas on this camera both report zone "
-                                 "%1. Give “%2” a different zone.")
+            this, QStringLiteral("Cannot save areas"),
+            other.isEmpty()
+                ? QStringLiteral("Zone %1 is used twice on this camera. Choose "
+                                 "another Zone number before saving.")
                       .arg(c->zone)
-                      .arg(QString::fromStdString(c->area_name))
-                : QStringLiteral("Zone %1 is already reported by “%2”. Give "
-                                 "“%3” a different zone.")
+                : QStringLiteral("Zone %1 is used by both “%2” and “%3” on this "
+                                 "camera. Choose another Zone number before "
+                                 "saving.")
                       .arg(c->zone)
-                      .arg(QString::fromStdString(c->owner))
+                      .arg(other)
                       .arg(QString::fromStdString(c->area_name)));
         return;
     }
