@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -73,8 +74,20 @@ struct Point {
     float y = 0.0f;
 };
 
-/// The highest reporting-zone number the machine supports, and therefore the
-/// size of the whole zone-number namespace.
+/// The reporting-zone number namespace: every legal zone id is an integer in
+/// [kMinZone, kMaxZone] inclusive, and that closed range IS the whole namespace.
+///
+/// There is exactly ONE representation of "this area reports nothing": a
+/// disengaged `std::optional<int>` (SQL NULL on disk). The number 0 is NOT it.
+/// 0 is outside the namespace entirely — refused by the UI, by
+/// `replace_areas` and by `save_level_configuration` alike.
+///
+/// Up to schema v16, a `camera_area.zone` of 0 WAS a second spelling of "not
+/// reported", alongside NULL. Schema v17 normalises those legacy rows to NULL
+/// once, at migration time, which is why no runtime code special-cases zero:
+/// after the migration the invariant is simply NULL = unassigned, 1..99 =
+/// assigned, and a 0 reaching a write chokepoint is a bug to be refused, not a
+/// state to be interpreted.
 ///
 /// It lives HERE, in core, rather than in the digit Areas page where it began,
 /// because it is not a digit-reader fact: zone numbers are unique machine-wide
@@ -88,7 +101,35 @@ struct Point {
 /// limit on how many zones it owns; a Ball camera is capped at
 /// level::kMaxBallZones, which is a Ball rule enforced in the Ball write
 /// chokepoint, not here.
-inline constexpr int kMaxZone = 12;
+inline constexpr int kMinZone = 1;
+inline constexpr int kMaxZone = 99;
+
+/// The ONE range predicate. Every write chokepoint and every validator asks
+/// this rather than re-spelling the bound, so there is a single place where the
+/// namespace can ever widen again.
+inline constexpr bool zone_in_range(int zone) {
+    return zone >= kMinZone && zone <= kMaxZone;
+}
+
+/// The next zone an automatic allocator should hand out given `used`, or nullopt
+/// when the namespace is exhausted.
+///
+/// Plain ascending scan from kMinZone. There is no separate "preferred" order to
+/// keep: the lowest legal zone is also the one a fresh machine should start at,
+/// so validity and preference are the same fact and stay one constant. This is
+/// the ONE automatic-allocation policy — both modes allocate out of one
+/// machine-wide namespace, so a second ordering elsewhere would be a second
+/// authority.
+///
+/// "Nothing free" is nullopt, never a number: every int this can return is a
+/// zone the caller may legally persist, so a caller cannot mistake exhaustion
+/// for an allocation.
+inline std::optional<int> next_free_zone(const std::set<int>& used) {
+    for (int z = kMinZone; z <= kMaxZone; ++z) {
+        if (used.count(z) == 0) return z;
+    }
+    return std::nullopt;
+}
 
 /// One ROI area belonging to a camera. A camera can have many areas. The area
 /// is a closed polygon of 3+ vertices (triangle, rectangle, …); the closing
@@ -97,7 +138,9 @@ struct CameraArea {
     int64_t id = 0;
     int64_t camera_id = 0;  // FK → camera.id
     std::string name;
-    std::optional<int> zone;  // 1..kMaxZone reporting zone, or nullopt (ROI-only)
+    // kMinZone..kMaxZone reporting zone, or nullopt (ROI-only, not reported).
+    // nullopt is the ONLY "not reported" value; 0 is not a zone number at all.
+    std::optional<int> zone;
     // Where the decimal point sits among the reader's four digit positions:
     // 0 = 0000, 1 = 000.0, 2 = 00.00, 3 = 0.000. Per AREA, because one camera
     // can own several zones reading different instruments through one model.

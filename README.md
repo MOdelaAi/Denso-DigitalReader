@@ -77,21 +77,46 @@ that is what the reporting contract carries.
 
 ## Global zone numbering
 
-Digital areas and Ball zones draw from **one machine-wide namespace**, currently
-**1–12** (`camera::kMaxZone`). A zone number identifies a reading across the whole
+Digital areas and Ball zones draw from **one machine-wide namespace**: the whole
+numbers **1–99** inclusive (`camera::kMinZone` … `camera::kMaxZone`, tested with
+`camera::zone_in_range`). A zone number identifies a reading across the whole
 appliance, not within one camera — so they are allocated across cameras, e.g.:
 
 ```
 Camera 1 → zones 1, 2, 3, 4
-Camera 2 → zones 5, 6
+Camera 2 → zones 40, 41
 ```
+
+The number is an **identifier, not an index**: it is typed directly on the Areas
+and Ball calibration steps, which list the numbers already in use and name the
+holder of one that is entered twice. Values outside the range, decimals, text and
+an empty required field all block Save.
+
+**`0` is not a zone.** There is exactly one representation of "this area is not
+reported": NULL, a disengaged `std::optional<int>`, reached from the UI by
+leaving "Report this area to a zone" unchecked. Up to schema v16, `0` was a
+_second_ spelling of the same thing, which is why readers throughout the tree
+had to carry a `zone != 0` test. **v17** normalises every legacy
+`camera_area.zone = 0` to NULL once, at migration time; after that the runtime
+invariant is simply NULL = unassigned, `1`–`99` = assigned, and a `0` reaching
+a write chokepoint is refused as out of range exactly as `100` is.
 
 A zone number is claimed by at most one area or Ball zone machine-wide; saves
 reject duplicates, and a zone number the runtime finds claimed twice is rendered
-as `Conflict` rather than attributed to a guess.
+as `Conflict` rather than attributed to a guess. The range is enforced
+authoritatively in both write chokepoints (`camera::replace_areas` and
+`level::save_level_configuration`), not only in the UI.
 
-`kMaxZone` is **not** a per-camera cap. A digit camera has no limit on how many
+The range is **not** a per-camera cap. A digit camera has no limit on how many
 zones it owns; a Ball camera is capped at four zones by a Ball-specific rule.
+
+> **Backend compatibility.** The payload format is unchanged and already sparse
+> (`{"zone1":…,"zone45":…,"zone99":…}`). The client targets **1–99**; the
+> known local simulator enforces **1–12**; the production backend's real range
+> is **unconfirmed**. The unresolved deployment surface is therefore **zones
+> 13–99** — confirm the backend accepts those keys before configuring one on a
+> live line. Zones 1–12 are unaffected, and `zone0` can no longer be produced
+> by any valid configuration.
 
 ## Mode switching
 
@@ -237,7 +262,7 @@ the root-owned, upgrade-replaced program directory).
 
 | Path | Contents |
 |---|---|
-| `<data>/denso.db` | the single SQLite store (schema **v16**, version-gated migrations) |
+| `<data>/denso.db` | the single SQLite store (schema **v17**, version-gated migrations) |
 | `<data>/models/` | TensorRT engines + their `.names.json` sidecars |
 | `<data>/models/trt_cache/` | TensorRT cache |
 | `<data>/status.json` | machine-readable health for SSH inspection |
@@ -1191,7 +1216,7 @@ Eight CMake targets, split by concern:
 ```
 src/
 ├─ core/   → denso_core   (Qt Core/Sql + std; never links Qt6::Widgets)
-│  ├─ db/         SQLite base + version-gated migrations (currently v16)
+│  ├─ db/         SQLite base + version-gated migrations (currently v17)
 │  ├─ mode/       operating mode + the destructive switch-and-reset transaction
 │  ├─ camera/     camera + ROI-area domain, zone namespace, source-change logic
 │  ├─ level/      Ball Leveler calibration, measurement and persistence

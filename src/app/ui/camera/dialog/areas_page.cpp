@@ -6,6 +6,7 @@
 #include "camera/area_validation.h"
 #include "ui/camera/dialog/page_util.h"
 #include "ui/camera/dialog/roi_canvas.h"
+#include "ui/camera/dialog/zone_number_edit.h"
 
 #include <QComboBox>
 #include <QFrame>
@@ -26,9 +27,8 @@ namespace denso::ui {
 
 namespace {
 // The zone-number namespace is machine-wide and shared with the Ball Leveler,
-// so its bound lives in core (camera::kMaxZone) rather than being redeclared per
-// page. Aliased rather than replaced inline to keep the picker code unchanged.
-constexpr int kMaxZone = camera::kMaxZone;
+// so its bound lives in core (camera::kMinZone/kMaxZone) and is applied by the
+// ONE widget that parses a typed zone number, never re-spelled here.
 constexpr int kSidePanelWidth = 280;
 
 /// The list row for an area: the zone belongs here, not two clicks away in the
@@ -178,16 +178,11 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     side->addWidget(name_edit_);
 
     side->addWidget(dim_label(QStringLiteral("Reporting zone")));
-    zone_combo_ = new QComboBox;
-    connect(zone_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-                if (idx < 0) {
-                    return;
-                }
-                const QVariant d = zone_combo_->itemData(idx);
-                const std::optional<int> z =
-                    d.isValid() ? std::optional<int>{d.toInt()}
-                                : std::optional<int>{};
+    // Typed, not picked: the namespace is 1..99 and a 99-row dropdown is not a
+    // way to enter a number the operator already knows.
+    zone_edit_ = new ZoneNumberEdit(/*allow_unassigned=*/true);
+    connect(zone_edit_, &ZoneNumberEdit::zone_changed, this,
+            [this](std::optional<int> z) {
                 if (drafting_) {
                     draft_zone_ = z;
                     return;
@@ -200,7 +195,7 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
                     push_context_areas();
                 }
             });
-    side->addWidget(zone_combo_);
+    side->addWidget(zone_edit_);
 
     // Where the decimal point sits among the reader's four digit positions. The
     // four entries ARE the four legal formats, and each carries its
@@ -306,7 +301,7 @@ void CameraAreasPage::load(std::vector<camera::CameraArea> areas,
     rebuild_zone_choices();
     refresh_list();
     name_edit_->clear();
-    sync_zone_combo(std::nullopt);
+    sync_zone_editor(std::nullopt);
     sync_format_combo();
     canvas_->go_idle();
     push_context_areas();
@@ -373,7 +368,7 @@ void CameraAreasPage::refresh_list() {
 void CameraAreasPage::select_area(int row) {
     if (row < 0 || row >= static_cast<int>(areas_.size())) {
         name_edit_->clear();
-        sync_zone_combo(std::nullopt);
+        sync_zone_editor(std::nullopt);
         sync_format_combo();
         canvas_->go_idle();
         push_context_areas();
@@ -386,7 +381,7 @@ void CameraAreasPage::select_area(int row) {
     const camera::CameraArea& a = areas_[static_cast<size_t>(row)];
     name_edit_->setText(QString::fromStdString(a.name));
     rebuild_zone_choices();  // availability depends on which area is selected
-    sync_zone_combo(a.zone);
+    sync_zone_editor(a.zone);
     sync_format_combo();
     push_context_areas();
     canvas_->edit_polygon(a.points);
@@ -459,7 +454,7 @@ void CameraAreasPage::start_new_area() {
     draft_decimal_places_ = 0;
     name_edit_->setText(QString::fromStdString(draft_name_));
     rebuild_zone_choices();  // a draft blocks against every existing area
-    sync_zone_combo(std::nullopt);
+    sync_zone_editor(std::nullopt);
     sync_format_combo();
     push_context_areas();
     canvas_->begin_draw();
@@ -538,7 +533,7 @@ void CameraAreasPage::cancel_active_draw() {
         select_area(restore);  // back to the untouched original
     } else {
         name_edit_->clear();
-        sync_zone_combo(std::nullopt);
+        sync_zone_editor(std::nullopt);
         sync_format_combo();
         canvas_->go_idle();
         push_context_areas();
@@ -613,7 +608,7 @@ void CameraAreasPage::rebuild_zone_choices() {
             continue;  // the area being edited doesn't block its own zone
         }
         const camera::CameraArea& a = areas_[i];
-        if (a.zone && *a.zone != 0) {
+        if (a.zone) {   // NULL is the one unassigned form; anything set blocks
             unavailable.emplace(*a.zone,
                                 a.name.empty()
                                     ? QStringLiteral("another area here")
@@ -622,34 +617,14 @@ void CameraAreasPage::rebuild_zone_choices() {
         }
     }
 
-    const QSignalBlocker block(zone_combo_);
-    zone_combo_->clear();
-    // No "0 = none" sentinel to decode — the default choice says what it does.
-    zone_combo_->addItem(QStringLiteral("Detection only — do not report"),
-                         QVariant());
-    auto* model = qobject_cast<QStandardItemModel*>(zone_combo_->model());
-    for (int z = 1; z <= kMaxZone; ++z) {
-        const auto owner = unavailable.find(z);
-        const bool taken = owner != unavailable.end();
-        zone_combo_->addItem(taken ? QStringLiteral("Zone %1 — used by %2")
-                                         .arg(z)
-                                         .arg(owner->second)
-                                   : QStringLiteral("Zone %1").arg(z),
-                             QVariant(z));
-        if (taken && model) {
-            // Visible but unpickable: the operator learns the number is spoken
-            // for and by whom, instead of discovering it via a failed save.
-            if (auto* item = model->item(zone_combo_->count() - 1)) {
-                item->setEnabled(false);
-            }
-        }
-    }
+    // The whole taken-set goes to the editor: it lists the used numbers and
+    // names the holder the moment one of them is typed. There is no "0 = none"
+    // entry to decode — detection-only is its own checkbox, not a magic number.
+    zone_edit_->set_unavailable(std::move(unavailable));
 }
 
-void CameraAreasPage::sync_zone_combo(std::optional<int> zone) {
-    const QSignalBlocker block(zone_combo_);
-    const int idx = zone ? zone_combo_->findData(QVariant(*zone)) : 0;
-    zone_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
+void CameraAreasPage::sync_zone_editor(std::optional<int> zone) {
+    zone_edit_->set_zone(zone);
 }
 
 // ─── Live state ──────────────────────────────────────────────────────────────
@@ -727,7 +702,7 @@ void CameraAreasPage::update_controls() {
     // or the draft. Enabled-but-ignored controls are how the old page lost the
     // operator's typing.
     name_edit_->setEnabled(has_sel || drafting_);
-    zone_combo_->setEnabled(has_sel || drafting_);
+    zone_edit_->setEnabled(has_sel || drafting_);
     format_combo_->setEnabled(has_sel || drafting_);
 
     hint_->setText(
@@ -785,6 +760,31 @@ void CameraAreasPage::attempt_save() {
                     .arg(QString::fromStdString(a.name)));
             return;
         }
+    }
+
+    // What is typed RIGHT NOW but not yet committed to any area — an
+    // out-of-range or duplicated entry leaves `areas_` holding the last good
+    // value, so without this the operator would save something other than what
+    // the field shows.
+    if (!zone_edit_->is_valid()) {
+        QMessageBox::warning(this, QStringLiteral("Check the zone number"),
+                             zone_edit_->problem());
+        return;
+    }
+
+    // The range is re-checked over the whole SET, not just the live field: an
+    // area can carry a number from a database written by another build, and
+    // replace_areas would refuse the save with no explanation.
+    if (const auto bad = camera::find_zone_out_of_range(areas_)) {
+        QMessageBox::warning(
+            this, QStringLiteral("Zone number out of range"),
+            QStringLiteral("“%1” is set to zone %2. Zone numbers run from %3 "
+                           "to %4.")
+                .arg(QString::fromStdString(bad->area_name))
+                .arg(bad->zone)
+                .arg(camera::kMinZone)
+                .arg(camera::kMaxZone));
+        return;
     }
 
     // Named here rather than surfacing as a generic write failure from the repo.

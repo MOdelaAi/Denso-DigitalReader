@@ -911,5 +911,5 @@ TEST_CASE("selectable_models mutates no row", "[selectable_models]") {
     // Schema is still v13 — this slice adds no migration.
     const auto ver = denso::db::read_user_version(f.h());
     REQUIRE(ver.has_value());
-    CHECK(*ver == 16);
+    CHECK(*ver == 17);
 }

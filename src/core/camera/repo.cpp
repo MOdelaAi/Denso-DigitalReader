@@ -278,7 +278,19 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
     // rows were just deleted above, so the cross-camera check can't self-conflict.)
     std::set<int> zones_this_camera;
     for (const CameraArea& a : areas) {
-        if (a.zone && *a.zone != 0) {  // 0 == ROI-only (not reported), never unique
+        // `a.zone` engaged is the WHOLE test: NULL is the one unassigned form,
+        // so anything engaged is a claim that must be range- and
+        // uniqueness-checked. There is deliberately no `*a.zone != 0` escape —
+        // 0 is out of range and gets REFUSED below, not silently treated as
+        // "unassigned" the way it was before v17.
+        if (a.zone) {
+            // Authoritative range enforcement — the UI validator is UX only, and
+            // this repo is also reached by the wizard controller and by tests.
+            // The column carries no CHECK, so without this an out-of-range number
+            // would persist happily and reach the payload as "zone500".
+            if (!camera::zone_in_range(*a.zone)) {
+                return rollback();
+            }
             if (!zones_this_camera.insert(*a.zone).second) {
                 return rollback();  // duplicated within this same save
             }
@@ -355,7 +367,10 @@ std::optional<std::map<int, std::string>> try_zones_owned_by_other_cameras(
     q.prepare(QStringLiteral(
         "SELECT a.zone, c.name FROM camera_area a JOIN camera c "
         "ON c.id = a.camera_id "
-        "WHERE a.camera_id != ? AND a.zone IS NOT NULL AND a.zone != 0 "
+        // No `AND a.zone != 0`: v17 normalised every legacy zero to NULL, so
+        // IS NOT NULL is the whole ownership test. Re-adding the filter would
+        // hide a 0 that should never exist rather than surfacing it.
+        "WHERE a.camera_id != ? AND a.zone IS NOT NULL "
         "UNION "
         "SELECT z.zone_no, c.name FROM ball_level_zone z JOIN camera c "
         "ON c.id = z.camera_id "

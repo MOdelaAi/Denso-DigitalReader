@@ -370,8 +370,9 @@ struct Fixture {
         const bool ok = denso::level::save_level_configuration(
             h(), camera_id, {{model_id, {class_id}}}, zones, revision_of(camera_id),
             view, kPlatform, &refusal);
-        INFO("refusal reason: " << refusal.reason_code
-             << " zone: " << refusal.zone_no);
+        INFO("refusal reason: " << refusal.reason_code << " zone: "
+             << (refusal.zone_no ? std::to_string(*refusal.zone_no)
+                                 : std::string("<camera-scoped>")));
         REQUIRE(ok);
     }
 };

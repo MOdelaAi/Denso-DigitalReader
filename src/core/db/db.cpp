@@ -18,7 +18,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 16;
+constexpr int SCHEMA_VERSION = 17;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -138,6 +138,10 @@ bool migrate_ball_calibration_to_zones(const QSqlDatabase& db) {
     }
     {
         QSqlQuery q(db);
+        // `zone != 0` is correct HERE and only here: this runs at v15, where 0
+        // was still the ROI-only sentinel, so a 0 row claimed no number. The v17
+        // block below normalises those rows to NULL, after which no reader in
+        // the tree ever sees a zero and none of them filters for one.
         if (!q.exec(QStringLiteral("SELECT zone FROM camera_area "
                                    "WHERE zone IS NOT NULL AND zone != 0"))) {
             qWarning().noquote() << "v15: read claimed zones failed:"
@@ -223,6 +227,14 @@ bool migrate_ball_calibration_to_zones(const QSqlDatabase& db) {
         // second zone and hand this camera two tanks it never had.
         if (already_migrated.count(r.camera_id)) continue;
 
+        // The literal 1 floor is this era's semantics, deliberately not
+        // camera::kMinZone: at v15 zero meant "not reported", so a camera handed
+        // Zone 0 here would be un-assigned again by the v17 block below. It
+        // happens to equal kMinZone today, and must stay a literal anyway — a
+        // future widening downward must not retroactively change what this
+        // historical backfill allocated. 0 stays its local "nothing free"
+        // sentinel for the same reason. camera::kMaxZone IS read live, so a
+        // widened ceiling gives the backfill more room.
         int zone_no = 0;
         for (int z = 1; z <= denso::camera::kMaxZone; ++z) {
             if (!taken.count(z)) { zone_no = z; break; }
@@ -855,6 +867,39 @@ bool run_migrations(const QSqlDatabase& db) {
                         "ALTER TABLE camera_area ADD COLUMN decimal_places "
                         "INTEGER NOT NULL DEFAULT 0 "
                         "CHECK (decimal_places BETWEEN 0 AND 3)")) {
+            return false;
+        }
+    }
+
+    if (version < 17) {
+        // The zone-number namespace widens from 1..12 to 1..99. Widening the
+        // ceiling alone needs no migration — `camera_area.zone` is a plain
+        // nullable INTEGER with no CHECK, and `ball_level_zone.zone_no` already
+        // carries `CHECK (zone_no >= 1)`, which is exactly the new floor.
+        //
+        // What DOES need migrating is the retirement of the zero sentinel.
+        // Before v17, `camera_area.zone = 0` was a second spelling of "this area
+        // is ROI-only, do not report it" — alongside SQL NULL, which meant the
+        // same thing. Two spellings of one state is what forced every reader to
+        // carry a `*a.zone != 0` test. Normalising to the single representation
+        // here is what lets all of them drop it: after this statement the
+        // runtime invariant is NULL = unassigned, 1..99 = assigned, with no
+        // third case. Real zones (1..12 today) are untouched by construction.
+        //
+        // A single idempotent UPDATE, so this block needs no transaction of its
+        // own: re-running it after an interrupted migration matches no rows and
+        // changes nothing, which is the same statement-by-statement resumability
+        // every other block here relies on (`user_version` is stamped once, at
+        // the very end).
+        //
+        // `ball_level_zone` is deliberately NOT rebuilt. Its `CHECK
+        // (zone_no >= 1)` is already the constraint we want, and because that
+        // CHECK has been in force since v15, a zero row could never have been
+        // persisted there — so there is no ball-side data to normalise either.
+        // The upper bound stays out of DDL on purpose: camera::zone_in_range
+        // enforces it in BOTH write chokepoints, so widening the ceiling again
+        // never costs a rebuild of hand-measured operator calibration.
+        if (!run("UPDATE camera_area SET zone = NULL WHERE zone = 0")) {
             return false;
         }
     }

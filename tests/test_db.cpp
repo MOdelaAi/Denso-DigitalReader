@@ -67,7 +67,7 @@ TEST_CASE("migrations create net_config table") {
 
 TEST_CASE("migrations set user_version") {
     const Db db = migrated();
-    REQUIRE(user_version(db.handle()) == 16);
+    REQUIRE(user_version(db.handle()) == 17);
 }
 
 TEST_CASE("migrations are idempotent") {
@@ -75,13 +75,13 @@ TEST_CASE("migrations are idempotent") {
     REQUIRE(db.has_value());
     REQUIRE(run_migrations(db->handle()));
     REQUIRE(run_migrations(db->handle()));
-    REQUIRE(user_version(db->handle()) == 16);
+    REQUIRE(user_version(db->handle()) == 17);
 }
 
 TEST_CASE("migration v13 creates model_migration_receipt", "[db]") {
     const Db db = migrated();
     REQUIRE(table_count(db.handle(), QStringLiteral("model_migration_receipt")) == 1);
-    REQUIRE(user_version(db.handle()) == 16);
+    REQUIRE(user_version(db.handle()) == 17);
 }
 
 TEST_CASE("read_user_version reports the migrated schema version", "[db][schema]") {

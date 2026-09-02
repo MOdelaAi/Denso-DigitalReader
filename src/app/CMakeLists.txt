@@ -134,6 +134,7 @@ add_library(denso_app OBJECT
     ui/camera/dialog/configure_page.cpp
     ui/camera/dialog/models_page.cpp
     ui/camera/dialog/areas_page.cpp
+    ui/camera/dialog/zone_number_edit.cpp
     ui/camera/dialog/wizard_stepper.cpp
     ui/camera/dialog/roi_canvas.cpp
     ui/camera/dialog/level_calibration_page.cpp

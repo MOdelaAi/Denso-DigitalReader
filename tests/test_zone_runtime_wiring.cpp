@@ -115,8 +115,28 @@ TEST_CASE("CameraGrid installs configured zone ownership on reload",
     CHECK(src.contains(QStringLiteral("set_configured_zones")));
     // Routed per camera, from the camera's own persisted areas.
     CHECK(src.contains(QStringLiteral("areas_for(db_, cam.id)")));
-    // Zone 0 / unset is ROI-only and must never be routed as a reporting zone.
-    CHECK(src.contains(QStringLiteral("*a.zone != 0")));
+    // MUTATION: "re-add a zero special-case to the runtime" must die.
+    //
+    // The overlay's ownership map keys off ASSIGNMENT alone — an engaged
+    // optional — and the runtime carries no opinion about the number 0 at all.
+    // That is not a statement about what 0 means; it is a statement about WHERE
+    // the legacy-zero problem is solved. Migration v17 normalises every legacy
+    // `camera_area.zone = 0` to NULL exactly once, which is what leaves the
+    // runtime invariant clean: NULL = unassigned, 1..99 = assigned, no third
+    // case. A `!= 0` filter here would be permanent special-casing of a value
+    // migration already removed, and would silently HIDE an unmigrated zero
+    // instead of letting the write chokepoint refuse it as out of range.
+    CHECK(src.contains(QStringLiteral("if (a.zone) {")));
+    for (const QString& banned : QStringList{
+             QStringLiteral("zone != 0"),   // the retired sentinel spelling
+             QStringLiteral("zone == 0"),
+             QStringLiteral("zone > 0"),
+             QStringLiteral("zone >= 1"),   // the same rule wearing a range
+             QStringLiteral("zone < 1"),
+         }) {
+        INFO("banned zero special-case in the runtime: " << banned.toStdString());
+        CHECK_FALSE(src.contains(banned));
+    }
 }
 
 // MUTATION: "let CameraTile query the reporter directly" must die. The tile owns

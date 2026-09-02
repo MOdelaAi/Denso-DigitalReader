@@ -1,6 +1,7 @@
 #include "ui/camera/dialog/level_calibration_page.h"
 
-#include "camera/camera.h"   // camera::kMaxZone — the ONE zone-number range
+#include "camera/camera.h"   // camera::kMinZone/kMaxZone — the ONE zone range
+#include "ui/camera/dialog/zone_number_edit.h"
 #include "ui/camera/dialog/level_canvas.h"
 #include "ui/camera/dialog/page_util.h"
 
@@ -119,22 +120,23 @@ LevelCalibrationPage::LevelCalibrationPage(QWidget* parent) : QWidget(parent) {
     side->addLayout(zone_row);
 
     side->addWidget(dim_label(QStringLiteral("Reporting zone")));
-    zone_combo_ = new QComboBox;
-    zone_combo_->setObjectName(QStringLiteral("levelZoneNo"));
-    connect(zone_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            [this](int idx) {
-                if (idx < 0 || selected_ < 0 ||
+    // Typed, like the Areas step, and through the SAME widget: one parse rule
+    // for a namespace both modes allocate out of. allow_unassigned is false —
+    // a Ball zone with no number is a zone the chokepoint would refuse.
+    zone_edit_ = new ZoneNumberEdit(/*allow_unassigned=*/false);
+    zone_edit_->setObjectName(QStringLiteral("levelZoneNo"));
+    connect(zone_edit_, &ZoneNumberEdit::zone_changed, this,
+            [this](std::optional<int> z) {
+                if (!z || selected_ < 0 ||
                     selected_ >= static_cast<int>(zones_.size())) {
                     return;
                 }
-                const QVariant d = zone_combo_->itemData(idx);
-                if (!d.isValid()) return;
-                zones_[static_cast<size_t>(selected_)].zone_no = d.toInt();
+                zones_[static_cast<size_t>(selected_)].zone_no = *z;
                 refresh_list();
                 rebuild_zone_choices();
                 sync();
             });
-    side->addWidget(zone_combo_);
+    side->addWidget(zone_edit_);
 
     redraw_btn_ = new QPushButton(QStringLiteral("Redraw rectangle"));
     redraw_btn_->setObjectName(QStringLiteral("levelRedraw"));
@@ -237,8 +239,10 @@ void LevelCalibrationPage::load(std::vector<denso::level::LevelZone> saved,
     // would hand the operator an empty page whose only exit is an error.
     if (zones_.empty()) {
         denso::level::LevelZone z;
-        z.zone_no = first_free_zone_no();
-        if (z.zone_no == 0) z.zone_no = 1;   // nothing free: let the save refuse it
+        // Nothing free: seed the number a fresh camera would have got anyway and
+        // let the save refuse it with a named reason, rather than opening on an
+        // empty page whose only exit is an error.
+        z.zone_no = first_free_zone_no().value_or(denso::camera::kMinZone);
         zones_.push_back(z);
     }
     // Snapshot for the dirty check, taken from what the operator will be shown.
@@ -295,18 +299,19 @@ void LevelCalibrationPage::select_zone(int row) {
         canvas_->begin_draw();
     }
     rebuild_zone_choices();
-    sync_zone_combo(z.zone_no);
+    sync_zone_editor(z.zone_no);
     sync();
 }
 
-int LevelCalibrationPage::first_free_zone_no() const {
+std::optional<int> LevelCalibrationPage::first_free_zone_no() const {
     std::set<int> used;
     for (const auto& [zone, owner] : zones_taken_) used.insert(zone);
     for (const denso::level::LevelZone& z : zones_) used.insert(z.zone_no);
-    for (int z = 1; z <= denso::camera::kMaxZone; ++z) {
-        if (!used.count(z)) return z;
-    }
-    return 0;
+    // The ordering is core's, not this page's — one namespace, one allocator,
+    // so the two modes cannot hand out the same number by disagreeing about
+    // where to start. "No free zone" stays nullopt rather than a value the
+    // namespace contains.
+    return denso::camera::next_free_zone(used);
 }
 
 void LevelCalibrationPage::add_zone() {
@@ -315,8 +320,8 @@ void LevelCalibrationPage::add_zone() {
     if (static_cast<int>(zones_.size()) >= denso::level::kMaxBallZones) {
         return;
     }
-    const int zone_no = first_free_zone_no();
-    if (zone_no == 0) {
+    const std::optional<int> zone_no = first_free_zone_no();
+    if (!zone_no) {
         status_->setText(QStringLiteral(
             "No reporting zone numbers are free. Free one on another camera "
             "first."));
@@ -324,7 +329,7 @@ void LevelCalibrationPage::add_zone() {
     }
     commit_selected();
     denso::level::LevelZone z;
-    z.zone_no = zone_no;
+    z.zone_no = *zone_no;
     zones_.push_back(z);
     refresh_list();
     const int row = static_cast<int>(zones_.size()) - 1;
@@ -389,31 +394,14 @@ void LevelCalibrationPage::rebuild_zone_choices() {
                             QStringLiteral("this camera"));
     }
 
-    const QSignalBlocker block(zone_combo_);
-    zone_combo_->clear();
-    auto* model = qobject_cast<QStandardItemModel*>(zone_combo_->model());
-    for (int z = 1; z <= denso::camera::kMaxZone; ++z) {
-        const auto it = unavailable.find(z);
-        const bool taken = it != unavailable.end();
-        zone_combo_->addItem(taken ? QStringLiteral("Zone %1 — used by %2")
-                                         .arg(z)
-                                         .arg(it->second)
-                                   : QStringLiteral("Zone %1").arg(z),
-                             QVariant(z));
-        if (taken && model) {
-            // Shown but disabled, and NAMED: hiding it would leave the operator
-            // wondering where the number went.
-            if (auto* item = model->item(zone_combo_->count() - 1)) {
-                item->setEnabled(false);
-            }
-        }
-    }
+    // The taken set is handed over whole: the editor lists the used numbers and
+    // NAMES the holder when one of them is typed. Hiding them would leave the
+    // operator wondering where a number went.
+    zone_edit_->set_unavailable(std::move(unavailable));
 }
 
-void LevelCalibrationPage::sync_zone_combo(int zone_no) {
-    const QSignalBlocker block(zone_combo_);
-    const int idx = zone_combo_->findData(QVariant(zone_no));
-    zone_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
+void LevelCalibrationPage::sync_zone_editor(int zone_no) {
+    zone_edit_->set_zone(zone_no);
 }
 
 std::optional<int> LevelCalibrationPage::first_invalid_zone() const {
@@ -439,7 +427,7 @@ void LevelCalibrationPage::sync() {
     }
 
     const bool has_sel = selected_ >= 0;
-    zone_combo_->setEnabled(has_sel);
+    zone_edit_->setEnabled(has_sel);
     redraw_btn_->setEnabled(has_sel);
     conf_->setEnabled(has_sel);
     hold_->setEnabled(has_sel);
@@ -447,6 +435,14 @@ void LevelCalibrationPage::sync() {
     delete_btn_->setEnabled(has_sel && zones_.size() > 1);
     refresh_list();
 
+    // A zone number that is out of range, malformed or already held blocks the
+    // save exactly as an unfinished rectangle does — the chokepoint would refuse
+    // the whole set, losing every other zone's work with it.
+    if (has_sel && !zone_edit_->is_valid()) {
+        status_->setText(zone_edit_->problem());
+        save_btn_->setEnabled(false);
+        return;
+    }
     if (has_sel && !draft_.has_rect()) {
         status_->setText(QStringLiteral(
             "Drag out the rectangle the ball moves within to begin."));
@@ -488,9 +484,24 @@ void LevelCalibrationPage::attempt_save() {
     // affordance, and this page is driven by signals a future caller could invoke
     // directly. The verdict is the draft's, which is the write path's.
     commit_selected();
-    if (zones_.empty() || first_invalid_zone().has_value()) {
+    if (zones_.empty() || first_invalid_zone().has_value() ||
+        !zone_edit_->is_valid()) {
         sync();
         return;
+    }
+    // The set numbers, not just the live field: a zone whose number came from a
+    // database written by another build would otherwise reach the chokepoint and
+    // be refused with no explanation on this page.
+    for (const denso::level::LevelZone& z : zones()) {
+        if (!denso::camera::zone_in_range(z.zone_no)) {
+            status_->setText(QStringLiteral("Zone %1 does not exist. Zone "
+                                            "numbers run from %2 to %3.")
+                                 .arg(z.zone_no)
+                                 .arg(denso::camera::kMinZone)
+                                 .arg(denso::camera::kMaxZone));
+            save_btn_->setEnabled(false);
+            return;
+        }
     }
     emit save_requested(zones());
 }
@@ -502,9 +513,12 @@ void LevelCalibrationPage::show_save_error() {
                        "Nothing was changed. Please try again."));
 }
 
-void LevelCalibrationPage::show_refusal(const QString& reason_code, int zone_no) {
+void LevelCalibrationPage::show_refusal(const QString& reason_code,
+                                        std::optional<int> zone_no) {
+    // Engaged, not > 0: the prefix is driven by whether a zone is IMPLICATED,
+    // which is a different question from whether some number is truthy.
     const QString where =
-        zone_no > 0 ? QStringLiteral("Zone %1: ").arg(zone_no) : QString();
+        zone_no ? QStringLiteral("Zone %1: ").arg(*zone_no) : QString();
     QMessageBox::warning(
         this, QStringLiteral("Zones not saved"),
         QStringLiteral("These zones were refused and nothing was changed.\n\n"

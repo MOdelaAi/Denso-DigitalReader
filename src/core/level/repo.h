@@ -20,7 +20,7 @@
 // policy (models::model_compatibility) exactly as detection::set_camera_models
 // does; the family->mode matrix lives only in models/compatibility.cpp. It also
 // holds no zone-NUMBERING rule of its own: the namespace bound is
-// camera::kMaxZone and cross-camera/cross-mode ownership is asked of
+// camera::zone_in_range and cross-camera/cross-mode ownership is asked of
 // camera::zones_owned_by_other_cameras, the same authority the digit Areas page
 // consults.
 #pragma once
@@ -74,23 +74,31 @@ struct LevelConfig {
 /// NOTHING else, so a refusal is diagnosable without ever exposing a credential.
 ///
 /// `zone_no` names the offending zone for the zone-scoped reason codes
-/// (`level_zone_*`, and the geometry codes from validate_calibration), and is 0
-/// for camera-scoped ones. Without it a four-zone save that fails geometry
-/// validation would tell the operator only that "a" zone is wrong.
+/// (`level_zone_*`, and the geometry codes from validate_calibration), and is
+/// DISENGAGED for camera-scoped ones. Without it a four-zone save that fails
+/// geometry validation would tell the operator only that "a" zone is wrong.
+///
+/// It is an optional rather than a 0 sentinel because the two facts are
+/// genuinely different — "refused, and here is the zone" versus "refused, and no
+/// zone is implicated" — and the type should say so. That 0 happens to be
+/// outside the namespace does not make it a good spelling for "no zone": a
+/// sentinel only reads correctly for as long as nobody widens the range onto
+/// it, and this file has already been through that once.
 struct SaveRefusal {
     int64_t camera_id = 0;
     int64_t model_id = 0;
     std::string canonical_id;
     std::string filename;
     std::string reason_code;
-    int zone_no = 0;
+    std::optional<int> zone_no;
 };
 
 /// THE Ball Leveler write chokepoint. In ONE transaction it:
 ///   1. requires exactly one binding                 -> level_model_count
 ///   2. requires exactly one class on it             -> level_class_count
 ///   3. requires 1..kMaxBallZones zones              -> level_zone_count
-///   4. requires each zone_no in 1..camera::kMaxZone -> level_zone_out_of_range
+///   4. requires each zone_no in camera::kMinZone..kMaxZone (1..99)
+///                                                    -> level_zone_out_of_range
 ///   5. requires zone numbers unique within the set  -> level_zone_duplicate
 ///   6. requires no OTHER camera (either mode) to
 ///      claim any of those numbers                   -> level_zone_taken

@@ -92,14 +92,29 @@ bool polygon_is_degenerate(const std::vector<Point>& poly) {
            polygon_self_intersects(poly);
 }
 
+std::optional<ZoneRangeError> find_zone_out_of_range(
+    const std::vector<CameraArea>& areas) {
+    for (const CameraArea& a : areas) {
+        if (a.zone && !zone_in_range(*a.zone)) {
+            return ZoneRangeError{*a.zone, a.name};
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<ZoneConflict> find_zone_conflict(
     const std::vector<CameraArea>& areas,
     const std::map<int, std::string>& zones_owned_elsewhere) {
     std::set<int> claimed_here;
     for (const CameraArea& a : areas) {
-        if (!a.zone || *a.zone == 0) {
+        if (!a.zone) {
             continue;  // ROI-only: not reported, so never unique
         }
+        // NOTE: no `*a.zone == 0` escape. Engagement is the WHOLE unassigned
+        // test — 0 is not a zone at all, so it is never "the ROI-only one" to be
+        // skipped here; find_zone_out_of_range refuses it outright, before this
+        // runs. Re-adding a zero escape would let an out-of-range 0 slip the
+        // uniqueness check on its way to being refused for the other reason.
         const auto elsewhere = zones_owned_elsewhere.find(*a.zone);
         if (elsewhere != zones_owned_elsewhere.end()) {
             return ZoneConflict{*a.zone, a.name, elsewhere->second};

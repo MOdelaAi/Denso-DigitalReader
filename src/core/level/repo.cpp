@@ -68,7 +68,8 @@ bool save_level_configuration(const QSqlDatabase& db, int64_t camera_id,
                               SaveRefusal* refusal) {
     const auto refuse = [&](const std::string& code, int64_t model_id,
                             const std::string& canonical,
-                            const std::string& filename, int zone_no = 0) {
+                            const std::string& filename,
+                            std::optional<int> zone_no = std::nullopt) {
         if (refusal) {
             refusal->camera_id = camera_id;
             refusal->model_id = model_id;
@@ -105,7 +106,11 @@ bool save_level_configuration(const QSqlDatabase& db, int64_t camera_id,
     }
     std::set<int> zone_nos;
     for (const LevelZone& z : zones) {
-        if (z.zone_no < 1 || z.zone_no > denso::camera::kMaxZone) {
+        // The SAME predicate the digit chokepoint applies — one namespace, one
+        // bound, so the two modes cannot drift. It re-spells nothing: the floor
+        // it enforces is the one ball_level_zone's own CHECK (zone_no >= 1) has
+        // carried since v15.
+        if (!denso::camera::zone_in_range(z.zone_no)) {
             return refuse("level_zone_out_of_range", binding.model_id, std::string(),
                           std::string(), z.zone_no);
         }

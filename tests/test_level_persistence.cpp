@@ -330,11 +330,11 @@ bool save_float(const Fixture& fx, int64_t camera_id,
 
 // ─── 1-2. migration v13 -> v14 is additive and preserves every digit row ──────
 
-TEST_CASE("schema version is 16", "[level][schema]") {
-    CHECK(denso::db::supported_schema_version() == 16);
+TEST_CASE("schema version is 17", "[level][schema]") {
+    CHECK(denso::db::supported_schema_version() == 17);
 }
 
-TEST_CASE("v13 -> v16 migrates a populated database and preserves every Digital "
+TEST_CASE("v13 -> v17 migrates a populated database and preserves every Digital "
           "Reader row",
           "[level][schema][migration]") {
     QTemporaryDir dir;
@@ -397,7 +397,7 @@ TEST_CASE("v13 -> v16 migrates a populated database and preserves every Digital 
         REQUIRE(db.has_value());
         REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 13);
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
 
         // MUTATION GUARD: every digit row survives, with its values intact.
         CHECK(row_count(db->handle(), "camera") == 1);
@@ -447,7 +447,7 @@ TEST_CASE("v13 -> v16 migrates a populated database and preserves every Digital 
 // migration that infers schema from it fails at the first query. A failed
 // `run_migrations` is a bricked upgrade: the appliance refuses to boot.
 
-TEST_CASE("v11 -> v16 upgrades a real legacy database and preserves every row",
+TEST_CASE("v11 -> v17 upgrades a real legacy database and preserves every row",
           "[level][schema][migration]") {
     QTemporaryDir dir;
     REQUIRE(dir.isValid());
@@ -484,7 +484,7 @@ TEST_CASE("v11 -> v16 upgrades a real legacy database and preserves every row",
         REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 11);
 
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
 
         // Every v11 row survives, values intact.
         CHECK(row_count(db->handle(), "camera") == 1);
@@ -526,7 +526,7 @@ TEST_CASE("a populated v14 Ball calibration becomes one binding plus one zone",
     REQUIRE(db.has_value());
     REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 14);
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
 
     // Exactly one binding, carrying the camera-level model identity.
     REQUIRE(row_count(db->handle(), "ball_level_binding") == 1);
@@ -705,7 +705,7 @@ TEST_CASE("a migration interrupted before the version stamp resumes on restart",
     auto db = denso::db::Db::open(path);
     REQUIRE(db.has_value());
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
 
     const auto cams = denso::camera::all(db->handle());
     REQUIRE(cams.size() == 1);
@@ -743,7 +743,7 @@ TEST_CASE("the v15 block repairs the digit zone schema it depends on",
     auto db = denso::db::Db::open(path);
     REQUIRE(db.has_value());
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
 
     // Repaired, not merely tolerated: the table AND its zone column are there,
     // so the digit reader has somewhere to record a claim after the upgrade.
@@ -1514,6 +1514,115 @@ TEST_CASE("save_level_configuration rejects a class the model does not declare",
             one_zone(good_calibration()), "rev-1", *fx.view, kPlatform, nullptr));
         CHECK(row_count(fx.h(), "ball_level_zone") == 1);
     }
+}
+
+// ─── the shared 1..99 namespace, from the Ball side ──────────────────────────
+//
+// The Ball chokepoint must apply the SAME bound as the digit one, or the two
+// modes would disagree about what the one machine-wide namespace contains. It
+// asks camera::zone_in_range rather than re-spelling the bound, so the floor it
+// enforces is the one `ball_level_zone`'s own `CHECK (zone_no >= 1)` has carried
+// since v15 — which is exactly why v17 needs no rebuild on this side.
+
+TEST_CASE("save_level_configuration enforces the 1..99 zone range",
+          "[level][save][zone_namespace]") {
+    Fixture fx;
+    const auto cid = denso::camera::insert(fx.h(), ip_camera("Tank 1"));
+    REQUIRE(cid.has_value());
+
+    SECTION("a negative zone is refused, with the offending number named") {
+        SaveRefusal refusal;
+        CHECK_FALSE(denso::level::save_level_configuration(
+            fx.h(), *cid, {LevelBinding{fx.float_model_id, {0}}},
+            one_zone(good_calibration(), -1), "rev-1", *fx.view, kPlatform, &refusal));
+        CHECK(refusal.reason_code == "level_zone_out_of_range");
+        REQUIRE(refusal.zone_no.has_value());
+        CHECK(*refusal.zone_no == -1);
+        CHECK(row_count(fx.h(), "ball_level_zone") == 0);
+    }
+
+    SECTION("a zone above the ceiling is refused") {
+        SaveRefusal refusal;
+        CHECK_FALSE(denso::level::save_level_configuration(
+            fx.h(), *cid, {LevelBinding{fx.float_model_id, {0}}},
+            one_zone(good_calibration(), 100), "rev-1", *fx.view, kPlatform, &refusal));
+        CHECK(refusal.reason_code == "level_zone_out_of_range");
+        REQUIRE(refusal.zone_no.has_value());
+        CHECK(*refusal.zone_no == 100);
+        CHECK(row_count(fx.h(), "ball_level_zone") == 0);
+    }
+
+    SECTION("Zone 0 is refused, by the application and by the DDL alike") {
+        SaveRefusal refusal;
+        CHECK_FALSE(denso::level::save_level_configuration(
+            fx.h(), *cid, {LevelBinding{fx.float_model_id, {0}}},
+            one_zone(good_calibration(), 0), "rev-1", *fx.view, kPlatform, &refusal));
+        CHECK(refusal.reason_code == "level_zone_out_of_range");
+        REQUIRE(refusal.zone_no.has_value());
+        // Engaged and holding 0: a refusal ABOUT zone 0 is a different fact from
+        // a camera-scoped refusal naming no zone, which is why this field is an
+        // optional and not a 0 sentinel.
+        CHECK(*refusal.zone_no == 0);
+        CHECK(row_count(fx.h(), "ball_level_zone") == 0);
+    }
+
+    SECTION("Zone 1 is accepted and stored as 1") {
+        REQUIRE(denso::level::save_level_configuration(
+            fx.h(), *cid, {LevelBinding{fx.float_model_id, {0}}},
+            one_zone(good_calibration(), 1), "rev-1", *fx.view, kPlatform, nullptr));
+        const auto stored = denso::level::level_config_for(fx.h(), *cid);
+        REQUIRE(stored.has_value());
+        REQUIRE(stored->zones.size() == 1);
+        CHECK(stored->zones.at(0).zone_no == 1);
+    }
+
+    SECTION("Zone 99 is accepted and stored as 99") {
+        REQUIRE(denso::level::save_level_configuration(
+            fx.h(), *cid, {LevelBinding{fx.float_model_id, {0}}},
+            one_zone(good_calibration(), 99), "rev-1", *fx.view, kPlatform, nullptr));
+        const auto stored = denso::level::level_config_for(fx.h(), *cid);
+        REQUIRE(stored.has_value());
+        REQUIRE(stored->zones.size() == 1);
+        CHECK(stored->zones.at(0).zone_no == 99);
+    }
+}
+
+TEST_CASE("the zone namespace is shared across BOTH modes",
+          "[level][save][zone_namespace]") {
+    Fixture fx;
+    const auto digit_cam = denso::camera::insert(fx.h(), ip_camera("Line 1"));
+    const auto ball_cam = denso::camera::insert(fx.h(), ip_camera("Tank 1"));
+    REQUIRE(digit_cam.has_value());
+    REQUIRE(ball_cam.has_value());
+
+    // A digit ROI takes Zone 1 — the lowest zone there is, and the number the
+    // Ball allocator would also reach for first, so the two modes race for it.
+    denso::camera::CameraArea a;
+    a.name = "digit-one";
+    a.zone = 1;
+    a.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    REQUIRE(denso::camera::replace_areas(fx.h(), *digit_cam, {a}));
+
+    // ...so the Ball camera cannot have it. If the ownership query stopped
+    // spanning both tables, both modes would post a different reading under the
+    // same "zone1" key.
+    SaveRefusal refusal;
+    CHECK_FALSE(denso::level::save_level_configuration(
+        fx.h(), *ball_cam, {LevelBinding{fx.float_model_id, {0}}},
+        one_zone(good_calibration(), 1), "rev-1", *fx.view, kPlatform, &refusal));
+    CHECK(refusal.reason_code == "level_zone_taken");
+    REQUIRE(refusal.zone_no.has_value());
+    CHECK(*refusal.zone_no == 1);
+
+    // And the reverse direction: a Ball Zone 5 blocks a digit ROI on 5.
+    REQUIRE(denso::level::save_level_configuration(
+        fx.h(), *ball_cam, {LevelBinding{fx.float_model_id, {0}}},
+        one_zone(good_calibration(), 5), "rev-1", *fx.view, kPlatform, nullptr));
+    denso::camera::CameraArea five;
+    five.name = "digit-five";
+    five.zone = 5;
+    five.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
+    CHECK_FALSE(denso::camera::replace_areas(fx.h(), *digit_cam, {five}));
 }
 
 TEST_CASE("an unknown class performs NO partial write and spares the good row",

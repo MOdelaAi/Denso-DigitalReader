@@ -383,16 +383,36 @@ TEST_CASE("zones_owned_by_other_cameras: ignores ROI-only areas", "[camera_repo]
     REQUIRE(a.has_value());
     REQUIRE(b.has_value());
 
-    CameraArea unzoned;  // zone stays nullopt
+    CameraArea unzoned;  // zone stays nullopt — the ONE unassigned form
     unzoned.name = "A-roi";
     unzoned.points = {{0.1f, 0.1f}, {0.9f, 0.1f}, {0.5f, 0.9f}};
-    CameraArea zero;
-    zero.name = "A-zero";
-    zero.zone = 0;  // the ROI-only sentinel — claims nothing
-    zero.points = {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.5f, 0.8f}};
-    REQUIRE(replace_areas(d.handle(), *a, {unzoned, zero}));
+    REQUIRE(replace_areas(d.handle(), *a, {unzoned}));
 
     CHECK(zones_owned_by_other_cameras(d.handle(), *b).empty());
+}
+
+TEST_CASE("zones_owned_by_other_cameras: ownership keys off NULL, not zero",
+          "[camera_repo]") {
+    auto d = db();
+    const auto a = insert(d.handle(), usb_cam());
+    const auto b = insert(d.handle(), ip_cam());
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+
+    // The ownership query's whole unassigned test is `zone IS NOT NULL`. It
+    // carries no `AND zone != 0` any more, because v17 left no zero for it to
+    // filter — and re-adding one would hide a zero that should never exist
+    // rather than surfacing it. Zone 1 is the lowest number that can be owned.
+    CameraArea lowest;
+    lowest.name = "A-one";
+    lowest.zone = 1;
+    lowest.points = {{0.2f, 0.2f}, {0.8f, 0.2f}, {0.5f, 0.8f}};
+    REQUIRE(replace_areas(d.handle(), *a, {lowest}));
+
+    const auto owned = zones_owned_by_other_cameras(d.handle(), *b);
+    REQUIRE(owned.count(1) == 1);
+    CHECK(owned.at(1) == usb_cam().name);
+    CHECK(owned.count(0) == 0);
 }
 
 TEST_CASE("replace_areas lets a camera keep its own zone on re-save", "[camera_repo]") {
@@ -410,23 +430,48 @@ TEST_CASE("replace_areas lets a camera keep its own zone on re-save", "[camera_r
     CHECK(areas_for(d.handle(), *a).size() == 1);
 }
 
-TEST_CASE("replace_areas treats zone 0 as ROI-only, not a unique zone", "[camera_repo]") {
+TEST_CASE("replace_areas refuses zone 0 outright", "[camera_repo]") {
     auto d = db();
     const auto a = insert(d.handle(), usb_cam());
     REQUIRE(a.has_value());
 
-    // Zone 0 means "ROI-only, not reported" (mirrors the UI's 0 = none). Multiple
-    // such areas must coexist without tripping the machine-wide uniqueness guard.
+    // Zone 0 has been through two meanings and now has a third. It was the
+    // ROI-only sentinel (any number of areas could carry it); it is now simply
+    // out of range. Neither of the old readings may survive: it is not accepted
+    // as a zone, and it is not quietly reinterpreted as unassigned either.
     CameraArea r1;
     r1.name = "roi-a";
     r1.zone = 0;
     r1.points = {{0.1f, 0.1f}, {0.4f, 0.1f}, {0.25f, 0.4f}};
+    CHECK_FALSE(replace_areas(d.handle(), *a, {r1}));
+    CHECK(areas_for(d.handle(), *a).empty());   // refused, not silently stored
+
+    // Two of them are refused for the same reason, not accepted as two ROIs.
     CameraArea r2;
     r2.name = "roi-b";
     r2.zone = 0;
     r2.points = {{0.6f, 0.6f}, {0.9f, 0.6f}, {0.75f, 0.9f}};
-    CHECK(replace_areas(d.handle(), *a, {r1, r2}));
-    CHECK(areas_for(d.handle(), *a).size() == 2);
+    CHECK_FALSE(replace_areas(d.handle(), *a, {r1, r2}));
+
+    // A refusal is all-or-nothing: one bad zone loses the whole save, so a
+    // valid sibling in the same set must not have landed on its own.
+    CameraArea good = r2;
+    good.name = "good";
+    good.zone = 3;
+    CHECK_FALSE(replace_areas(d.handle(), *a, {r1, good}));
+    CHECK(areas_for(d.handle(), *a).empty());
+
+    // Unassigned is nullopt, and ANY number of those coexist — this is the
+    // behaviour zone 0 used to provide, and it now has exactly one spelling.
+    CameraArea u1 = r1;
+    u1.zone.reset();
+    CameraArea u2 = r2;
+    u2.zone.reset();
+    CHECK(replace_areas(d.handle(), *a, {u1, u2}));
+    const auto back = areas_for(d.handle(), *a);
+    REQUIRE(back.size() == 2);
+    CHECK_FALSE(back[0].zone.has_value());
+    CHECK_FALSE(back[1].zone.has_value());
 }
 
 TEST_CASE("replace_areas rejects duplicate zone numbers within one camera", "[camera_repo]") {

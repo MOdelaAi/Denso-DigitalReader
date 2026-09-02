@@ -26,6 +26,7 @@ class QPushButton;
 namespace denso::ui {
 
 class RoiCanvas;
+class ZoneNumberEdit;
 
 class CameraAreasPage : public QWidget {
     Q_OBJECT
@@ -35,8 +36,9 @@ public:
 
     /// The existing set to edit, plus zone → owning-camera-name for every zone
     /// claimed by OTHER cameras (see camera::zones_owned_by_other_cameras).
-    /// Taken zones are shown disabled in the picker, named, so the operator
-    /// can't build a save that the repo would reject.
+    /// Taken zones are listed under the zone field and typing one raises a
+    /// named duplicate warning that blocks Save, so the operator can't build a
+    /// save that the repo would reject.
     void load(std::vector<camera::CameraArea> areas,
               std::map<int, std::string> zones_taken);
     void set_background(const QImage& oriented);  // canvas backdrop
@@ -63,7 +65,7 @@ private:
     void redraw_selected();
     void apply_edited_polygon(const std::vector<camera::Point>& pts);
     void rebuild_zone_choices();
-    void sync_zone_combo(std::optional<int> zone);
+    void sync_zone_editor(std::optional<int> zone);
     // Takes no argument on purpose: it reads whichever of the selected area or
     // the in-progress draft is current, so no call site can pass the wrong one.
     void sync_format_combo();
@@ -92,7 +94,7 @@ private:
     RoiCanvas* canvas_ = nullptr;
     QListWidget* list_ = nullptr;
     QLineEdit* name_edit_ = nullptr;
-    QComboBox* zone_combo_ = nullptr;
+    ZoneNumberEdit* zone_edit_ = nullptr;
     QComboBox* format_combo_ = nullptr;
     QPushButton* new_btn_ = nullptr;
     QPushButton* redraw_btn_ = nullptr;

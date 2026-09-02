@@ -49,6 +49,24 @@ struct ZoneConflict {
     std::string owner;      // "" ⇒ duplicated within this same camera
 };
 
+/// An area carrying a zone number outside the machine's namespace.
+struct ZoneRangeError {
+    int zone = 0;
+    std::string area_name;
+};
+
+/// The first area whose zone falls outside [kMinZone, kMaxZone], or nullopt.
+/// Areas with no zone are ROI-only and have no number to be out of range.
+///
+/// Separate from find_zone_conflict because the two are different faults with
+/// different operator advice, and because the range check must run FIRST: an
+/// out-of-range number that happens not to collide is still unsaveable, and
+/// reporting only the collision would send the operator hunting the wrong thing.
+/// The repositories re-check this authoritatively; this exists so the UI can
+/// name the problem instead of surfacing a generic write failure.
+std::optional<ZoneRangeError> find_zone_out_of_range(
+    const std::vector<CameraArea>& areas);
+
 /// The first zone clash in `areas`, or nullopt when the set is clean. Mirrors
 /// the machine-wide uniqueness rule `replace_areas` enforces: a zone may be
 /// claimed by exactly one area across all cameras, because the brazing payload

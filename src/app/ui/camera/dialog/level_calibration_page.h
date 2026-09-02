@@ -44,6 +44,8 @@ class QSpinBox;
 
 namespace denso::ui {
 
+class ZoneNumberEdit;
+
 class LevelCanvas;
 
 class LevelCalibrationPage : public QWidget {
@@ -68,7 +70,12 @@ public:
     void show_save_error();                       // persistence failed
     /// Name a refusal the write chokepoint reported (its stable reason code),
     /// attributed to a zone when the refusal names one.
-    void show_refusal(const QString& reason_code, int zone_no = 0);
+    /// `zone_no` is disengaged for a camera-scoped refusal, engaged for a
+    /// zone-scoped one. Deliberately not a 0 sentinel: "no zone is implicated"
+    /// is a state, not a number, and spelling it as one only reads correctly
+    /// until somebody widens the namespace onto that number.
+    void show_refusal(const QString& reason_code,
+                      std::optional<int> zone_no = std::nullopt);
 
     /// The SELECTED zone's draft. Test seam and canvas source.
     const denso::level::CalibrationDraft& draft() const { return draft_; }
@@ -106,11 +113,13 @@ private:
     void add_zone();
     void delete_selected();
     void rebuild_zone_choices();
-    void sync_zone_combo(int zone_no);
-    /// The lowest zone number free for a NEW zone — not claimed by another
-    /// camera and not already used by this camera's own zones. 0 when the
-    /// namespace is exhausted.
-    int first_free_zone_no() const;
+    void sync_zone_editor(int zone_no);
+    /// The zone number an automatic allocation should take for a NEW zone — not
+    /// claimed by another camera and not already used by this camera's own zones.
+    /// Delegates to camera::next_free_zone, so both modes allocate in the same
+    /// order: ascending from 1. nullopt when the namespace is full — an optional
+    /// rather than a 0 sentinel, so exhaustion cannot be mistaken for a zone.
+    std::optional<int> first_free_zone_no() const;
     void attempt_save();    // re-check, then emit — a disabled button is not a gate
     /// The first zone whose geometry does not validate, or nullopt when the whole
     /// set is ready. Save is gated on this, so the button can never offer a set
@@ -119,7 +128,7 @@ private:
 
     LevelCanvas* canvas_ = nullptr;
     QListWidget* list_ = nullptr;
-    QComboBox* zone_combo_ = nullptr;
+    ZoneNumberEdit* zone_edit_ = nullptr;
     QPushButton* add_btn_ = nullptr;
     QPushButton* delete_btn_ = nullptr;
     QPushButton* redraw_btn_ = nullptr;

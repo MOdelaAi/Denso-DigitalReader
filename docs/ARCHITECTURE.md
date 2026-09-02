@@ -704,8 +704,10 @@ them, never on each other; the root entry points compose all three.
   is named there instead of arriving as a generic write failure from
   `replace_areas`: an unresolved draw blocks the save, degenerate and
   self-intersecting polygons are refused, and zone clashes are reported with
-  their holder (the picker disables zones held by other cameras —
-  `zones_owned_by_other_cameras` — and by this camera's other areas). Drawing is
+  their holder (`ZoneNumberEdit` lists the numbers held by other cameras —
+  `zones_owned_by_other_cameras` — and by this camera's other areas, and names
+  the holder of one that is typed; the same widget serves the Ball calibration
+  step, so one parse rule covers the whole namespace). Drawing is
   a locked sub-task: the list and "+ New area" disable until the shape is
   finished or cancelled. Anything that discards work confirms first, including
   `CameraDialog::reject()` so Escape and the window's X can't slip past the
@@ -1303,6 +1305,28 @@ Pushes each ROI's number to a backend as one combined JSON POST on change.
 Config lives in `src/core/brazing/config` (`BrazingConfig{enabled, base_url}` over
 the `settings` key/value table); each ROI (`camera_area`) carries a `zone` number
 (migration **v10**, nullable — NULL = ROI-only, not reported).
+
+Zone numbers are the whole range **1–99** (`camera::kMinZone`/`kMaxZone`, tested
+by `camera::zone_in_range`), one namespace shared by both operating modes, with
+`camera::next_free_zone` as the single automatic-allocation policy. **`0` is not
+a zone**: NULL is the one unassigned representation.
+
+**v17** is what makes that true, and it is a one-statement migration:
+`UPDATE camera_area SET zone = NULL WHERE zone = 0`. Before it, `0` was a second
+spelling of "not reported" alongside NULL, and every reader had to test for it;
+normalising the legacy rows once is what lets the runtime carry no zero
+special-case at all (guarded structurally in `test_zone_runtime_wiring`).
+`ball_level_zone` is deliberately **not** rebuilt — its v15
+`CHECK (zone_no >= 1)` is already the 1–99 floor, and because that CHECK has
+been in force since v15 a zero row could never have been persisted there, so
+there is no ball-side data to normalise either. The upper bound stays out of DDL
+on purpose: both write chokepoints enforce it, so widening the ceiling again
+never costs a rebuild of hand-measured calibration. The single UPDATE is
+idempotent, so the block needs no transaction of its own and re-runs harmlessly
+after an interrupted migration, like every other block in `run_migrations`.
+
+The payload is untouched by all of this: it was already sparse and keyed by
+`"zone" + number`.
 
 Pipeline, all off the GUI thread until the final POST:
 

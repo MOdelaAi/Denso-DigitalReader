@@ -88,6 +88,9 @@ add_executable(denso_tests
     test_level_measure.cpp
     test_level_processor.cpp
     test_level_persistence.cpp
+    # The 1..99 zone namespace: range authority, both write chokepoints,
+    # the payload keys, and the v16 -> v17 sentinel-retirement migration.
+    test_zone_namespace.cpp
     test_mode_confirm_text.cpp
     test_model_empty_state.cpp
 
@@ -149,6 +152,9 @@ add_executable(denso_integration_tests
     # Zone Runtime Overlay: structural guards that aggregation is not gated on
     # backend config and that CameraTile stays rendering-only.
     test_zone_runtime_wiring.cpp
+    # The typed Zone-number field (1..99). A real Qt widget from denso_app,
+    # driven offscreen: it is the acceptance rule the wizard Save is gated on.
+    test_zone_number_edit.cpp
     # Zone annotation: the values are burned into the camera frame, so this
     # drives the REAL frame processors and asserts on the delivered image.
     test_zone_frame_pipeline.cpp

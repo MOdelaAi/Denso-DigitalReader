@@ -348,7 +348,7 @@ void CameraGrid::reload() {
         // eviction still keys off what was actually published (spec §3.3b).
         std::set<int> configured_zones;
         for (const camera::CameraArea& a : areas) {
-            if (a.zone && *a.zone != 0) {  // 0 / unset == ROI-only, never reported
+            if (a.zone) {  // NULL == ROI-only; v17 left no zero to filter out
                 configured_zones.insert(*a.zone);
             }
         }
