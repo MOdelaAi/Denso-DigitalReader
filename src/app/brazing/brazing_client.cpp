@@ -19,23 +19,27 @@ namespace {
 constexpr int kBrazingTimeoutMs = 5000;  // abort a stuck POST (soak-safe)
 }
 
-BrazingClient::BrazingClient(std::string base_url, QObject* parent)
+BrazingClient::BrazingClient(std::string base_url, std::string api_path,
+                             QObject* parent)
     : QObject(parent),
-      // ONE composition site, and the ONE place the endpoint path is appended.
-      // brazing::endpoint_url() owns both the trailing-slash trim this used to do
-      // inline and the guard against a stored value that already ends in the
-      // endpoint (which would otherwise post to …/update/api/brazing/update).
-      endpoint_(QString::fromStdString(denso::brazing::endpoint_url(base_url))),
+      // ONE composition site, and the ONE place the base and the configured path
+      // are joined. brazing::endpoint_url() owns both the trailing-slash trim
+      // this used to do inline and the guard against a stored base that already
+      // ends in the endpoint (which would otherwise post to …/update/api/…).
+      endpoint_(QString::fromStdString(
+          denso::brazing::endpoint_url(base_url, api_path))),
       nam_(new QNetworkAccessManager(this)) {
     // A non-empty address that yields no endpoint was REFUSED by the shared
-    // normalizer. The grid already declines to build a sender for such a value,
-    // so reaching here means something constructed a client directly — say it
-    // once rather than sit silent for the life of the process.
+    // normalizer — either half of it can be the reason. The grid already declines
+    // to build a sender for such a configuration, so reaching here means
+    // something constructed a client directly — say it once rather than sit
+    // silent for the life of the process.
     if (endpoint_.isEmpty() && !base_url.empty()) {
-        qWarning().noquote() << "[brazing] unusable server base URL; nothing will"
-                             << "be sent:"
+        qWarning().noquote() << "[brazing] unusable server address or reporting"
+                             << "API path; nothing will be sent:"
                              << QString::fromStdString(
-                                    logging::sanitize_url(base_url));
+                                    logging::sanitize_url(base_url))
+                             << QString::fromStdString(api_path);
     }
 }
 

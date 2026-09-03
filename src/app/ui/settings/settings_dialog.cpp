@@ -139,7 +139,11 @@ SettingsDialog::FormState SettingsDialog::current_form() const {
     f.window_size = window_size_ ? window_size_->currentData().toInt() : -1;
     f.dark = dark_switch_ && dark_switch_->isChecked();
     f.brazing_enabled = brazing_enabled_ && brazing_enabled_->isChecked();
-    f.brazing_url = brazing_url_ ? brazing_url_->text() : QString();
+    f.brazing_scheme = brazing_scheme_ ? brazing_scheme_->currentData().toString()
+                                       : QString();
+    f.brazing_host = brazing_host_ ? brazing_host_->text() : QString();
+    f.brazing_port = brazing_port_ ? brazing_port_->text() : QString();
+    f.brazing_api_path = brazing_api_path_ ? brazing_api_path_->text() : QString();
     return f;
 }
 
@@ -187,16 +191,15 @@ void SettingsDialog::save_changes() {
         // The connection is in an unknown state; writing anyway is how a caller
         // ends up told "failed" after some rows have already landed.
         select_server_page();
-        set_status(brazing_status_,
-                   QStringLiteral("Could not save: the database is busy. "
-                                  "Nothing was changed."),
-                   true);
+        set_server_status(QStringLiteral("Could not save: the database is busy. "
+                                         "Nothing was changed."),
+                          true);
         return;
     }
     const auto abandon = [&](const QString& why) {
         if (txn_supported) conn.rollback();
         select_server_page();   // put the operator where the problem is
-        set_status(brazing_status_, why, true);
+        set_server_status(why, true);
     };
 
     // The Server page is the only one with input that can be wrong. Its own
@@ -423,26 +426,116 @@ QWidget* SettingsDialog::build_server() {
             [this](bool) { recompute_dirty(); });
     v->addWidget(brazing_enabled_);
 
-    auto* url_box = new QVBoxLayout;
-    url_box->setSpacing(6);
-    url_box->addWidget(common::dim_label(QStringLiteral("Server base URL")));
-    brazing_url_ = new QLineEdit;
-    brazing_url_->setObjectName(QStringLiteral("brazingUrl"));
-    brazing_url_->setPlaceholderText(QStringLiteral("http://192.168.1.112:8080"));
-    // textChanged, not textEdited: setText() during seeding runs under
-    // suppress_signals_, which recompute_dirty() already ignores, and this way a
-    // programmatic edit from anywhere else still arms the primary action.
-    connect(brazing_url_, &QLineEdit::textChanged, this,
-            [this](const QString&) { recompute_dirty(); });
-    url_box->addWidget(brazing_url_);
-    // Says exactly what the field is NOT: the endpoint is fixed and appended by
-    // the application, so an operator who pastes the whole endpoint can see why
-    // it gets shortened back to the base on Save.
-    auto* hint = common::dim_label(QStringLiteral(
-        "The application automatically sends to /api/brazing/update."));
-    hint->setProperty("faint", true);
-    url_box->addWidget(hint);
-    v->addLayout(url_box);
+    // The server address is edited as the three things an operator is actually
+    // told — protocol, address, port — rather than as one URL they have to
+    // assemble. The DATABASE is unchanged: these three compose back into the one
+    // canonical `brazing.base_url` on save (brazing::compose_base_url) and are
+    // split out of it on load (brazing::split_base_url). No new column, no
+    // migration, and no second place the server address lives.
+    //
+    // Every edit here runs the same two slots: re-derive dirty, and re-derive the
+    // effective endpoint. textChanged, not textEdited: setText() during seeding
+    // runs under suppress_signals_, which recompute_dirty() already ignores, and
+    // this way a programmatic edit from anywhere else still arms the primary
+    // action.
+    const auto on_base_edit = [this] {
+        recompute_dirty();
+        update_endpoint_preview();
+    };
+
+    auto* proto_box = new QVBoxLayout;
+    proto_box->setSpacing(6);
+    proto_box->addWidget(common::dim_label(QStringLiteral("Protocol")));
+    brazing_scheme_ = new QComboBox;
+    brazing_scheme_->setObjectName(QStringLiteral("brazingScheme"));
+    // The DATA is the canonical lower-case scheme; the visible text is the
+    // upper-case spelling an operator reads on a datasheet. Nothing downstream
+    // reads the label.
+    brazing_scheme_->addItem(QStringLiteral("HTTP"), QStringLiteral("http"));
+    brazing_scheme_->addItem(QStringLiteral("HTTPS"), QStringLiteral("https"));
+    connect(brazing_scheme_, &QComboBox::currentIndexChanged, this,
+            [on_base_edit](int) { on_base_edit(); });
+    proto_box->addWidget(brazing_scheme_);
+    v->addLayout(proto_box);
+
+    auto* host_box = new QVBoxLayout;
+    host_box->setSpacing(6);
+    host_box->addWidget(common::dim_label(QStringLiteral("Server address")));
+    brazing_host_ = new QLineEdit;
+    brazing_host_->setObjectName(QStringLiteral("brazingHost"));
+    // "e.g." ON PURPOSE — see update_endpoint_preview(). A placeholder that is
+    // itself a usable value reads as a filled field on the panel, which is
+    // exactly how an empty address came to look configured.
+    // Names BOTH accepted shapes, so an operator given a host name rather than an
+    // IP can see this field takes it. Still unmistakably an example — the "e.g."
+    // and the two alternatives mean it can never read as a filled-in value, and
+    // it is not one: the spaces alone make it something compose_base_url refuses.
+    brazing_host_->setPlaceholderText(
+        QStringLiteral("e.g. 192.168.1.112 or server.local"));
+    connect(brazing_host_, &QLineEdit::textChanged, this,
+            [on_base_edit](const QString&) { on_base_edit(); });
+    host_box->addWidget(brazing_host_);
+    v->addLayout(host_box);
+
+    auto* port_box = new QVBoxLayout;
+    port_box->setSpacing(6);
+    port_box->addWidget(common::dim_label(QStringLiteral("Port")));
+    brazing_port_ = new QLineEdit;
+    brazing_port_->setObjectName(QStringLiteral("brazingPort"));
+    // Blank is legitimate — it means the protocol's default port, and a stored
+    // "https://server.example.com" must give itself back unchanged. The "e.g."
+    // and the "(optional)" together carry both halves of that: what a port looks
+    // like, and that it may be left out. Still not a value — "e.g. 8080
+    // (optional)" is not digits, so it is something compose_base_url refuses.
+    brazing_port_->setPlaceholderText(QStringLiteral("e.g. 8080 (optional)"));
+    connect(brazing_port_, &QLineEdit::textChanged, this,
+            [on_base_edit](const QString&) { on_base_edit(); });
+    port_box->addWidget(brazing_port_);
+    // A placeholder disappears the moment the operator types, so what blank
+    // actually DOES is stated in a line that stays put.
+    auto* port_hint = common::dim_label(
+        QStringLiteral("Leave blank for HTTP 80 or HTTPS 443."));
+    port_hint->setObjectName(QStringLiteral("brazingPortHint"));
+    port_hint->setProperty("faint", true);
+    port_box->addWidget(port_hint);
+    v->addLayout(port_box);
+
+    // The reporting API path. Deliberately NOT called the "brazing" path: the
+    // same endpoint carries Digital Number Reader and Floating Ball Leveler
+    // readings, so the label names the job, not one of the two modes.
+    auto* path_box = new QVBoxLayout;
+    path_box->setSpacing(6);
+    path_box->addWidget(common::dim_label(QStringLiteral("Reporting API path")));
+    brazing_api_path_ = new QLineEdit;
+    brazing_api_path_->setObjectName(QStringLiteral("brazingApiPath"));
+    // This placeholder IS a usable value, and that is honest here and only here:
+    // leaving this field blank really does resolve to exactly this path, so what
+    // is shown is what would be used. Contrast the address field above.
+    brazing_api_path_->setPlaceholderText(
+        QString::fromLatin1(brazing::kDefaultApiPath));
+    connect(brazing_api_path_, &QLineEdit::textChanged, this,
+            [this](const QString&) {
+                recompute_dirty();
+                update_endpoint_preview();
+            });
+    path_box->addWidget(brazing_api_path_);
+    v->addLayout(path_box);
+
+    // Replaces the old fixed sentence naming /api/brazing/update. The endpoint is
+    // no longer fixed, so stating it as a constant would be a lie the moment the
+    // path is edited; this shows what the application will ACTUALLY post to,
+    // recomputed on every keystroke in either field through the same function the
+    // transport composes with.
+    auto* endpoint_box = new QVBoxLayout;
+    endpoint_box->setSpacing(6);
+    endpoint_box->addWidget(common::dim_label(QStringLiteral("Effective endpoint")));
+    brazing_endpoint_ = new QLabel;
+    brazing_endpoint_->setObjectName(QStringLiteral("brazingEndpoint"));
+    brazing_endpoint_->setWordWrap(true);
+    brazing_endpoint_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    brazing_endpoint_->setProperty("faint", true);
+    endpoint_box->addWidget(brazing_endpoint_);
+    v->addLayout(endpoint_box);
 
     // NO page-level Save button. This page used to carry its own gold Save while
     // the footer carried a gold Apply that meant something else entirely; the
@@ -474,10 +567,139 @@ void SettingsDialog::reload_server_page() {
     brazing_enabled_->setChecked(cfg.enabled);
     // The base URL is preserved by a mode switch on purpose, so re-seeding shows
     // the operator the address they still have — only the enabled flag moved.
-    brazing_url_->setText(QString::fromStdString(cfg.base_url));
+    // Split into the three controls by the shared authority, so what the form
+    // shows is a VIEW of the one stored string rather than a second copy of it.
+    const brazing::BaseUrlParts parts = brazing::split_base_url(cfg.base_url);
+    const int scheme_row =
+        brazing_scheme_->findData(parts.https ? QStringLiteral("https")
+                                              : QStringLiteral("http"));
+    brazing_scheme_->setCurrentIndex(scheme_row >= 0 ? scheme_row : 0);
+    brazing_host_->setText(QString::fromStdString(parts.host));
+    brazing_port_->setText(QString::fromStdString(parts.port));
+    // Never blank: brazing::load() resolves a missing or blank row to the shipped
+    // default, so an installation that predates this setting opens the page
+    // showing exactly the endpoint it has always posted to.
+    brazing_api_path_->setText(QString::fromStdString(cfg.api_path));
     suppress_signals_ = prev;
-    common::mark_invalid(brazing_url_, false);
-    set_status(brazing_status_, QString(), false);
+    common::mark_invalid(brazing_host_, false);
+    common::mark_invalid(brazing_port_, false);
+    common::mark_invalid(brazing_api_path_, false);
+    // set_server_status re-derives the endpoint preview, so clearing the status
+    // here is also what repaints the preview for the freshly seeded form.
+    set_server_status(QString(), false);
+}
+
+void SettingsDialog::mark_base_fields_invalid(bool invalid) {
+    common::mark_invalid(brazing_host_, invalid);
+    common::mark_invalid(brazing_port_, invalid);
+}
+
+void SettingsDialog::mark_offending_base_field(const std::string& api_path) {
+    // Redden the field that is actually wrong, WITHOUT restating the port rule
+    // here: ask the shared composer the same question again with the port
+    // removed. If it then succeeds, the port was the problem; otherwise the
+    // address was. One authority, asked twice, instead of two copies of a rule
+    // that could drift apart.
+    //
+    // The empty-host case must not go through that probe: clearing the port
+    // turns "a port with no address" into the legitimate unset state, which
+    // would blame the port for a missing address.
+    brazing::BaseUrlParts parts = current_base_parts();
+    if (parts.host.empty()) {
+        common::mark_invalid(brazing_host_, true);
+        common::mark_invalid(brazing_port_, false);
+        return;
+    }
+    parts.port.clear();
+    const bool port_is_the_problem = brazing::compose_base_url(parts, api_path).ok;
+    common::mark_invalid(brazing_port_, port_is_the_problem);
+    common::mark_invalid(brazing_host_, !port_is_the_problem);
+}
+
+brazing::BaseUrlParts SettingsDialog::current_base_parts() const {
+    brazing::BaseUrlParts parts;
+    parts.https = brazing_scheme_ && brazing_scheme_->currentData().toString() ==
+                                         QStringLiteral("https");
+    parts.host = brazing_host_ ? brazing_host_->text().toStdString() : std::string();
+    parts.port = brazing_port_ ? brazing_port_->text().toStdString() : std::string();
+    return parts;
+}
+
+void SettingsDialog::set_server_status(const QString& message, bool warn) {
+    // The ONE writer of the Server page's status line, so the endpoint preview is
+    // re-derived every time that line moves — which is what lets the preview
+    // suppress a message the status line is already carrying.
+    set_status(brazing_status_, message, warn);
+    update_endpoint_preview();
+}
+
+void SettingsDialog::set_endpoint_preview(const QString& text) {
+    if (!brazing_endpoint_) {
+        return;
+    }
+    // Never say the same thing twice. A refused Save puts the reason on the
+    // status line, and the preview has been showing that same reason live since
+    // the keystroke that caused it — rendering both stacked one above the other
+    // reads as two problems. The preview steps aside for the duration; the
+    // actionable line stays, because that is the one attached to the action the
+    // operator just took.
+    //
+    // Compared against the status TEXT rather than tracked with a flag: the two
+    // labels are derived from the same validation result, so equality is the
+    // honest test of "this is a duplicate" and it cannot fall out of sync.
+    //
+    // Non-empty text, NOT isVisible(): set_status hides the label exactly when
+    // its message is empty, so the text alone already says whether the line is
+    // showing — while isVisible() also reports false for every child of a dialog
+    // that has not been shown yet, which would silently disable the suppression
+    // in precisely the case a test constructs.
+    if (brazing_status_ && !brazing_status_->text().isEmpty() &&
+        brazing_status_->text() == text) {
+        brazing_endpoint_->setText(QStringLiteral("—"));
+        return;
+    }
+    brazing_endpoint_->setText(text);
+}
+
+void SettingsDialog::update_endpoint_preview() {
+    if (!brazing_endpoint_) {
+        return;
+    }
+    const QString path = brazing_api_path_ ? brazing_api_path_->text() : QString();
+    const brazing::BaseUrlParts parts = current_base_parts();
+
+    // Composed by the SAME functions the save path and the transport use, so the
+    // preview cannot promise an endpoint the client would not build. The three
+    // controls are joined by brazing::compose_base_url — never by string
+    // concatenation here, which is how a preview starts drifting from the runtime.
+    const brazing::ApiPathResult api = brazing::normalize_api_path(path.toStdString());
+    const brazing::BaseUrlResult base =
+        brazing::compose_base_url(parts, api.ok ? api.api_path
+                                                : std::string(brazing::kDefaultApiPath));
+    if (api.ok && base.ok && !base.base_url.empty()) {
+        set_endpoint_preview(
+            QString::fromStdString(brazing::endpoint_url(base.base_url, api.api_path)));
+        return;
+    }
+
+    // No endpoint. Say WHICH field is missing or wrong, because a dash on its own
+    // leaves the operator guessing. Order matters: report the address before the
+    // path, because an unusable address is the more common and more confusing
+    // state, and the address is the field they were most likely just editing.
+    if (!base.ok) {
+        set_endpoint_preview(QString::fromStdString(base.error));
+        return;
+    }
+    if (!api.ok) {
+        set_endpoint_preview(QString::fromStdString(api.error));
+        return;
+    }
+    // base.ok with an empty base_url is the "unset" state — the out-of-the-box
+    // condition, not an error. Naming the FIELD is what the old wording failed to
+    // do: "No server base URL" pointed at a control the operator could not see,
+    // while a greyed placeholder made the address box look filled in.
+    set_endpoint_preview(
+        QStringLiteral("Enter the server address — nothing will be sent yet."));
 }
 
 void SettingsDialog::refresh_backend_state() {
@@ -497,7 +719,10 @@ void SettingsDialog::refresh_backend_state() {
     // would silently throw away. This is precisely why dirty is a comparison
     // against baseline_ rather than a sticky flag.
     baseline_.brazing_enabled = brazing_enabled_->isChecked();
-    baseline_.brazing_url = brazing_url_->text();
+    baseline_.brazing_scheme = brazing_scheme_->currentData().toString();
+    baseline_.brazing_host = brazing_host_->text();
+    baseline_.brazing_port = brazing_port_->text();
+    baseline_.brazing_api_path = brazing_api_path_->text();
     dirty_ = current_form() != baseline_;
     sync_save_enabled();
 }
@@ -507,24 +732,48 @@ bool SettingsDialog::save_server_settings() {
     // so the dialog can never accept an address the client would treat as
     // something else. Whitespace, a trailing slash and a pasted full endpoint are
     // canonicalized; any other path is REJECTED rather than quietly rewritten.
+    //
+    // The PATH first, because the base URL's paste tolerance is defined against
+    // the configured endpoint: an operator who pastes the address they were
+    // actually given must get it stripped, not a refusal naming a path their
+    // server does not expose.
+    const brazing::ApiPathResult api =
+        brazing::normalize_api_path(brazing_api_path_->text().toStdString());
+    if (!api.ok) {
+        mark_base_fields_invalid(false);
+        common::mark_invalid(brazing_api_path_, true);
+        set_server_status(QString::fromStdString(api.error), true);
+        return false;
+    }
+    // The three controls are joined by the shared composer, which ends in
+    // normalize_base_url — so the decomposed editor persists exactly the
+    // canonical string the free-text field used to, and cannot accept an address
+    // that field would have refused.
     const brazing::BaseUrlResult url =
-        brazing::normalize_base_url(brazing_url_->text().toStdString());
+        brazing::compose_base_url(current_base_parts(), api.api_path);
     if (!url.ok) {
-        common::mark_invalid(brazing_url_, true);
-        set_status(brazing_status_, QString::fromStdString(url.error), true);
+        common::mark_invalid(brazing_api_path_, false);
+        mark_offending_base_field(api.api_path);
+        set_server_status(QString::fromStdString(url.error), true);
         return false;
     }
 
     brazing::BrazingConfig out;
     out.enabled = brazing_enabled_->isChecked();
     out.base_url = url.base_url;
+    out.api_path = api.api_path;
 
     // Reporting cannot be turned ON without somewhere to report to. Refusing here
     // is what keeps "Saved" honest — the runtime would silently build no sender.
     if (out.enabled && out.base_url.empty()) {
-        common::mark_invalid(brazing_url_, true);
-        set_status(brazing_status_,
-                   QStringLiteral("Enter the server base URL before enabling "
+        common::mark_invalid(brazing_api_path_, false);
+        // Mark the ADDRESS specifically, and name it in the message. The old
+        // wording said "base URL" — a control that no longer exists and, when it
+        // did, showed a greyed placeholder that read as a filled-in value. An
+        // operator cannot act on a message that names neither the field nor the
+        // thing that is missing.
+        common::mark_invalid(brazing_host_, true);
+        set_server_status(QStringLiteral("Enter the server address before enabling "
                                   "reporting."),
                    true);
         return false;
@@ -534,9 +783,9 @@ bool SettingsDialog::save_server_settings() {
     // of its own — SQLite has no nested transactions, and a second BEGIN here
     // would fail and take an otherwise-good Save down with it.
     if (!brazing::save_rows(db_, out)) {
-        common::mark_invalid(brazing_url_, false);
-        set_status(brazing_status_,
-                   QStringLiteral("Could not save the settings to the database. "
+        mark_base_fields_invalid(false);
+        common::mark_invalid(brazing_api_path_, false);
+        set_server_status(QStringLiteral("Could not save the settings to the database. "
                                   "Reporting was not reconfigured."),
                    true);
         return false;
@@ -545,13 +794,31 @@ bool SettingsDialog::save_server_settings() {
     // Show the operator what was actually stored. Silently persisting something
     // other than what the field displays is how the doubled-path defect stayed
     // invisible for so long.
-    common::mark_invalid(brazing_url_, false);
+    mark_base_fields_invalid(false);
+    common::mark_invalid(brazing_api_path_, false);
     const bool prev = suppress_signals_;
     suppress_signals_ = true;
-    brazing_url_->setText(QString::fromStdString(out.base_url));
+    // Re-split what was actually STORED back into the three controls, rather than
+    // leaving whatever was typed. Same reason the free-text field used to re-show
+    // the canonical base: silently persisting something other than what the form
+    // displays is how the doubled-path defect stayed invisible for so long. Here
+    // it also shows the operator that "192.168.001.112" or "EXAMPLE.com" was
+    // canonicalized on the way in.
+    const brazing::BaseUrlParts stored = brazing::split_base_url(out.base_url);
+    const int scheme_row =
+        brazing_scheme_->findData(stored.https ? QStringLiteral("https")
+                                               : QStringLiteral("http"));
+    brazing_scheme_->setCurrentIndex(scheme_row >= 0 ? scheme_row : 0);
+    brazing_host_->setText(QString::fromStdString(stored.host));
+    brazing_port_->setText(QString::fromStdString(stored.port));
+    // Same reason as the base URL, and the one that makes "a blank path means the
+    // default" honest rather than silent: a cleared field comes back showing
+    // /api/brazing/update, which is what was stored and what the preview above
+    // has been showing since the moment it was cleared.
+    brazing_api_path_->setText(QString::fromStdString(out.api_path));
     suppress_signals_ = prev;
-    set_status(brazing_status_,
-               out.enabled ? QStringLiteral("Saved. Reporting is active.")
+    update_endpoint_preview();
+    set_server_status(out.enabled ? QStringLiteral("Saved. Reporting is active.")
                            : QStringLiteral("Saved. Reporting is off."),
                false);
     return true;

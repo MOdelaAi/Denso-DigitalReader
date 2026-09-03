@@ -163,6 +163,12 @@ public:
     uint64_t brazing_sender_builds() const { return brazing_sender_builds_; }
     /// The canonical base URL the live sender was built with ("" when none).
     std::string active_brazing_base_url() const { return active_brazing_url_; }
+    /// The canonical reporting API path the live sender was built with ("" when
+    /// none).
+    std::string active_brazing_api_path() const { return active_brazing_path_; }
+    /// The FULL endpoint the live sender posts to ("" when none) — the identity
+    /// apply_brazing_config() compares on, and what the Backend tooltip shows.
+    std::string active_brazing_endpoint() const { return active_brazing_endpoint_; }
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -228,6 +234,11 @@ private:
     /// Move the reported status and emit ONLY on a real transition. One writer
     /// for the member, so "changed" cannot be announced for a value that did not.
     void set_brazing_status(BrazingStatus status);
+    /// Forget the retired sender's address, path and composed endpoint together.
+    /// One helper because they are ONE identity: clearing the base while leaving
+    /// the endpoint behind would let the next apply_brazing_config() match a
+    /// sender that no longer exists.
+    void clear_active_brazing_identity();
 
     QSqlDatabase db_;
     QGridLayout* grid_ = nullptr;
@@ -246,11 +257,16 @@ private:
     };
     std::map<int64_t, PendingCam> pending_cams_;
     std::unique_ptr<BrazingReporter> brazing_reporter_;  // GUI-thread reliable sender
-    // The canonical base URL brazing_reporter_ was built with. This — not the raw
-    // stored string — is what apply_brazing_config() compares against, so two
-    // spellings of the same server ("…:8080" and "…:8080/api/brazing/update") are
-    // correctly recognised as NO change and do not churn the sender.
+    // The canonical halves brazing_reporter_ was built with, and the endpoint
+    // they compose to. The ENDPOINT — not the raw stored strings, and not the
+    // base alone — is what apply_brazing_config() compares against: two spellings
+    // of the same server ("…:8080" and "…:8080/api/brazing/update") must be
+    // recognised as NO change and not churn the sender, while a change to the
+    // reporting API path alone MUST rebuild it. Comparing on the base would miss
+    // the second case entirely and leave the old path live.
     std::string active_brazing_url_;
+    std::string active_brazing_path_;
+    std::string active_brazing_endpoint_;
     uint64_t brazing_sender_builds_ = 0;   // test observable; see the accessor
     size_t admitted_count_ = 0;            // cameras the last build admitted
     // Derived state, never a second configuration read: set to On/Off by

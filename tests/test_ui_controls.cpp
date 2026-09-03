@@ -18,6 +18,8 @@
 #include "brazing/brazing_reporter.h"
 #include "brazing/brazing_status.h"
 #include "brazing/brazing_transport.h"
+#include "brazing_form_util.h"
+
 #include "brazing/config.h"
 #include "camera/camera.h"
 #include "camera/camera_stream.h"      // CameraStream::constructed_count()
@@ -262,7 +264,10 @@ TEST_CASE("Save changes validates before it persists anything",
     sig.watch(dlg);
 
     check(dlg, "brazingEnabled")->setChecked(true);
-    line(dlg, "brazingUrl")->setText(QStringLiteral("http://192.168.1.112:8080/other/path"));
+    // The decomposed form's version of the same operator error: a whole URL
+    // pasted into the field that takes only the address.
+    denso::testing::brazing_host(dlg)->setText(
+        QStringLiteral("http://192.168.1.112:8080/other/path"));
     btn(dlg, "saveChangesButton")->click();
 
     // Nothing persisted, NOTHING applied — not the brazing config, not the theme,
@@ -289,7 +294,7 @@ TEST_CASE("a failed write applies nothing", "[ui_controls][settings]") {
     REQUIRE(q.exec(QStringLiteral("DROP TABLE settings")));
 
     check(dlg, "brazingEnabled")->setChecked(true);
-    line(dlg, "brazingUrl")->setText(QString::fromLatin1(kUrlA));
+    denso::testing::set_brazing_base(dlg, QString::fromLatin1(kUrlA));
     btn(dlg, "saveChangesButton")->click();
 
     CHECK(sig.applies() == 0);
@@ -306,7 +311,7 @@ TEST_CASE("Save changes persists and applies every dirty page",
     sig.watch(dlg);
 
     check(dlg, "brazingEnabled")->setChecked(true);
-    line(dlg, "brazingUrl")->setText(QString::fromLatin1(kUrlA));
+    denso::testing::set_brazing_base(dlg, QString::fromLatin1(kUrlA));
     check(dlg, "darkModeSwitch")->setChecked(false);
     // The theme previewed immediately (no persistence yet) — that is the whole
     // point of splitting preview from commit.
@@ -333,7 +338,7 @@ TEST_CASE("Cancel persists nothing and applies nothing", "[ui_controls][settings
     sig.watch(dlg);
 
     check(dlg, "brazingEnabled")->setChecked(true);
-    line(dlg, "brazingUrl")->setText(QString::fromLatin1(kUrlB));
+    denso::testing::set_brazing_base(dlg, QString::fromLatin1(kUrlB));
     check(dlg, "darkModeSwitch")->setChecked(false);   // previews light
     REQUIRE(sig.theme_preview == 1);
 
@@ -379,12 +384,19 @@ TEST_CASE("Save changes still normalizes a pasted endpoint",
     sig.watch(dlg);
 
     check(dlg, "brazingEnabled")->setChecked(true);
-    line(dlg, "brazingUrl")->setText(
-        QStringLiteral("  http://192.168.1.112:8080/api/brazing/update/ "));
+    // Typed as the operator is told it: an address and a port, with the
+    // surrounding whitespace a copy/paste carries.
+    denso::testing::brazing_host(dlg)->setText(QStringLiteral(" 192.168.1.112 "));
+    denso::testing::brazing_port(dlg)->setText(QStringLiteral(" 8080 "));
     btn(dlg, "saveChangesButton")->click();
 
+    // Composed and canonicalized into the one stored value…
     CHECK(denso::brazing::load(h.h()).base_url == kUrlA);
-    CHECK(line(dlg, "brazingUrl")->text() == QString::fromLatin1(kUrlA));
+    // …and the controls are re-seeded from what was STORED, so the operator is
+    // never looking at something other than the truth.
+    CHECK(denso::testing::brazing_host(dlg)->text() ==
+          QStringLiteral("192.168.1.112"));
+    CHECK(denso::testing::brazing_port(dlg)->text() == QStringLiteral("8080"));
     CHECK(sig.brazing == 1);   // …and the live reload is still requested
 }
 
@@ -443,7 +455,7 @@ TEST_CASE("enabling and disabling through Settings moves the indicator at once",
     // Enable through the REAL dialog: dirty → Save changes → persisted → signal →
     // MainWindow → CameraView → CameraGrid → indicator. No restart anywhere.
     check(*dlg, "brazingEnabled")->setChecked(true);
-    line(*dlg, "brazingUrl")->setText(QString::fromLatin1(kUrlA));
+    denso::testing::set_brazing_base(*dlg, QString::fromLatin1(kUrlA));
     btn(*dlg, "saveChangesButton")->click();
     CHECK(win->displayed_brazing_status() == BrazingStatus::On);
 
@@ -508,14 +520,15 @@ TEST_CASE("repeated saves create no duplicate indicator and no duplicate reports
 
     auto* dlg = win->findChild<SettingsDialog*>();
     for (int i = 0; i < 3; ++i) {
-        // Genuinely dirty each round — the field is retyped as the FULL endpoint,
-        // which normalizes back to the same base. So the operator really does
-        // press Save three times, and the stored configuration really is
-        // unchanged: exactly the case that must not churn the sender.
+        // Genuinely dirty each round — the address is retyped with the padding a
+        // copy/paste carries, which canonicalizes back to the same base. So the
+        // operator really does press Save three times, and the stored
+        // configuration really is unchanged: exactly the case that must not
+        // churn the sender.
         check(*dlg, "brazingEnabled")->setChecked(true);
-        line(*dlg, "brazingUrl")
-            ->setText(QString::fromLatin1(kUrlA) +
-                      QStringLiteral("/api/brazing/update"));
+        denso::testing::brazing_host(*dlg)->setText(
+            QStringLiteral(" 192.168.1.112 "));
+        denso::testing::brazing_port(*dlg)->setText(QStringLiteral("8080"));
         REQUIRE(dlg->is_dirty());
         REQUIRE(btn(*dlg, "saveChangesButton")->isEnabled());
         btn(*dlg, "saveChangesButton")->click();
@@ -903,7 +916,7 @@ TEST_CASE("a failed theme write applies nothing at all", "[ui_controls][settings
     dlg.set_theme_committer([](bool) { return false; });   // the write fails
 
     check(dlg, "brazingEnabled")->setChecked(true);
-    line(dlg, "brazingUrl")->setText(QString::fromLatin1(kUrlA));
+    denso::testing::set_brazing_base(dlg, QString::fromLatin1(kUrlA));
     btn(dlg, "saveChangesButton")->click();
 
     CHECK(sig.applies() == 0);
@@ -950,7 +963,7 @@ TEST_CASE("a failed Save rolls the whole form back, not just the failing page",
     dlg.set_theme_committer([](bool) { return false; });   // the SECOND write fails
 
     check(dlg, "brazingEnabled")->setChecked(true);
-    line(dlg, "brazingUrl")->setText(QString::fromLatin1(kUrlB));
+    denso::testing::set_brazing_base(dlg, QString::fromLatin1(kUrlB));
     btn(dlg, "saveChangesButton")->click();
 
     // The FIRST write was rolled back with it: nothing reached the database…
@@ -979,19 +992,30 @@ namespace {
 struct ServerPage {
     SettingsDialog* dlg = nullptr;
     QCheckBox* enabled = nullptr;
-    QLineEdit* url = nullptr;
+    QLineEdit* host = nullptr;
+    QLineEdit* port = nullptr;
     QPushButton* save = nullptr;
 
     explicit ServerPage(MainWindow& w) {
         dlg = w.findChild<SettingsDialog*>();
         REQUIRE(dlg != nullptr);
         enabled = check(*dlg, "brazingEnabled");
-        url = line(*dlg, "brazingUrl");
+        host = denso::testing::brazing_host(*dlg);
+        port = denso::testing::brazing_port(*dlg);
         save = btn(*dlg, "saveChangesButton");
         REQUIRE(enabled != nullptr);
-        REQUIRE(url != nullptr);
         REQUIRE(save != nullptr);
     }
+
+    /// Put a whole base URL into the three controls, and read them back as one.
+    /// The fixture's callers are about backend SYNC — that the address survives a
+    /// mode switch, a refresh, a cancel — not about the decomposition itself,
+    /// which has its own suite. Keeping them written in terms of a base URL is
+    /// what makes them still say what they are for.
+    void set_base(const QString& base_url) {
+        denso::testing::set_brazing_base(*dlg, base_url);
+    }
+    QString base() const { return denso::testing::brazing_base_text(*dlg); }
 };
 
 }  // namespace
@@ -1006,7 +1030,7 @@ TEST_CASE("stored reporting shows a ticked Server checkbox", "[ui_controls][sync
     p.dlg->show();
 
     CHECK(p.enabled->isChecked());
-    CHECK(p.url->text() == QString::fromLatin1(kUrlA));
+    CHECK(p.base() == QString::fromLatin1(kUrlA));
     CHECK(win->displayed_brazing_status() == BrazingStatus::On);
 }
 
@@ -1039,7 +1063,7 @@ TEST_CASE("a mode switch unticks the checkbox of an OPEN dialog",
     // The ADDRESS is preserved by the switch on purpose, so the operator does not
     // have to retype it to re-enable.
     CHECK(denso::brazing::load(h.h()).base_url == kUrlA);
-    CHECK(p.url->text() == QString::fromLatin1(kUrlA));
+    CHECK(p.base() == QString::fromLatin1(kUrlA));
 }
 
 TEST_CASE("the passive re-sync writes nothing and asks for nothing",
@@ -1113,7 +1137,7 @@ TEST_CASE("reopening Settings after a mode switch shows the new state",
     p.dlg->show();                         // …and reopened after it
 
     CHECK_FALSE(p.enabled->isChecked());
-    CHECK(p.url->text() == QString::fromLatin1(kUrlA));
+    CHECK(p.base() == QString::fromLatin1(kUrlA));
     CHECK_FALSE(p.save->isEnabled());
 }
 
@@ -1134,7 +1158,7 @@ TEST_CASE("repeated open/close cycles never restore the stale tick",
         p.dlg->show();
         p.dlg->select_server_page();
         CHECK_FALSE(p.enabled->isChecked());
-        CHECK(p.url->text() == QString::fromLatin1(kUrlA));
+        CHECK(p.base() == QString::fromLatin1(kUrlA));
         CHECK_FALSE(p.save->isEnabled());
         p.dlg->reject();
     }
@@ -1157,7 +1181,7 @@ TEST_CASE("the Backend indicator opens Server showing the unticked box",
     CHECK(p.dlg->isVisible());
     CHECK(p.dlg->findChild<QListWidget*>(QStringLiteral("navList"))->currentRow() == 4);
     CHECK_FALSE(p.enabled->isChecked());
-    CHECK(p.url->text() == QString::fromLatin1(kUrlA));
+    CHECK(p.base() == QString::fromLatin1(kUrlA));
 }
 
 TEST_CASE("re-enabling after a mode switch takes effect at once",
@@ -1218,7 +1242,7 @@ TEST_CASE("Refresh Cameras leaves the checkbox alone", "[ui_controls][sync]") {
     spin(50);
 
     CHECK(p.enabled->isChecked());
-    CHECK(p.url->text() == QString::fromLatin1(kUrlA));
+    CHECK(p.base() == QString::fromLatin1(kUrlA));
     CHECK_FALSE(p.dlg->is_dirty());
     CHECK(win->displayed_brazing_status() == BrazingStatus::On);
 }
@@ -1372,9 +1396,9 @@ TEST_CASE("returning a field to its stored value disarms Save changes",
     CHECK_FALSE(p.save->isEnabled());
 
     // Same for the address field, including the whitespace that a paste carries.
-    p.url->setText(QString::fromLatin1(kUrlB));
+    p.set_base(QString::fromLatin1(kUrlB));
     CHECK(p.dlg->is_dirty());
-    p.url->setText(QString::fromLatin1(kUrlA));
+    p.set_base(QString::fromLatin1(kUrlA));
     CHECK_FALSE(p.dlg->is_dirty());
 }
 
@@ -1550,7 +1574,7 @@ TEST_CASE("closing after a switch persists no unrelated edit",
     auto* dark = check(*p.dlg, "darkModeSwitch");
     REQUIRE(dark != nullptr);
     dark->setChecked(!dark->isChecked());
-    p.url->setText(QString::fromLatin1(kUrlB));
+    p.set_base(QString::fromLatin1(kUrlB));
     p.enabled->setChecked(false);
     REQUIRE(p.dlg->is_dirty());
 
@@ -1618,7 +1642,7 @@ TEST_CASE("the dialog reopens clean and showing the destination mode",
     CHECK(modes->currentData().toInt() == static_cast<int>(TargetMode::BallLeveler));
     p.dlg->select_server_page();
     CHECK_FALSE(p.enabled->isChecked());     // the switch's brazing.enabled = 0
-    CHECK(p.url->text() == QString::fromLatin1(kUrlA));   // address preserved
+    CHECK(p.base() == QString::fromLatin1(kUrlA));   // address preserved
     CHECK_FALSE(p.dlg->is_dirty());
     CHECK_FALSE(p.save->isEnabled());
     CHECK(win->displayed_brazing_status() == BrazingStatus::Off);
@@ -1653,7 +1677,7 @@ TEST_CASE("closing after a switch does not disturb Backend live reload",
     p.dlg->show();
     p.dlg->select_server_page();
     REQUIRE_FALSE(p.enabled->isChecked());
-    CHECK(p.url->text() == QString::fromLatin1(kUrlA));
+    CHECK(p.base() == QString::fromLatin1(kUrlA));
 
     p.enabled->setChecked(true);
     p.save->click();

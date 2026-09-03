@@ -16,10 +16,15 @@ TEST_CASE("brazing config round-trips through the settings table", "[brazing_con
     const denso::brazing::BrazingConfig def = denso::brazing::load(db->handle());
     CHECK_FALSE(def.enabled);
     CHECK(def.base_url.empty());
+    // The reporting API path defaults instead of being empty: a database with no
+    // brazing.api_path row is EXACTLY what every installation predating the
+    // setting has, and it must keep posting where it always did.
+    CHECK(def.api_path == denso::brazing::kDefaultApiPath);
 
     denso::brazing::BrazingConfig cfg;
     cfg.enabled = true;
     cfg.base_url = "http://192.168.1.50:8098";
+    cfg.api_path = "/api/denso/update";
     // save() is CHECKED now, so a caller can refuse to report success (and refuse
     // to reconfigure a running pipeline) when the write did not land.
     CHECK(denso::brazing::save(db->handle(), cfg));
@@ -27,6 +32,10 @@ TEST_CASE("brazing config round-trips through the settings table", "[brazing_con
     const denso::brazing::BrazingConfig got = denso::brazing::load(db->handle());
     CHECK(got.enabled);
     CHECK(got.base_url == "http://192.168.1.50:8098");
+    CHECK(got.api_path == "/api/denso/update");
+    // …and the reloaded pair composes the endpoint the operator configured.
+    CHECK(denso::brazing::endpoint_url(got.base_url, got.api_path) ==
+          "http://192.168.1.50:8098/api/denso/update");
 }
 
 TEST_CASE("a save that fails half way changes nothing", "[brazing_config]") {
@@ -91,4 +100,82 @@ TEST_CASE("what is persisted is the canonical base URL", "[brazing_config]") {
     // …and the round trip composes the endpoint exactly once.
     CHECK(denso::brazing::endpoint_url(got.base_url) ==
           "http://192.168.1.112:8080/api/brazing/update");
+}
+
+TEST_CASE("a configuration written before the API path setting is unchanged",
+          "[brazing_config]") {
+    // THE backward-compatibility case, written the way an un-migrated appliance
+    // actually looks: the two rows that existed before, and no brazing.api_path
+    // row at all. No schema migration was introduced for this — `settings` is a
+    // key/value table, so the new key is simply absent.
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db);
+    REQUIRE(denso::db::run_migrations(db->handle()));
+
+    QSqlQuery q(db->handle());
+    REQUIRE(q.exec(QStringLiteral(
+        "INSERT INTO settings (key, value) VALUES ('brazing.enabled', '1')")));
+    REQUIRE(q.exec(QStringLiteral(
+        "INSERT INTO settings (key, value) "
+        "VALUES ('brazing.base_url', 'http://192.168.1.112:8080')")));
+    // Proving the row really is absent, so this case cannot silently stop testing
+    // what it claims to.
+    REQUIRE(q.exec(QStringLiteral(
+        "SELECT COUNT(*) FROM settings WHERE key = 'brazing.api_path'")));
+    REQUIRE(q.next());
+    REQUIRE(q.value(0).toInt() == 0);
+
+    const auto got = denso::brazing::load(db->handle());
+    CHECK(got.enabled);
+    CHECK(got.api_path == denso::brazing::kDefaultApiPath);
+    // The endpoint is byte-for-byte the one this configuration was already using.
+    CHECK(denso::brazing::endpoint_url(got.base_url, got.api_path) ==
+          "http://192.168.1.112:8080/api/brazing/update");
+}
+
+TEST_CASE("a blank stored API path is read as unset, not as a broken endpoint",
+          "[brazing_config]") {
+    // The UI cannot produce this — normalize_api_path resolves blank to the
+    // default before anything is written — so the only way here is an externally
+    // written row (a hand-edited database, a restored backup). Treating it as
+    // absent is what keeps reporting alive; treating it as a path would compose
+    // an endpoint equal to the bare base URL.
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db);
+    REQUIRE(denso::db::run_migrations(db->handle()));
+
+    QSqlQuery q(db->handle());
+    REQUIRE(q.exec(QStringLiteral(
+        "INSERT INTO settings (key, value) "
+        "VALUES ('brazing.base_url', 'http://192.168.1.112:8080')")));
+    REQUIRE(q.exec(QStringLiteral(
+        "INSERT INTO settings (key, value) VALUES ('brazing.api_path', '   ')")));
+
+    const auto got = denso::brazing::load(db->handle());
+    CHECK(got.api_path == denso::brazing::kDefaultApiPath);
+    CHECK(denso::brazing::endpoint_url(got.base_url, got.api_path) ==
+          "http://192.168.1.112:8080/api/brazing/update");
+}
+
+TEST_CASE("an unusable stored API path stops reporting rather than guessing",
+          "[brazing_config]") {
+    // The other externally-written case, and the opposite decision from blank: a
+    // row that says something the normalizer refuses is NOT repaired into the
+    // default. Falling back would post readings to an endpoint nobody chose; an
+    // empty endpoint is the grid's signal to start no sender at all and say so.
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db);
+    REQUIRE(denso::db::run_migrations(db->handle()));
+
+    QSqlQuery q(db->handle());
+    REQUIRE(q.exec(QStringLiteral(
+        "INSERT INTO settings (key, value) "
+        "VALUES ('brazing.base_url', 'http://192.168.1.112:8080')")));
+    REQUIRE(q.exec(QStringLiteral(
+        "INSERT INTO settings (key, value) "
+        "VALUES ('brazing.api_path', 'http://another-server/api/update')")));
+
+    const auto got = denso::brazing::load(db->handle());
+    CHECK(got.api_path == "http://another-server/api/update");   // verbatim
+    CHECK(denso::brazing::endpoint_url(got.base_url, got.api_path).empty());
 }

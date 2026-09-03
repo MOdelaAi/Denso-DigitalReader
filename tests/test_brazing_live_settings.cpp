@@ -20,6 +20,8 @@
 // ever asked to post.
 #include <catch2/catch_test_macros.hpp>
 
+#include "brazing_form_util.h"
+
 #include "brazing/brazing_client.h"
 #include "brazing/brazing_reporter.h"
 #include "brazing/brazing_transport.h"
@@ -186,31 +188,59 @@ TEST_CASE("Settings Save normalizes a pasted endpoint and reports the base URL",
     REQUIRE(denso::db::run_migrations(db->handle()));
 
     SettingsDialog dlg(db->handle());
-    auto* url = dlg.findChild<QLineEdit*>(QStringLiteral("brazingUrl"));
+    auto* host = denso::testing::brazing_host(dlg);
+    auto* port = denso::testing::brazing_port(dlg);
     auto* on = dlg.findChild<QCheckBox*>(QStringLiteral("brazingEnabled"));
     auto* save = dlg.findChild<QPushButton*>(QStringLiteral("saveChangesButton"));
     REQUIRE(save != nullptr);
-    REQUIRE(url != nullptr);
     REQUIRE(on != nullptr);
 
     int emitted = 0;
     QObject::connect(&dlg, &SettingsDialog::brazing_config_changed,
                      [&] { ++emitted; });
 
-    // The operator pastes the complete endpoint they were told to POST to.
+    // The operator types what they were told, with the padding a copy/paste
+    // carries. Pasting the WHOLE endpoint is no longer something this form can
+    // accept — that tolerance now lives where a stored value is read, which the
+    // legacy-row case below covers.
     on->setChecked(true);
-    url->setText(QStringLiteral("  http://192.168.1.112:8080/api/brazing/update/ "));
+    host->setText(QStringLiteral("  192.168.1.112 "));
+    port->setText(QStringLiteral(" 8080 "));
     save->click();
 
     CHECK(emitted == 1);
-    // PERSISTED as the base URL...
+    // PERSISTED as ONE canonical base URL — the schema did not change when the
+    // editor did.
     const auto stored = denso::brazing::load(db->handle());
     CHECK(stored.enabled);
     CHECK(stored.base_url == kUrlA);
-    // ...and the field now shows exactly what was stored, so the operator is
+    // ...and the controls now show exactly what was stored, so the operator is
     // never looking at something other than the truth.
-    CHECK(url->text() == QString::fromLatin1(kUrlA));
+    CHECK(host->text() == QStringLiteral("192.168.1.112"));
+    CHECK(port->text() == QStringLiteral("8080"));
     CHECK_FALSE(status_text(dlg).isEmpty());     // an explicit success line
+}
+
+TEST_CASE("a stored row holding the full endpoint still opens as its base URL",
+          "[brazing_live]") {
+    // Where the paste tolerance lives now. A legacy or externally written
+    // `brazing.base_url` may hold the whole endpoint; the decomposed form must
+    // split it by the base it DENOTES, not refuse it and not show a host of
+    // "192.168.1.112/api".
+    auto db = denso::db::Db::open_in_memory();
+    REQUIRE(db);
+    REQUIRE(denso::db::run_migrations(db->handle()));
+    denso::brazing::BrazingConfig legacy;
+    legacy.enabled = true;
+    legacy.base_url = kUrlAEndpoint;          // …:8080/api/brazing/update
+    REQUIRE(denso::brazing::save(db->handle(), legacy));
+
+    SettingsDialog dlg(db->handle());
+    CHECK(denso::testing::brazing_host(dlg)->text() ==
+          QStringLiteral("192.168.1.112"));
+    CHECK(denso::testing::brazing_port(dlg)->text() == QStringLiteral("8080"));
+    CHECK(denso::testing::brazing_scheme(dlg)->currentData().toString() ==
+          QStringLiteral("http"));
 }
 
 TEST_CASE("Settings Save refuses an arbitrary path and persists nothing",
@@ -220,28 +250,27 @@ TEST_CASE("Settings Save refuses an arbitrary path and persists nothing",
     REQUIRE(denso::db::run_migrations(db->handle()));
 
     SettingsDialog dlg(db->handle());
-    auto* url = dlg.findChild<QLineEdit*>(QStringLiteral("brazingUrl"));
+    auto* host = denso::testing::brazing_host(dlg);
     auto* on = dlg.findChild<QCheckBox*>(QStringLiteral("brazingEnabled"));
     auto* save = dlg.findChild<QPushButton*>(QStringLiteral("saveChangesButton"));
     REQUIRE(save != nullptr);
-    REQUIRE(url != nullptr);
 
     int emitted = 0;
     QObject::connect(&dlg, &SettingsDialog::brazing_config_changed,
                      [&] { ++emitted; });
 
     on->setChecked(true);
-    url->setText(QStringLiteral("http://192.168.1.112:8080/other/path"));
+    host->setText(QStringLiteral("http://192.168.1.112:8080/other/path"));
     save->click();
 
     CHECK(emitted == 0);                                   // no live reconfiguration
     CHECK_FALSE(denso::brazing::load(db->handle()).enabled);
     CHECK(denso::brazing::load(db->handle()).base_url.empty());
     CHECK_FALSE(status_text(dlg).isEmpty());               // a visible reason
-    CHECK(url->property("invalid").toBool());              // and the red field
+    CHECK(host->property("invalid").toBool());             // and the red field
     // The rejected text is left alone — never silently rewritten into something
     // that would post somewhere the operator did not ask for.
-    CHECK(url->text() == QStringLiteral("http://192.168.1.112:8080/other/path"));
+    CHECK(host->text() == QStringLiteral("http://192.168.1.112:8080/other/path"));
 }
 
 TEST_CASE("Settings Save refuses to enable reporting with no address",
@@ -276,7 +305,6 @@ TEST_CASE("Settings Save emits nothing when the write fails", "[brazing_live]") 
     REQUIRE(denso::db::run_migrations(db->handle()));
 
     SettingsDialog dlg(db->handle());
-    auto* url = dlg.findChild<QLineEdit*>(QStringLiteral("brazingUrl"));
     auto* on = dlg.findChild<QCheckBox*>(QStringLiteral("brazingEnabled"));
     auto* save = dlg.findChild<QPushButton*>(QStringLiteral("saveChangesButton"));
     REQUIRE(save != nullptr);
@@ -289,7 +317,7 @@ TEST_CASE("Settings Save emits nothing when the write fails", "[brazing_live]") 
                      [&] { ++emitted; });
 
     on->setChecked(true);
-    url->setText(QString::fromLatin1(kUrlA));
+    denso::testing::set_brazing_base(dlg, QString::fromLatin1(kUrlA));
     save->click();
 
     CHECK(emitted == 0);

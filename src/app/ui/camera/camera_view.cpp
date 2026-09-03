@@ -305,6 +305,10 @@ std::string CameraView::active_brazing_base_url() const {
     return grid_->active_brazing_base_url();
 }
 
+std::string CameraView::active_brazing_endpoint() const {
+    return grid_->active_brazing_endpoint();
+}
+
 size_t CameraView::grid_stream_count() const { return grid_->stream_count(); }
 
 size_t CameraView::grid_admitted_count() const { return grid_->admitted_count(); }

@@ -35,6 +35,14 @@ add_executable(denso_tests
     test_reading_repo.cpp
     test_brazing_config.cpp
     test_brazing_url.cpp
+    # The configurable reporting API path: the normalizer half of the ONE brazing
+    # URL authority, plus the backward-compatibility contract that an unset path
+    # composes the historical endpoint.
+    test_brazing_api_path.cpp
+    # Splitting the persisted base URL into the protocol/address/port controls the
+    # Settings page edits, and composing them back. The round-trip case is the
+    # backward-compatibility guarantee for every address already in the field.
+    test_base_url_parts.cpp
     test_area_points.cpp
     test_area_geometry.cpp
     test_area_validation.cpp
@@ -143,6 +151,10 @@ add_executable(denso_integration_tests
     # a closed localhost port, and the reporter cases use a fake transport — no
     # engine is loaded and nothing is contacted over the network.
     test_brazing_live_settings.cpp
+    # The reporting API path end to end: the Settings field + live effective-
+    # endpoint preview, the grid rebuilding on a path-only change, and the
+    # transport composing the configured path. Same hermetic fixtures as above.
+    test_reporting_api_path.cpp
     # Main-UI usability: the single Save-changes action, the top-bar Backend
     # indicator and Refresh Cameras. Drives the REAL SettingsDialog, MainWindow
     # and CameraGrid, so it needs denso_app. Model-less cameras on a closed

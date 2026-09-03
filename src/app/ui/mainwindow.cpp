@@ -285,7 +285,7 @@ void MainWindow::on_brazing_status_changed(BrazingStatus status) {
     shown_brazing_status_ = status;
 
     // Deliberately NOT "Connected". The backend exposes only
-    // POST /api/brazing/update — no health endpoint, no persistent connection —
+    // one reporting POST — no health endpoint, no persistent connection —
     // so the strongest true claim is that the reporting stack is running. ERROR
     // is the only state here that reflects the server at all, and it does so from
     // a real delivery attempt.
@@ -317,14 +317,17 @@ void MainWindow::on_brazing_status_changed(BrazingStatus status) {
     backend_btn_->style()->unpolish(backend_btn_);
     backend_btn_->style()->polish(backend_btn_);
 
-    // The canonical base URL, straight from the object that owns the sender. It
-    // can carry no credentials — normalize_base_url rejects userinfo outright —
-    // and no reading value goes anywhere near a tooltip.
+    // The composed endpoint, straight from the object that owns the sender —
+    // not the base alone, which stopped identifying the destination once the
+    // reporting API path became configurable. It can carry no credentials
+    // (normalize_base_url rejects userinfo outright) and no reading value goes
+    // anywhere near a tooltip.
     QStringList lines{detail};
     if (camera_view_) {
-        const std::string base = camera_view_->active_brazing_base_url();
-        if (!base.empty()) {
-            lines << QStringLiteral("Server: %1").arg(QString::fromStdString(base));
+        const std::string endpoint = camera_view_->active_brazing_endpoint();
+        if (!endpoint.empty()) {
+            lines << QStringLiteral("Sending to: %1")
+                         .arg(QString::fromStdString(endpoint));
         }
     }
     lines << QStringLiteral("Click to open Server settings.");

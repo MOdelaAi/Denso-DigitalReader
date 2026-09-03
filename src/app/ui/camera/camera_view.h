@@ -64,9 +64,14 @@ public:
     /// through it into the grid.
     BrazingStatus brazing_status() const;
     /// The canonical base URL the live sender was built with ("" when none), from
-    /// the grid. Feeds the Backend indicator's tooltip; it can carry no
-    /// credentials because normalize_base_url refuses userinfo.
+    /// the grid. It can carry no credentials because normalize_base_url refuses
+    /// userinfo.
     std::string active_brazing_base_url() const;
+    /// The FULL endpoint the live sender posts to ("" when none), from the grid.
+    /// Feeds the Backend indicator's tooltip: with the reporting API path
+    /// configurable, the base alone no longer tells an operator where readings
+    /// are going. Same credential guarantee as above.
+    std::string active_brazing_endpoint() const;
     /// How many camera runtimes the grid holds — see CameraGrid::stream_count().
     size_t grid_stream_count() const;
     /// How many cameras the grid admitted — see CameraGrid::admitted_count().

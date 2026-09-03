@@ -837,7 +837,7 @@ values and SQLite reuses rowids (no `AUTOINCREMENT`), so a retained receipt coul
 repoint an unrelated future attachment.
 
 **Reporting is disabled.** `brazing.enabled` is set false **inside the same
-transaction**; `brazing.base_url` is preserved. Re-enabling is an explicit
+transaction**; `brazing.base_url` and `brazing.api_path` are preserved. Re-enabling is an explicit
 operator action — it must never resume implicitly when the new mode is later
 configured. Preserved alongside it: the display settings, `net_config`, the
 `model` catalog, and everything on disk (engines, sidecars, `trt_cache`, logs).
@@ -1345,14 +1345,26 @@ inference worker thread (per camera)
          if a stable value changed: post_to_gui(reporter, submit(snapshot)) ─┐ queued
 GUI thread                                                                  ▼
   BrazingReporter::submit → BrazingRetryPolicy decides →
-     Send  → BrazingClient::post → POST {base}/api/brazing/update (async, 5 s timeout)
+     Send  → BrazingClient::post → POST {base}{api_path} (async, 5 s timeout)
               → done(ok): 2xx → delivered; else arm retry QTimer (1s→×2→30s cap)
      ArmRetry → retry timer → re-send the latest pending snapshot
 ```
 
 The four pure units (`zone_assembly`, `zone_aggregator`, `brazing_payload`,
 `brazing_retry_policy`) are unit-tested; the structural pieces
-(reporter/client/wiring) are build + suite + on-device verified. **Delivery is
+(reporter/client/wiring) are build + suite + on-device verified.
+
+**The endpoint is `{base_url}{api_path}`, and both halves are operator
+configuration** (Settings → Server; keys `brazing.base_url` / `brazing.api_path`,
+no migration — `settings` is key/value, and an absent path row resolves to
+`brazing::kDefaultApiPath`, so a pre-setting installation keeps its historical
+endpoint). `src/core/brazing/url.h` composes it in ONE place, used by the
+transport, the grid gate and the Settings preview alike. Consequence worth
+keeping: **`CameraGrid` compares senders on the composed ENDPOINT, not the base
+URL** — comparing on the base would treat a path-only edit as an unchanged
+configuration and go on posting to the old path while the UI showed the new one.
+
+**Delivery is
 reliable, latest-value-wins**: every POST carries the full `{zone_no→value}`
 snapshot, and `BrazingReporter` keeps retrying the newest snapshot (single-flight,
 exponential backoff) until the server 2xx-acks it — so a downed server no longer

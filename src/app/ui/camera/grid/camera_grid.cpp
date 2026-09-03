@@ -247,7 +247,7 @@ void CameraGrid::teardown() {
     // must never reach the server after the switch (spec §6.6), so an un-acked
     // snapshot dies here — logged by ~BrazingReporter, as it always was.
     brazing_reporter_.reset();
-    active_brazing_url_.clear();
+    clear_active_brazing_identity();
     set_brazing_status(BrazingStatus::Off);
 }
 
@@ -546,7 +546,7 @@ void CameraGrid::apply_brazing_config() {
     // up itself, because build_zone_reporting() ends by calling this.
     if (!reporter_) {
         brazing_reporter_.reset();
-        active_brazing_url_.clear();
+        clear_active_brazing_identity();
         // …and SAY so. clear() no longer reports Off (the sender now survives an
         // ordinary rebuild), so this branch is the only thing standing between a
         // grid that ended up with no pipeline — every camera removed or disabled —
@@ -556,11 +556,15 @@ void CameraGrid::apply_brazing_config() {
     }
 
     const brazing::BrazingConfig bcfg = brazing::load(db_);
-    // The SAME rule the Settings dialog validates with and the transport composes
-    // with. A rejected address is not repaired here — reporting simply does not
-    // start, loudly, rather than posting somewhere the operator did not ask for.
-    const brazing::BaseUrlResult url = brazing::normalize_base_url(bcfg.base_url);
-    const bool want = bcfg.enabled && url.ok && !url.base_url.empty();
+    // The SAME rule the Settings dialog validates with, previews with, and the
+    // transport composes with. A rejected address or path is not repaired here —
+    // reporting simply does not start, loudly, rather than posting somewhere the
+    // operator did not ask for.
+    const brazing::ApiPathResult api = brazing::normalize_api_path(bcfg.api_path);
+    const brazing::BaseUrlResult url = brazing::normalize_base_url(
+        bcfg.base_url, api.ok ? api.api_path : std::string(brazing::kDefaultApiPath));
+    const bool want =
+        bcfg.enabled && url.ok && !url.base_url.empty() && api.ok;
 
     if (!want) {
         if (bcfg.enabled && !url.ok) {
@@ -569,6 +573,13 @@ void CameraGrid::apply_brazing_config() {
                 << "is not usable, so no sender was started:"
                 << QString::fromStdString(logging::sanitize_url(bcfg.base_url))
                 << "-" << QString::fromStdString(url.error);
+        }
+        if (bcfg.enabled && !api.ok) {
+            qWarning().noquote()
+                << "[brazing] reporting is enabled but the stored reporting API"
+                << "path is not usable, so no sender was started:"
+                << QString::fromStdString(bcfg.api_path)
+                << "-" << QString::fromStdString(api.error);
         }
         if (brazing_reporter_) {
             qInfo().noquote() << "[brazing] backend reporting stopped";
@@ -580,12 +591,29 @@ void CameraGrid::apply_brazing_config() {
         // prevents a late done() from re-entering a destroyed reporter, so no old
         // callback can start another request.
         brazing_reporter_.reset();
-        active_brazing_url_.clear();
+        clear_active_brazing_identity();
         set_brazing_status(BrazingStatus::Off);
         return;
     }
 
-    if (brazing_reporter_ && active_brazing_url_ == url.base_url) {
+    // The ONE composition site, so the sender's identity is literally the URL it
+    // will post to — never a base that happens to match while the path moved.
+    const std::string endpoint =
+        brazing::endpoint_url(url.base_url, api.api_path);
+    if (endpoint.empty()) {
+        // Unreachable given the checks above (both halves are already known good),
+        // but the composed endpoint is what the client would be built from, so
+        // trusting it rather than re-deriving the decision keeps ONE authority.
+        qWarning().noquote()
+            << "[brazing] the configured server address and reporting API path"
+            << "compose to no endpoint; no sender was started";
+        brazing_reporter_.reset();
+        clear_active_brazing_identity();
+        set_brazing_status(BrazingStatus::Off);
+        return;
+    }
+
+    if (brazing_reporter_ && active_brazing_endpoint_ == endpoint) {
         // Saving an unchanged configuration must be inert: no second reporter, no
         // duplicate POST, and no reset of retry/delivery state that would re-send
         // a value the server already has.
@@ -598,13 +626,16 @@ void CameraGrid::apply_brazing_config() {
     // address — so nothing can be sent to the old URL afterwards.
     brazing_reporter_.reset();
     brazing_reporter_ = std::make_unique<BrazingReporter>(
-        std::make_unique<BrazingClient>(url.base_url));
+        std::make_unique<BrazingClient>(url.base_url, api.api_path));
     active_brazing_url_ = url.base_url;
+    active_brazing_path_ = api.api_path;
+    active_brazing_endpoint_ = endpoint;
     ++brazing_sender_builds_;
 
     // The indicator's Error state comes from the SENDER's own attempts, not from
-    // any probe of our own: the backend exposes only POST /api/brazing/update, so
-    // the outcome of a real report is the only evidence there is. Connected to
+    // any probe of our own: the backend exposes only the one reporting POST — no
+    // health endpoint — so the outcome of a real report is the only evidence
+    // there is. Connected to
     // the reporter we just built, so a retired sender's late outcome cannot move
     // the indicator (its connections die with it).
     connect(brazing_reporter_.get(), &BrazingReporter::delivery_succeeded, this,
@@ -629,10 +660,16 @@ void CameraGrid::apply_brazing_config() {
     // a snapshot is judged too old to deliver, not two.
     last_applied_seq_ =
         std::max(last_applied_seq_, reporter_->reset_delivery_baseline());
+    // The composed endpoint, not a second concatenation of the two halves: the
+    // log must name the URL the client was actually built with.
     qInfo().noquote() << "[brazing] backend reporting active:"
-                      << QString::fromStdString(
-                             logging::sanitize_url(url.base_url +
-                                                   brazing::kEndpointPath));
+                      << QString::fromStdString(logging::sanitize_url(endpoint));
+}
+
+void CameraGrid::clear_active_brazing_identity() {
+    active_brazing_url_.clear();
+    active_brazing_path_.clear();
+    active_brazing_endpoint_.clear();
 }
 
 void CameraGrid::reload_ball() {

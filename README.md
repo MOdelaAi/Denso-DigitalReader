@@ -137,7 +137,8 @@ A confirmed switch is **destructive** and runs as one checked transaction. It:
 - clears the configured processing setup of **both** modes (`setup_complete`,
   `areas_need_review`);
 - writes the new `mode.target` and starts the destination mode **unconfigured**;
-- **preserves** `brazing.base_url`, camera rows and their connection settings;
+- **preserves** `brazing.base_url` and `brazing.api_path`, camera rows and their
+  connection settings;
 - closes the Settings dialog once the switch has committed.
 
 **Switching back does not restore anything.** Camera model assignments, areas,
@@ -199,28 +200,72 @@ Configure it at Settings → **Server**.
 | Field | Value |
 |---|---|
 | *Send zone readings to server* | on / off |
-| *Server base URL* | `http://SERVER_IP:PORT` — the base only |
+| *Protocol* | HTTP or HTTPS |
+| *Server address* | an IPv4/IPv6 address or a host name — the address only |
+| *Port* | 1–65535, or blank for the protocol's default |
+| *Reporting API path* | the path the server exposes; defaults to `/api/brazing/update` |
 
-The endpoint path is fixed and appended by the application:
+The page shows the **effective endpoint** — the URL the application will really
+post to — and recomputes it as any of those fields is changed:
 
 ```
-POST {base_url}/api/brazing/update
+POST {base_url}{api_path}
 Content-Type: application/json
 
 {"zone1":3.00,"zone5":42}
 ```
 
+The path setting is named generically on purpose: the same endpoint carries
+**Digital Number Reader** and **Floating Ball Leveler** readings.
+
+**Upgrades need no action.** An installation that has never configured a path
+keeps posting to `/api/brazing/update`: the setting is a row in the `settings`
+key/value table, and an absent row means the shipped default. There was no schema
+migration.
+
 Every known zone across every camera is sent as one combined body whenever any
 zone's reading settles on a new value. Digital zones carry their configured
 decimal format; Ball zones carry a whole percentage.
 
-**URL normalization.** Pasting the full endpoint is expected and handled:
-`http://10.0.0.5:8080/api/brazing/update` is stored as `http://10.0.0.5:8080`.
-Surrounding whitespace and one trailing slash are also removed. Anything else — a
-different path, a missing or non-`http(s)` scheme, a missing host, embedded
-credentials, a query or a fragment — is **rejected with a message**, never
-silently rewritten. One rule serves the settings form, the runtime gate and the
-HTTP client (`src/core/brazing/url.h`).
+**Normalization.** One rule serves the settings form, its endpoint preview, the
+runtime gate and the HTTP client (`src/core/brazing/url.h`); there is no second,
+more lenient copy anywhere.
+
+*Protocol / Server address / Port* — these three are a **view** of one stored
+value. There is no `brazing.protocol` or `brazing.port` row: they are split out of
+`brazing.base_url` on load and composed back into it on save, through the same
+authority (`split_base_url` / `compose_base_url` in `src/core/brazing/url.h`), so
+every address already in the field round-trips byte-for-byte and nothing needed a
+migration.
+
+Surrounding whitespace is removed and a host name is lower-cased. A blank port
+means the protocol's default and is stored as an address with no port
+(`https://server.example.com`) — that shape must keep working, so the port is
+validated only when you supply one. An IPv6 address is typed without brackets and
+gets them back in the URL. **Rejected with a message**: a port outside 1–65535 or
+that is not a plain number; a port typed with no address; and anything but an
+address in the address box — `http://…`, `host:8080`, `host/path` — because the
+protocol, the port and the path each have their own control now.
+
+A value already stored that holds the whole endpoint still opens correctly:
+`http://10.0.0.5:8080/api/brazing/update` splits to `10.0.0.5` + `8080`, and what
+is stripped is the **configured** path, whatever it is.
+
+*Reporting API path* — a missing leading slash is added (`api/denso/update` →
+`/api/denso/update`) and surrounding whitespace removed; a single trailing slash
+is **kept**, because `/x/` and `/x` are different resources to many servers. A
+blank field resolves to `/api/brazing/update`, and the field is re-seeded on Save
+so you can see that. Rejected with a message: a whole server URL
+(`http://another-server/api/update` — scheme and host belong in the base URL), a
+protocol-relative or `scheme:` value, a query or a fragment, embedded spaces, an
+empty `//` segment, `.`/`..` segments, a bare `/`, characters URLs do not allow,
+and a percent-escape of `/`, `.` or `\` (`%2F`, `%2E`, `%5C`) — those carry path
+structure past the segment rules, and a server or proxy that decodes before
+routing would land somewhere other than the endpoint shown in the preview.
+Escapes of ordinary characters (`%20`) are fine. A stored path the rule refuses
+starts **no** sender at all rather than
+falling back to the default — reporting stops loudly instead of posting somewhere
+nobody chose.
 
 **Delivery is reliable and latest-value-wins.** If the server is unreachable the
 app keeps retrying the latest snapshot (exponential backoff, capped at 30 s) and
@@ -229,7 +274,7 @@ snapshot while it waits. Only one request is in flight at a time, each bounded b
 a 5 s timeout, so an unreachable server cannot hang the UI. Retry state is
 in-memory only — a restart begins again from live detection.
 
-A mode switch turns reporting **off** and keeps the address.
+A mode switch turns reporting **off** and keeps the address and the path.
 
 ## Operator workflow
 

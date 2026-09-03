@@ -16,7 +16,7 @@
 
 using denso::brazing::BaseUrlResult;
 using denso::brazing::endpoint_url;
-using denso::brazing::kEndpointPath;
+using denso::brazing::kDefaultApiPath;
 using denso::brazing::normalize_base_url;
 
 namespace {
@@ -155,10 +155,13 @@ TEST_CASE("a differently-cased endpoint path is rejected", "[brazing_url]") {
 
 // ── The composed endpoint (the transport boundary) ───────────────────────────
 
-TEST_CASE("the endpoint path is exactly /api/brazing/update", "[brazing_url]") {
-    // Pinned as a literal: this is the confirmed production contract and no
-    // refactor may drift it.
-    CHECK(std::string(kEndpointPath) == "/api/brazing/update");
+TEST_CASE("the DEFAULT endpoint path is exactly /api/brazing/update",
+          "[brazing_url]") {
+    // Pinned as a literal: this is the confirmed production contract, and it is
+    // now also the backward-compatibility contract — an installation with no
+    // configured reporting API path composes exactly this. No refactor may drift
+    // it. The configurable half is covered in test_brazing_api_path.cpp.
+    CHECK(std::string(kDefaultApiPath) == "/api/brazing/update");
 }
 
 TEST_CASE("endpoint_url appends the endpoint to a base URL", "[brazing_url]") {
@@ -193,4 +196,46 @@ TEST_CASE("endpoint_url of an unset address is empty", "[brazing_url]") {
     CHECK(endpoint_url("").empty());
     CHECK(endpoint_url("   ").empty());
     CHECK(endpoint_url("/").empty());
+}
+
+// ── The base normalizer against a CONFIGURED reporting API path ──────────────
+
+TEST_CASE("the paste tolerance follows the configured path", "[brazing_url]") {
+    // normalize_base_url strips the endpoint the operator was actually given.
+    // Keyed to the shipped default instead, it would refuse a perfectly correct
+    // paste with a message naming a path the customer's server does not expose.
+    const BaseUrlResult r =
+        normalize_base_url("http://192.168.1.112:8080/api/denso/update",
+                           "/api/denso/update");
+    REQUIRE(r.ok);
+    CHECK(r.base_url == kBase);
+    // …and one trailing slash on the paste is tolerated exactly as before.
+    const BaseUrlResult with_slash =
+        normalize_base_url("http://192.168.1.112:8080/api/denso/update/",
+                           "/api/denso/update");
+    REQUIRE(with_slash.ok);
+    CHECK(with_slash.base_url == kBase);
+}
+
+TEST_CASE("a path that is not the configured endpoint is still rejected",
+          "[brazing_url]") {
+    // The tolerance MOVES with the configuration; it does not widen. Once
+    // /api/denso/update is configured, the old default is just another arbitrary
+    // path on the base, and stripping it would post to a resource the operator
+    // never named.
+    const BaseUrlResult r =
+        normalize_base_url("http://192.168.1.112:8080/api/brazing/update",
+                           "/api/denso/update");
+    CHECK_FALSE(r.ok);
+    CHECK_FALSE(r.error.empty());
+    CHECK(r.base_url.empty());
+}
+
+TEST_CASE("an unusable configured path leaves the base rule well-defined",
+          "[brazing_url]") {
+    // The path is reported on its own field; this function must not become
+    // undefined because of it. It falls back to the shipped default's tolerance,
+    // and a plain base URL — the overwhelmingly common case — still passes.
+    CHECK(normalize_base_url(kBase, "http://elsewhere/api").ok);
+    CHECK(normalize_base_url(kBase, "http://elsewhere/api").base_url == kBase);
 }

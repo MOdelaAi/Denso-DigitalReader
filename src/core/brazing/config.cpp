@@ -41,21 +41,40 @@ BrazingConfig load(const QSqlDatabase& db) {
     if (const auto v = get(db, QStringLiteral("brazing.base_url"))) {
         out.base_url = v->toStdString();
     }
+    // The row is OPTIONAL by design — that absence is exactly what an
+    // installation predating this setting has, and it must keep posting to the
+    // endpoint it always did. A blank row is treated the same way: it is not a
+    // path anything could post to, the UI cannot store one, and leaving the
+    // struct's default in place is the only reading that keeps reporting alive.
+    // Anything else present is handed back VERBATIM and validated at the point of
+    // use by brazing::normalize_api_path — this loader does not silently repair
+    // configuration, exactly as it does not for base_url.
+    if (const auto v = get(db, QStringLiteral("brazing.api_path"))) {
+        if (!v->trimmed().isEmpty()) {
+            out.api_path = v->toStdString();
+        }
+    }
     return out;
 }
 
 bool save_rows(const QSqlDatabase& db, const BrazingConfig& cfg) {
+    // The path is written on every save, so the row exists from the first save
+    // onwards and the "absent means default" fallback above is only ever
+    // exercised by a configuration that predates the setting.
     return set(db, QStringLiteral("brazing.enabled"),
                cfg.enabled ? QStringLiteral("1") : QStringLiteral("0")) &&
            set(db, QStringLiteral("brazing.base_url"),
-               QString::fromStdString(cfg.base_url));
+               QString::fromStdString(cfg.base_url)) &&
+           set(db, QStringLiteral("brazing.api_path"),
+               QString::fromStdString(cfg.api_path));
 }
 
 bool save(const QSqlDatabase& db, const BrazingConfig& cfg) {
-    // ONE transaction over both rows, so the checked result is atomic: a caller
+    // ONE transaction over every row, so the checked result is atomic: a caller
     // told "false" can state that nothing was applied, and a restart can never
     // load a half-written configuration (reporting enabled against the PREVIOUS
-    // address, say). Modeled on mode::switch_and_reset's checked transaction.
+    // address or the PREVIOUS path, say). Modeled on mode::switch_and_reset's
+    // checked transaction.
     //
     // The handle is copied because transaction()/commit() are non-const;
     // QSqlDatabase is a reference to the connection, so this is the SAME

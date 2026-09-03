@@ -6,6 +6,7 @@
 // network callbacks + `std::thread`/`upgrade_in_event_loop`).
 #pragma once
 
+#include "brazing/url.h"   // BaseUrlParts — the address controls' shared shape
 #include "mode/mode.h"
 #include "settings/display.h"
 
@@ -16,6 +17,7 @@
 #include <QString>
 
 #include <cstdint>
+#include <string>
 
 class QCheckBox;
 class QComboBox;
@@ -177,6 +179,29 @@ private:
     /// (which writes brazing.enabled = 0 behind its back) would leave a stale
     /// ticked box the operator could Save straight back.
     void reload_server_page();
+    /// Recompute the "Requests will be sent to: …" line from the two fields AS
+    /// TYPED, through brazing::endpoint_url() — the same function the transport
+    /// composes with, so the preview cannot promise an endpoint the client would
+    /// not use. Purely derived: it reads the widgets and writes one label, never
+    /// the database and never the other fields.
+    void update_endpoint_preview();
+    /// The ONE writer of the Server page's status line. Re-derives the endpoint
+    /// preview afterwards, which is what lets the preview stand aside for a
+    /// message the status line is already carrying.
+    void set_server_status(const QString& message, bool warn);
+    /// Write the endpoint preview, suppressing it to a dash when it would repeat
+    /// the visible status line verbatim.
+    void set_endpoint_preview(const QString& text);
+    /// The three address controls as the shared composer takes them. One reader,
+    /// so the preview and the save path can never disagree about what the form
+    /// currently says.
+    brazing::BaseUrlParts current_base_parts() const;
+    /// Set/clear the invalid marking on BOTH address controls.
+    void mark_base_fields_invalid(bool invalid);
+    /// Redden whichever of the address/port controls actually caused the refusal,
+    /// determined by re-asking the shared composer rather than by a second copy
+    /// of the port rule.
+    void mark_offending_base_field(const std::string& api_path);
     /// Validate + persist the Server page. Returns true when the configuration
     /// actually reached the database; shows an operator-facing reason and returns
     /// false otherwise. NEVER reports success for input it rejected.
@@ -197,12 +222,22 @@ private:
         int     window_size = -1;
         bool    dark = true;
         bool    brazing_enabled = false;
-        QString brazing_url;
+        // The server address as EDITED — three controls, not the one canonical
+        // string they compose to. Dirty must track what the operator can see and
+        // change: comparing composed values would call "192.168.1.1" typed into
+        // an empty box no change at all until it happened to become valid.
+        QString brazing_scheme;
+        QString brazing_host;
+        QString brazing_port;
+        QString brazing_api_path;
 
         friend bool operator==(const FormState& a, const FormState& b) {
             return a.display_mode == b.display_mode && a.window_size == b.window_size &&
                    a.dark == b.dark && a.brazing_enabled == b.brazing_enabled &&
-                   a.brazing_url == b.brazing_url;
+                   a.brazing_scheme == b.brazing_scheme &&
+                   a.brazing_host == b.brazing_host &&
+                   a.brazing_port == b.brazing_port &&
+                   a.brazing_api_path == b.brazing_api_path;
         }
         friend bool operator!=(const FormState& a, const FormState& b) {
             return !(a == b);
@@ -264,9 +299,16 @@ private:
     // Network page — a self-contained widget owning its cards + async handlers.
     NetworkPanel* network_panel_ = nullptr;
 
-    // Server (brazing reporter)
+    // Server (brazing reporter). The address is edited as protocol + host + port
+    // and PERSISTED as the single canonical brazing.base_url — see
+    // brazing::split_base_url / compose_base_url. There is no widget holding the
+    // whole URL, and no database column per control.
     QCheckBox* brazing_enabled_ = nullptr;
-    QLineEdit* brazing_url_ = nullptr;
+    QComboBox* brazing_scheme_ = nullptr;
+    QLineEdit* brazing_host_ = nullptr;
+    QLineEdit* brazing_port_ = nullptr;
+    QLineEdit* brazing_api_path_ = nullptr;
+    QLabel* brazing_endpoint_ = nullptr;  // live "Requests will be sent to: …"
     QLabel* brazing_status_ = nullptr;   // inline "Saved." / rejection reason
 };
 
