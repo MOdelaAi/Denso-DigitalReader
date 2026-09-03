@@ -23,6 +23,7 @@ add_library(denso_core STATIC
     db/db.cpp
     settings/repo.cpp
     camera/repo.cpp
+    camera/roi_enhancement.cpp
     camera/area_points.cpp
     camera/area_geometry.cpp
     camera/area_validation.cpp

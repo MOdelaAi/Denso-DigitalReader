@@ -56,7 +56,8 @@ DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
                                        int64_t camera_id, ReadingSink* sink,
                                        ZoneSink* zone_sink,
                                        WorkerFailedFn on_worker_failed,
-                                       ZoneViewFn zone_view)
+                                       ZoneViewFn zone_view,
+                                       denso::camera::ImageEnhancement enhancement)
     : degrees_(degrees), pitch_(pitch), roll_(roll),
       models_(std::move(models)), areas_(std::move(areas)),
       camera_id_(camera_id), sink_(sink), zone_sink_(zone_sink),
@@ -65,6 +66,18 @@ DetectionProcessor::DetectionProcessor(int degrees, double pitch, double roll,
     // Monotonic process-lifetime tally (see constructed_count()). relaxed: this is
     // an observable counter, not an ordering primitive for other state.
     s_constructed_.fetch_add(1, std::memory_order_relaxed);
+    // The enhancer is built from the SAME areas_ the ROI detection filter uses,
+    // so the region that is enhanced and the region that is read can never drift
+    // apart — including under ROI quarantine, where the grid hands us an EMPTY
+    // area set and detection therefore runs on the whole frame: the enhancement
+    // follows it there rather than sharpening geometry nobody trusts.
+    //
+    // make() returns null when the bundle has no effect (disabled, or enabled
+    // with every control neutral), so an un-enhanced camera allocates no lookup
+    // table, no CLAHE and no mask, and never makes the Lab round trip — the
+    // "disabled costs nothing" guarantee is structural. Built BEFORE the worker
+    // starts, like every other member the worker reads.
+    enhancer_ = RoiEnhancer::make(enhancement, areas_);
     // Start the inference worker LAST, once every member is initialized — the
     // worker reads on_worker_failed_ every frame, so it must be set before start.
     worker_ = std::thread([this] { infer_loop(); });
@@ -209,6 +222,20 @@ void DetectionProcessor::infer_loop() {
         // Log is throttled so a persistent failure surfaces without spamming.
         std::vector<NamedDetection> kept;
         try {
+            // ── Image Enhancement, on the INFERENCE COPY only ────────────────
+            // `frame` was moved out of the drop-oldest slot, so it is this
+            // worker's private Mat: the capture thread has already drawn and
+            // shipped its own display Mat from the same oriented source, and
+            // nothing written here can reach the tile, a snapshot, or any other
+            // consumer. That is what keeps the dashboard raw.
+            //
+            // INSIDE the firewall deliberately. cv::Exception derives from
+            // std::exception, so a malformed frame that upset the colour
+            // conversion is caught here exactly like an inference throw — a bare
+            // std::thread body must not let anything escape.
+            if (enhancer_) {
+                enhancer_->apply(frame);
+            }
             kept = run_inference(frame);
         } catch (const std::exception& e) {
             if (infer_fail_streak_++ % kInferFailLogEvery == 0) {

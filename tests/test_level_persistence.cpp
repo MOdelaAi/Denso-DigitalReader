@@ -331,10 +331,10 @@ bool save_float(const Fixture& fx, int64_t camera_id,
 // ─── 1-2. migration v13 -> v14 is additive and preserves every digit row ──────
 
 TEST_CASE("schema version is 17", "[level][schema]") {
-    CHECK(denso::db::supported_schema_version() == 17);
+    CHECK(denso::db::supported_schema_version() == 18);
 }
 
-TEST_CASE("v13 -> v17 migrates a populated database and preserves every Digital "
+TEST_CASE("v13 -> v18 migrates a populated database and preserves every Digital "
           "Reader row",
           "[level][schema][migration]") {
     QTemporaryDir dir;
@@ -397,7 +397,7 @@ TEST_CASE("v13 -> v17 migrates a populated database and preserves every Digital 
         REQUIRE(db.has_value());
         REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 13);
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 18);
 
         // MUTATION GUARD: every digit row survives, with its values intact.
         CHECK(row_count(db->handle(), "camera") == 1);
@@ -447,7 +447,7 @@ TEST_CASE("v13 -> v17 migrates a populated database and preserves every Digital 
 // migration that infers schema from it fails at the first query. A failed
 // `run_migrations` is a bricked upgrade: the appliance refuses to boot.
 
-TEST_CASE("v11 -> v17 upgrades a real legacy database and preserves every row",
+TEST_CASE("v11 -> v18 upgrades a real legacy database and preserves every row",
           "[level][schema][migration]") {
     QTemporaryDir dir;
     REQUIRE(dir.isValid());
@@ -484,7 +484,7 @@ TEST_CASE("v11 -> v17 upgrades a real legacy database and preserves every row",
         REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 11);
 
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 18);
 
         // Every v11 row survives, values intact.
         CHECK(row_count(db->handle(), "camera") == 1);
@@ -526,7 +526,7 @@ TEST_CASE("a populated v14 Ball calibration becomes one binding plus one zone",
     REQUIRE(db.has_value());
     REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 14);
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 18);
 
     // Exactly one binding, carrying the camera-level model identity.
     REQUIRE(row_count(db->handle(), "ball_level_binding") == 1);
@@ -705,7 +705,7 @@ TEST_CASE("a migration interrupted before the version stamp resumes on restart",
     auto db = denso::db::Db::open(path);
     REQUIRE(db.has_value());
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 18);
 
     const auto cams = denso::camera::all(db->handle());
     REQUIRE(cams.size() == 1);
@@ -743,7 +743,7 @@ TEST_CASE("the v15 block repairs the digit zone schema it depends on",
     auto db = denso::db::Db::open(path);
     REQUIRE(db.has_value());
     REQUIRE(denso::db::run_migrations(db->handle()));
-    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
+    CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 18);
 
     // Repaired, not merely tolerated: the table AND its zone column are there,
     // so the digit reader has somewhere to record a claim after the upgrade.

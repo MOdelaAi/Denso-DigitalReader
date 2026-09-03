@@ -459,6 +459,12 @@ void CameraWizardController::enter_areas(bool direct) {
     // Saving here is what finishes an in-progress camera — the page relabels its
     // terminal actions so neither one lies about that.
     pages_.areas->set_unfinished(editing_id_.has_value() && !draft_.setup_complete);
+    // The camera's persisted Image Enhancement bundle. Seeded BEFORE the frame is
+    // pushed so the first render already reflects the saved tuning, and reseeded
+    // on every entry so a second camera can never inherit the first one's values.
+    // Seeding also resets the preview toggle: it is view state and is never
+    // persisted, so the operator always starts from the camera's real picture.
+    pages_.areas->set_enhancement(draft_.image_enhance);
     update_areas_background();
     show_page_(4);
 }
@@ -597,10 +603,38 @@ void CameraWizardController::save_areas(const std::vector<camera::CameraArea>& a
                            "checked against the current view."));
         return;
     }
-    if (editing_id_.has_value() &&
-        !camera::replace_areas(db_, *editing_id_, areas)) {
-        pages_.areas->show_save_error();
-        return;
+    if (editing_id_.has_value()) {
+        // ONE operator action, ONE transaction. The polygons, their zones and
+        // number formats, and this camera's ROI enhancement level are all edited
+        // on this page behind a single Save, so they persist together or not at
+        // all — camera::save_areas_and_enhancement owns that transaction inside
+        // the repository that owns both tables. This controller deliberately
+        // issues no SQL and opens no transaction of its own: nesting one around
+        // the repo's would fail (SQLite has no nested transactions) and would
+        // leave the outer one open when the inner refused.
+        //
+        // Disengaged = no enhancement control changed, so no camera-row write is
+        // issued for it and this is exactly the old area-only save.
+        const camera::ImageEnhancement chosen = pages_.areas->enhancement();
+        const std::optional<camera::ImageEnhancement> bundle_change =
+            chosen != draft_.image_enhance
+                ? std::optional<camera::ImageEnhancement>(chosen)
+                : std::nullopt;
+        if (!camera::save_areas_and_enhancement(db_, *editing_id_, areas,
+                                                bundle_change)) {
+            // NOTHING was persisted. The page keeps the operator's working edits
+            // on screen and stays dirty against the still-unchanged stored
+            // values, so Save can simply be pressed again.
+            pages_.areas->show_save_error();
+            return;
+        }
+        // Only after the COMMIT: the in-memory draft and the page's saved
+        // baseline may only advance once the database has actually agreed. Doing
+        // this before would make a failed save look saved to is_dirty(), and the
+        // operator would be told they were discarding work that was never
+        // written — or that written work was unsaved.
+        draft_.image_enhance = chosen;
+        pages_.areas->mark_saved();
     }
     // Only now — the areas write landed, so the setup this finishes is real.
     finish_and_leave(pages_.areas);

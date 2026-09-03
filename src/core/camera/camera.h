@@ -2,6 +2,8 @@
 // tree these are defined but not yet wired into the app.
 #pragma once
 
+#include "camera/roi_enhancement.h"
+
 #include <cstdint>
 #include <optional>
 #include <set>
@@ -58,6 +60,25 @@ struct Camera {
     float pitch = 0.0f;
     float roll = 0.0f;
     uint32_t rotation = 0;  // 0 | 90 | 180 | 270
+
+    // This camera's Image Enhancement bundle, applied to the inference copy
+    // inside its Digital Number Reader areas (schema v18): the master switch plus
+    // local contrast, brightness, contrast, gamma and saturation.
+    //
+    // Per CAMERA because it compensates for this camera's optics, exposure and
+    // lighting, and every Area it owns is drawn on one frame under one light —
+    // but applied only inside those Areas, so the scope of the SETTING and the
+    // extent of the EFFECT are different things on purpose.
+    //
+    // DIGITAL NUMBER READER ONLY. The Ball Leveler runtime never reads it: it is
+    // not a BallLevelProcessor constructor argument, so "Ball ignores it" is a
+    // property of the type, not a branch someone has to remember. The bundle is
+    // deliberately NOT cleared by a mode switch — an operator who goes
+    // Digital → Ball → Digital gets their field calibration back.
+    //
+    // Disabled-and-neutral is the default in every direction: a fresh Camera, the
+    // columns' DEFAULTs, and anything unparseable (see parse_enhancement).
+    ImageEnhancement image_enhance{};
 
     // When true, the camera's ROI areas are quarantined pending operator review
     // after a view-significant source/geometry change: they are excluded from

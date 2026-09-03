@@ -35,6 +35,10 @@ public:
 
     void set_frame(const QImage& oriented);  // background; repaints
     bool has_frame() const { return !frame_.isNull(); }
+    /// The backdrop currently painted. Read-only; the page owns what goes in.
+    /// Exists so a test can assert WHICH image the operator is looking at —
+    /// raw or enhanced — rather than inferring it from a screenshot.
+    const QImage& frame() const { return frame_; }
 
     /// The camera's other areas, drawn dimmed behind the active polygon so the
     /// operator can see overall coverage and spot overlaps while editing.

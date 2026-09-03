@@ -71,6 +71,36 @@ std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id);
 bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
                    const std::vector<CameraArea>& areas);
 
+/// The Areas page's SINGLE Save, as one transaction: the camera's ROI set and
+/// -- when the operator changed it -- that camera's Digital ROI enhancement
+/// level, together, all or nothing.
+///
+/// It exists because those two edits are made on one page behind one button, so
+/// there must be no outcome in which one of them lands. Before it, the level was
+/// written first and the areas second; an area refusal then left the level moved
+/// against the OLD polygons, the dialog reported only that "the areas could not
+/// be written", and the grid was rebuilt from that mismatch.
+///
+/// `enhancement` DISENGAGED means the operator changed no enhancement control:
+/// no camera-row write for it is issued at all and this is byte-for-byte the old
+/// area-only save. Engaged, the whole SIX-column bundle is written by one
+/// targeted UPDATE — never the generic full-row camera::update, which would let a
+/// stale draft overwrite unrelated columns — and every value is clamped the way
+/// every other write here clamps (out of range becomes the neutral value rather
+/// than failing the save).
+///
+/// It runs the SAME authoritative area logic `replace_areas` runs -- one
+/// implementation, shared, not a copy: zone range, duplicate-within-save,
+/// cross-camera AND cross-mode (`camera_area` UNION `ball_level_zone`)
+/// ownership, the decimal-format clamp, and the `areas_need_review` clear that
+/// makes saving the set count as verifying it. A refusal from any of those
+/// unwinds the enhancement with it.
+///
+/// Returns false on any refusal or write error, with NOTHING persisted.
+bool save_areas_and_enhancement(const QSqlDatabase& db, int64_t camera_id,
+                                const std::vector<CameraArea>& areas,
+                                std::optional<ImageEnhancement> enhancement);
+
 /// Zone numbers currently claimed by cameras OTHER than `camera_id`, mapped to
 /// the owning camera's name. Zones are unique machine-wide (replace_areas
 /// enforces it), so this is what the Areas page needs to show which numbers are

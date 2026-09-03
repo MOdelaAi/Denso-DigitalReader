@@ -55,6 +55,7 @@ add_library(denso_camera STATIC
     camera/warmup_gate.cpp
     camera/zone_assembly.cpp
     camera/zone_overlay.cpp
+    camera/roi_enhance.cpp
     camera/frame_processor.cpp
     camera/level_overlay.cpp
     camera/level_processor.cpp

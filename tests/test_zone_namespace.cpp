@@ -416,7 +416,7 @@ TEST_CASE("v16 -> v17 turns legacy zone 0 into NULL and leaves real zones alone"
         REQUIRE(db.has_value());
         REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 16);
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 18);
 
         // ── the semantic migration ──
         CHECK_FALSE(stored_zone(db->handle(), "legacy-zero").has_value());
@@ -499,9 +499,9 @@ TEST_CASE("v16 -> v17 turns legacy zone 0 into NULL and leaves real zones alone"
     {
         auto db = denso::db::Db::open(s.path);
         REQUIRE(db.has_value());
-        REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
+        REQUIRE(denso::db::read_user_version(db->handle()).value_or(-1) == 18);
         REQUIRE(denso::db::run_migrations(db->handle()));
-        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 17);
+        CHECK(denso::db::read_user_version(db->handle()).value_or(-1) == 18);
         CHECK(row_count(db->handle(), "camera_area") == 5);
         CHECK(row_count(db->handle(), "ball_level_zone") == 2);
     }

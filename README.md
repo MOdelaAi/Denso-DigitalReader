@@ -300,7 +300,7 @@ the root-owned, upgrade-replaced program directory).
 
 | Path | Contents |
 |---|---|
-| `<data>/denso.db` | the single SQLite store (schema **v17**, version-gated migrations) |
+| `<data>/denso.db` | the single SQLite store (schema **v18**, version-gated migrations) |
 | `<data>/models/` | TensorRT engines + their `.names.json` sidecars + `manifest.json` |
 | `<data>/models/trt_cache/` | TensorRT cache |
 | `<data>/status.json` | machine-readable health for SSH inspection |
@@ -729,7 +729,7 @@ Eight CMake targets, split by concern:
 ```
 src/
 ├─ core/   → denso_core   (Qt Core/Sql + std; never links Qt6::Widgets)
-│  ├─ db/         SQLite base + version-gated migrations (currently v17)
+│  ├─ db/         SQLite base + version-gated migrations (currently v18)
 │  ├─ mode/       operating mode + the destructive switch-and-reset transaction
 │  ├─ camera/     camera + ROI-area domain, zone namespace, source-change logic
 │  ├─ level/      Ball Leveler calibration, measurement and persistence

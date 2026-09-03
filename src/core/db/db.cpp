@@ -18,7 +18,7 @@ namespace {
 
 /// Current schema version. Bump and add a `version < N` block in
 /// run_migrations() when changing the schema.
-constexpr int SCHEMA_VERSION = 17;
+constexpr int SCHEMA_VERSION = 18;
 
 /// Monotonic source of unique connection names so connections (especially
 /// in-memory test DBs sharing the ":memory:" name) never collide.
@@ -901,6 +901,86 @@ bool run_migrations(const QSqlDatabase& db) {
         // never costs a rebuild of hand-measured operator calibration.
         if (!run("UPDATE camera_area SET zone = NULL WHERE zone = 0")) {
             return false;
+        }
+    }
+
+    if (version < 18) {
+        // Per-camera Digital Number Reader IMAGE ENHANCEMENT, applied to the
+        // inference copy inside that camera's areas: a master switch plus local
+        // contrast (0 Off, 1 Low, 2 Medium, 3 High — camera::RoiEnhancement's
+        // integer values ARE that column's format), brightness, contrast, gamma
+        // and saturation.
+        //
+        // It belongs to the CAMERA, not to the area and not to the model. What it
+        // compensates for is this camera's optics and lighting, and every area a
+        // camera owns is drawn on one frame under one light — so a per-area copy
+        // could only ever disagree with itself about the same photograph. Where
+        // it is APPLIED is a different question, and the answer there is
+        // per-area: the runtime enhances only the union of the camera's area
+        // polygons (see src/app/camera/roi_enhance.h).
+        //
+        // The NEUTRAL DEFAULTS are what make this migration behaviour-preserving,
+        // and they are the whole upgrade story: every camera on every existing
+        // appliance comes up DISABLED with every control at the value that leaves
+        // the image alone, which is byte-for-byte the pipeline it has today. An
+        // upgrade must never silently start altering the pixels a customer's
+        // detector sees — enabling this is an explicit operator action, once, per
+        // camera.
+        //
+        // v18 is still UNCOMMITTED and unshipped, so these columns are added to
+        // the existing v18 block rather than to a v19: no database anywhere has
+        // ever been stamped v18, so there is nothing in the field to migrate
+        // forward from. Editing a SHIPPED migration would be a different matter
+        // entirely and is still forbidden.
+        //
+        // The CHECK is worth having because this is a per-ROW fact and the set of
+        // legal levels is closed: it stops a hand edit or a restored backup from
+        // persisting a level the reader has no mapping for. Readers still fail
+        // safe on top of it (parse_roi_enhancement resolves anything unknown to
+        // Off), because a database can also arrive from a build that appended a
+        // level this one does not have.
+        struct EnhanceColumn {
+            const char* name;
+            const char* ddl;
+        };
+        // Six columns, one per control, all NOT NULL with a neutral DEFAULT and a
+        // range CHECK. Separate columns rather than a packed blob or a JSON field
+        // because each one is a scalar the database can validate on its own, and
+        // because a CHECK is the only guard that also applies to a hand edit or a
+        // restored backup.
+        //
+        // Gamma is HUNDREDTHS (100 == 1.00), so the whole bundle is integers:
+        // exact equality, exact CHECK bounds and an exact round trip. A REAL
+        // column would give none of those and buy nothing an operator can see.
+        static constexpr EnhanceColumn kEnhanceColumns[] = {
+            {"img_enh_enabled",
+             "ALTER TABLE camera ADD COLUMN img_enh_enabled "
+             "INTEGER NOT NULL DEFAULT 0 CHECK (img_enh_enabled IN (0, 1))"},
+            {"img_enh_local_contrast",
+             "ALTER TABLE camera ADD COLUMN img_enh_local_contrast "
+             "INTEGER NOT NULL DEFAULT 0 "
+             "CHECK (img_enh_local_contrast BETWEEN 0 AND 3)"},
+            {"img_enh_brightness",
+             "ALTER TABLE camera ADD COLUMN img_enh_brightness "
+             "INTEGER NOT NULL DEFAULT 0 "
+             "CHECK (img_enh_brightness BETWEEN -100 AND 100)"},
+            {"img_enh_contrast",
+             "ALTER TABLE camera ADD COLUMN img_enh_contrast "
+             "INTEGER NOT NULL DEFAULT 0 "
+             "CHECK (img_enh_contrast BETWEEN -100 AND 100)"},
+            {"img_enh_gamma",
+             "ALTER TABLE camera ADD COLUMN img_enh_gamma "
+             "INTEGER NOT NULL DEFAULT 100 "
+             "CHECK (img_enh_gamma BETWEEN 50 AND 300)"},
+            {"img_enh_saturation",
+             "ALTER TABLE camera ADD COLUMN img_enh_saturation "
+             "INTEGER NOT NULL DEFAULT 0 "
+             "CHECK (img_enh_saturation BETWEEN -100 AND 100)"},
+        };
+        for (const EnhanceColumn& c : kEnhanceColumns) {
+            if (!add_column("camera", c.name, c.ddl)) {
+                return false;
+            }
         }
     }
 

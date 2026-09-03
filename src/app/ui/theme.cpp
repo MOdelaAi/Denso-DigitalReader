@@ -166,6 +166,26 @@ QString style_sheet(const Palette& p) {
             border: 1px solid #ef4444;
         }
         QCheckBox { color: %(txt); background: transparent; }
+        QCheckBox:disabled { color: %(txtFaint); }
+
+        /* Compact horizontal sliders (the camera Image Enhancement controls).
+           Sized to sit in a 280px side panel next to a caption and a numeric
+           readout, and given a handle big enough for a touchscreen. */
+        QSlider::groove:horizontal {
+            height: 4px; background: %(panel3); border-radius: 2px;
+        }
+        QSlider::sub-page:horizontal {
+            height: 4px; background: %(gold500); border-radius: 2px;
+        }
+        QSlider::handle:horizontal {
+            width: 14px; margin: -6px 0px; border-radius: 7px;
+            background: %(gold); border: 1px solid %(panel);
+        }
+        QSlider::handle:horizontal:hover { background: %(gold300); }
+        QSlider:disabled::sub-page:horizontal { background: %(panel3); }
+        QSlider:disabled::handle:horizontal {
+            background: %(panel3); border: 1px solid %(panel2);
+        }
 
         #navList { background: transparent; border: none; }
         #navList::item {

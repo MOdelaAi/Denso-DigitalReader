@@ -20,10 +20,25 @@ namespace {
 const QString COLUMNS = QStringLiteral(
     "id, name, camera_type, active, cam_index, ip, rtsp, username, "
     "width, height, fps, pitch, roll, rotation, password, "
-    "channel, stream, manufacturer, areas_need_review, setup_complete");
+    "channel, stream, manufacturer, areas_need_review, setup_complete, "
+    "img_enh_enabled, img_enh_local_contrast, img_enh_brightness, "
+    "img_enh_contrast, img_enh_gamma, img_enh_saturation");
 
 QVariant bind_str(const std::optional<std::string>& v) {
     return v ? QVariant(QString::fromStdString(*v)) : QVariant(QMetaType(QMetaType::QString));
+}
+
+/// The six Image Enhancement columns, in COLUMNS order, clamped. Shared by
+/// bind_fields (whole-row insert/update) and by the targeted update the atomic
+/// Areas save issues, so there is ONE encoding of this bundle.
+void bind_enhancement(QSqlQuery& q, const ImageEnhancement& raw) {
+    const ImageEnhancement e = clamp_enhancement(raw);
+    q.addBindValue(e.enabled ? 1 : 0);
+    q.addBindValue(to_int(e.local_contrast));
+    q.addBindValue(e.brightness);
+    q.addBindValue(e.contrast);
+    q.addBindValue(e.gamma);
+    q.addBindValue(e.saturation);
 }
 
 QVariant bind_uint(const std::optional<uint32_t>& v) {
@@ -60,6 +75,12 @@ void bind_fields(QSqlQuery& q, const Camera& c) {
     q.addBindValue(bind_str(c.manufacturer));
     q.addBindValue(c.areas_need_review ? 1 : 0);
     q.addBindValue(c.setup_complete ? 1 : 0);
+    // Normalised on the way IN as well as on the way out. Each column carries a
+    // CHECK, and an out-of-range value would fail the WHOLE camera write — so an
+    // in-memory bundle that somehow left its ranges is clamped into them rather
+    // than costing the operator the save, the same trade replace_areas makes for
+    // decimal_places.
+    bind_enhancement(q, c.image_enhance);
 }
 
 Camera from_row(const QSqlQuery& q) {
@@ -84,6 +105,12 @@ Camera from_row(const QSqlQuery& q) {
     c.manufacturer = col_str(q.value(17));
     c.areas_need_review = q.value(18).toInt() != 0;
     c.setup_complete = q.value(19).toInt() != 0;
+    // parse_, not a cast: a hand-edited or restored database can hold values
+    // outside this build's ranges, and the fail-safe answer is disabled-and-
+    // neutral — never processing the operator did not ask for.
+    c.image_enhance = parse_enhancement(q.value(20).toInt(), q.value(21).toInt(),
+                                        q.value(22).toInt(), q.value(23).toInt(),
+                                        q.value(24).toInt(), q.value(25).toInt());
     return c;
 }
 
@@ -94,8 +121,11 @@ std::optional<int64_t> insert(const QSqlDatabase& db, const Camera& c) {
     q.prepare(QStringLiteral(
         "INSERT INTO camera (name, camera_type, active, cam_index, ip, rtsp, username, "
         "width, height, fps, pitch, roll, rotation, password, channel, stream, manufacturer, "
-        "areas_need_review, setup_complete) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "areas_need_review, setup_complete, img_enh_enabled, "
+        "img_enh_local_contrast, img_enh_brightness, img_enh_contrast, "
+        "img_enh_gamma, img_enh_saturation) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, ?, ?, ?)"));
     bind_fields(q, c);
     if (!q.exec()) {
         return std::nullopt;
@@ -108,7 +138,9 @@ bool update(const QSqlDatabase& db, const Camera& c) {
     q.prepare(QStringLiteral(
         "UPDATE camera SET name=?, camera_type=?, active=?, cam_index=?, ip=?, rtsp=?, "
         "username=?, width=?, height=?, fps=?, pitch=?, roll=?, rotation=?, password=?, "
-        "channel=?, stream=?, manufacturer=?, areas_need_review=?, setup_complete=? "
+        "channel=?, stream=?, manufacturer=?, areas_need_review=?, setup_complete=?, "
+        "img_enh_enabled=?, img_enh_local_contrast=?, img_enh_brightness=?, "
+        "img_enh_contrast=?, img_enh_gamma=?, img_enh_saturation=? "
         "WHERE id=?"));
     bind_fields(q, c);
     q.addBindValue(static_cast<qlonglong>(c.id));
@@ -250,25 +282,33 @@ std::vector<CameraArea> areas_for(const QSqlDatabase& db, int64_t camera_id) {
     return out;
 }
 
-bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
-                   const std::vector<CameraArea>& areas) {
-    // Delete-all + re-insert as one unit so a mid-write failure can't leave a
-    // half-updated ROI set behind. transaction()/commit()/rollback() are
-    // non-const; a QSqlDatabase copy shares the same underlying connection.
-    QSqlDatabase conn(db);
-    if (!conn.transaction()) {
-        return false;
-    }
-    const auto rollback = [&conn] {
-        conn.rollback();
-        return false;
-    };
+namespace {
 
+/// THE authoritative ROI-set replacement, with NO transaction of its own.
+///
+/// Every rule that makes an area set legal lives here and nowhere else: the zone
+/// range bound, the duplicate-within-this-save check, the cross-camera and
+/// cross-mode ownership check over `camera_area` UNION `ball_level_zone`, the
+/// decimal-format clamp, and the `areas_need_review` clearing that makes saving
+/// the set count as verifying it.
+///
+/// It is factored out of `replace_areas` rather than duplicated because there are
+/// now TWO transaction owners (`replace_areas`, and the atomic Areas-page save
+/// below) and a second copy of these checks would be a second zone authority --
+/// exactly what the zone-namespace design forbids.
+///
+/// CONTRACT: the CALLER owns BEGIN / COMMIT / ROLLBACK. This function opens no
+/// transaction (SQLite has no nested transactions, so one here would fail inside
+/// a caller's) and it rolls nothing back on failure -- it just returns false with
+/// its statements pending, and the caller's rollback undoes them together with
+/// whatever else that transaction carried.
+bool replace_areas_unwrapped(const QSqlDatabase& db, int64_t camera_id,
+                             const std::vector<CameraArea>& areas) {
     QSqlQuery del(db);
     del.prepare(QStringLiteral("DELETE FROM camera_area WHERE camera_id = ?"));
     del.addBindValue(static_cast<qlonglong>(camera_id));
     if (!del.exec()) {
-        return rollback();
+        return false;
     }
 
     // Zone numbers are unique machine-wide: the combined brazing payload keys by
@@ -289,10 +329,10 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
             // The column carries no CHECK, so without this an out-of-range number
             // would persist happily and reach the payload as "zone500".
             if (!camera::zone_in_range(*a.zone)) {
-                return rollback();
+                return false;
             }
             if (!zones_this_camera.insert(*a.zone).second) {
-                return rollback();  // duplicated within this same save
+                return false;  // duplicated within this same save
             }
             // Both modes draw from ONE zone-number namespace, so the check spans
             // both tables. `switch_mode` is non-destructive: a machine can hold a
@@ -312,16 +352,16 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
             chk.addBindValue(*a.zone);
             chk.addBindValue(static_cast<qlonglong>(camera_id));
             if (!chk.exec()) {
-                return rollback();
+                return false;
             }
             if (chk.next()) {
-                return rollback();  // already owned by another camera
+                return false;  // already owned by another camera
             }
             // next() false is end-of-rows OR a fetch error. Untested, a fetch
             // error reads as "no conflict" and this save takes a number another
             // camera already reports.
             if (chk.lastError().isValid()) {
-                return rollback();
+                return false;
             }
         }
         QSqlQuery ins(db);
@@ -338,7 +378,7 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
         // normalised to the behaviour-preserving 0 rather than losing the set.
         ins.addBindValue(std::clamp(a.decimal_places, 0, 3));
         if (!ins.exec()) {
-            return rollback();
+            return false;
         }
     }
 
@@ -349,10 +389,94 @@ bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
     clr.prepare(QStringLiteral("UPDATE camera SET areas_need_review = 0 WHERE id = ?"));
     clr.addBindValue(static_cast<qlonglong>(camera_id));
     if (!clr.exec()) {
+        return false;
+    }
+    return true;
+}
+
+/// Persist one camera's Image Enhancement bundle. No transaction of its own,
+/// same contract as above.
+///
+/// Deliberately NOT `camera::update`: that rewrites all twenty-five columns from
+/// an in-memory Camera, so using it here would let a stale draft silently
+/// overwrite fields this save has no business touching — a name, an RTSP URL, an
+/// orientation the operator changed on another page. SIX columns, named
+/// explicitly, and nothing else on the row is mentioned.
+///
+/// No `numRowsAffected` requirement, matching every other camera-row write in
+/// this file (`set_areas_need_review`, and the `areas_need_review` clear above).
+/// Adding one would be a new semantic, and this change is about atomicity only.
+bool write_enhancement_unwrapped(const QSqlDatabase& db, int64_t camera_id,
+                                 const ImageEnhancement& cfg) {
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "UPDATE camera SET img_enh_enabled = ?, img_enh_local_contrast = ?, "
+        "img_enh_brightness = ?, img_enh_contrast = ?, img_enh_gamma = ?, "
+        "img_enh_saturation = ? WHERE id = ?"));
+    // Clamped exactly as bind_fields clamps: the column CHECKs would reject an
+    // out-of-range value and fail the WHOLE save, so a corrupted in-memory bundle
+    // costs the operator the tuning, never their polygons.
+    bind_enhancement(q, cfg);
+    q.addBindValue(static_cast<qlonglong>(camera_id));
+    return q.exec();
+}
+
+}  // namespace
+
+bool replace_areas(const QSqlDatabase& db, int64_t camera_id,
+                   const std::vector<CameraArea>& areas) {
+    // Delete-all + re-insert as one unit so a mid-write failure can't leave a
+    // half-updated ROI set behind. transaction()/commit()/rollback() are
+    // non-const; a QSqlDatabase copy shares the same underlying connection.
+    QSqlDatabase conn(db);
+    if (!conn.transaction()) {
+        return false;
+    }
+    if (!replace_areas_unwrapped(db, camera_id, areas)) {
+        conn.rollback();
+        return false;
+    }
+    if (conn.commit()) {
+        return true;
+    }
+    // SQLite can leave the transaction OPEN when commit fails on a busy/locked
+    // connection, and this handle is shared - close it out explicitly.
+    conn.rollback();
+    return false;
+}
+
+bool save_areas_and_enhancement(const QSqlDatabase& db, int64_t camera_id,
+                                const std::vector<CameraArea>& areas,
+                                std::optional<ImageEnhancement> enhancement) {
+    QSqlDatabase conn(db);
+    if (!conn.transaction()) {
+        return false;
+    }
+    const auto rollback = [&conn] {
+        conn.rollback();
+        return false;
+    };
+
+    // The enhancement first, then the areas -- though within ONE transaction the
+    // order is not observable, which is the entire point of this function. What
+    // matters is that both statements live inside the same BEGIN, so an area
+    // refusal below (a zone clash, a bad range, a failed INSERT) unwinds the
+    // WHOLE Image Enhancement bundle with them. Before this existed the two were
+    // separate writes and a failed area save could leave the tuning moved against
+    // the OLD polygons -- and the running pipeline was rebuilt from exactly that
+    // mismatch. Six columns or none, together with the areas or not at all.
+    if (enhancement && !write_enhancement_unwrapped(db, camera_id, *enhancement)) {
         return rollback();
     }
-
-    return conn.commit() || rollback();
+    // Disengaged means the operator did not change the strength, so no camera-row
+    // write is issued at all and this is byte-for-byte the old area-only save.
+    if (!replace_areas_unwrapped(db, camera_id, areas)) {
+        return rollback();
+    }
+    if (conn.commit()) {
+        return true;
+    }
+    return rollback();
 }
 
 std::optional<std::map<int, std::string>> try_zones_owned_by_other_cameras(

@@ -4,10 +4,13 @@
 #include "camera/zone_assembly.h"    // kDigitPositions
 
 #include "camera/area_validation.h"
+#include "camera/roi_enhance.h"   // THE shared enhancement authority
 #include "ui/camera/dialog/page_util.h"
+#include "ui/common/form_widgets.h"
 #include "ui/camera/dialog/roi_canvas.h"
 #include "ui/camera/dialog/zone_number_edit.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -17,7 +20,9 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSlider>
 #include <QStandardItemModel>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -30,6 +35,18 @@ namespace {
 // so its bound lives in core (camera::kMinZone/kMaxZone) and is applied by the
 // ONE widget that parses a typed zone number, never re-spelled here.
 constexpr int kSidePanelWidth = 280;
+
+/// How long a burst of geometry changes is allowed to coalesce before the
+/// preview re-renders. A vertex drag emits a change per mouse-move; enhancing a
+/// 1080p snapshot on each one would make dragging unusable. ~12 Hz still reads
+/// as live while bounding the work.
+constexpr int kPreviewRefreshMs = 80;
+
+/// Column widths for the compact enhancement rows. Fixed so the four sliders and
+/// their readouts line up down the panel instead of jittering as values change
+/// width.
+constexpr int kEnhanceCaptionWidth = 86;
+constexpr int kEnhanceValueWidth = 38;
 
 /// The list row for an area: the zone belongs here, not two clicks away in the
 /// picker — verifying a camera means reading the whole mapping at once.
@@ -71,6 +88,10 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     connect(canvas_, &RoiCanvas::changed, this, [this] {
         update_status();
         update_controls();
+        // The mask follows the polygon being drawn or dragged, so the operator
+        // sees the enhanced region move with the shape rather than only after a
+        // save. Coalesced — this fires per mouse-move during a drag.
+        request_preview_refresh();
     });
     connect(canvas_, &RoiCanvas::rejected, this, [this](const QString& why) {
         status_->setText(why);
@@ -238,7 +259,140 @@ CameraAreasPage::CameraAreasPage(QWidget* parent) : QWidget(parent) {
     hint_ = dim_label(QString());
     hint_->setWordWrap(true);
     side->addWidget(hint_);
+
     side->addStretch(1);
+
+    // ─── Image enhancement (per CAMERA, not per area) ────────────────────────
+    // Below its own divider and eyebrow, separated from the "Selected area"
+    // group above, and labelled "This camera" — three signals that this one
+    // control governs the whole camera. There is deliberately NO enhancement
+    // field on an area row: a camera's areas are all drawn on one frame under
+    // one light, so a per-area strength could only disagree with itself.
+    side->addWidget(common::hline());
+    side->addWidget(common::eyebrow(QStringLiteral("IMAGE ENHANCEMENT")));
+
+    // The master switch. It is held apart from the tuning on purpose: turning
+    // the feature off must NOT discard what the operator calibrated in front of
+    // the meter, because that work can only be redone in front of the meter.
+    enable_check_ = new QCheckBox(QStringLiteral("Enable"));
+    enable_check_->setObjectName(QStringLiteral("areasEnhanceEnable"));
+    connect(enable_check_, &QCheckBox::toggled, this, [this](bool on) {
+        working_.enabled = on;
+        on_enhance_edited(/*immediate=*/true);
+    });
+    side->addWidget(enable_check_);
+
+    // One compact row per control: a fixed-width caption, the control, and a
+    // fixed-width numeric readout. The readout is not decoration — a slider an
+    // operator cannot read a value off is a control they cannot reproduce on the
+    // next camera, or report back to us.
+    const auto control_row = [&](const QString& caption, QWidget* control,
+                                 QLabel** value_out) {
+        auto* row = new QHBoxLayout;
+        row->setSpacing(6);
+        auto* cap = dim_label(caption);
+        cap->setFixedWidth(kEnhanceCaptionWidth);
+        row->addWidget(cap, 0);
+        row->addWidget(control, 1);
+        if (value_out != nullptr) {
+            auto* val = dim_label(QString());
+            val->setFixedWidth(kEnhanceValueWidth);
+            val->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            row->addWidget(val, 0);
+            *value_out = val;
+        }
+        side->addLayout(row);
+    };
+
+    enhance_combo_ = new QComboBox;
+    enhance_combo_->setObjectName(QStringLiteral("areasEnhanceStrength"));
+    for (const camera::RoiEnhancement level :
+         {camera::RoiEnhancement::Off, camera::RoiEnhancement::Low,
+          camera::RoiEnhancement::Medium, camera::RoiEnhancement::High}) {
+        enhance_combo_->addItem(
+            QString::fromLatin1(camera::roi_enhancement_label(level)),
+            QVariant(camera::to_int(level)));
+    }
+    connect(enhance_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+                if (idx < 0) {
+                    return;
+                }
+                // parse_, never a cast: itemData on a rebuilt model can be
+                // invalid, and Off is the only safe answer to "I don't know".
+                working_.local_contrast = camera::parse_roi_enhancement(
+                    enhance_combo_->itemData(idx).toInt());
+                on_enhance_edited(/*immediate=*/true);
+            });
+    control_row(QStringLiteral("Local Contrast"), enhance_combo_, nullptr);
+
+    // Each slider carries the DOMAIN's bounds, so widening a range is one edit in
+    // core rather than one here that can disagree with the column's CHECK.
+    const auto make_slider = [&](const QString& caption, int lo, int hi,
+                                 const char* object_name, QLabel** value_out) {
+        auto* s = new QSlider(Qt::Horizontal);
+        s->setObjectName(QString::fromLatin1(object_name));
+        s->setRange(lo, hi);
+        s->setSingleStep(1);
+        s->setPageStep(10);
+        control_row(caption, s, value_out);
+        connect(s, &QSlider::valueChanged, this,
+                [this](int) { on_enhance_edited(/*immediate=*/false); });
+        return s;
+    };
+    brightness_slider_ =
+        make_slider(QStringLiteral("Brightness"), camera::kMinBrightness,
+                    camera::kMaxBrightness, "areasEnhanceBrightness",
+                    &brightness_value_);
+    contrast_slider_ =
+        make_slider(QStringLiteral("Contrast"), camera::kMinContrast,
+                    camera::kMaxContrast, "areasEnhanceContrast", &contrast_value_);
+    gamma_slider_ = make_slider(QStringLiteral("Gamma"), camera::kMinGamma,
+                                camera::kMaxGamma, "areasEnhanceGamma",
+                                &gamma_value_);
+    saturation_slider_ =
+        make_slider(QStringLiteral("Saturation"), camera::kMinSaturation,
+                    camera::kMaxSaturation, "areasEnhanceSaturation",
+                    &saturation_value_);
+
+    // Wizard-only view state. Nothing persists it — reopening the wizard always
+    // starts with the preview off and the saved tuning restored.
+    preview_check_ = new QCheckBox(QStringLiteral("Preview enhancement"));
+    preview_check_->setObjectName(QStringLiteral("areasEnhancePreview"));
+    connect(preview_check_, &QCheckBox::toggled, this, [this](bool) {
+        update_enhance_controls();
+        render_background();
+        update_status();
+    });
+    side->addWidget(preview_check_);
+
+    reset_btn_ = new QPushButton(QStringLiteral("Reset to Original"));
+    reset_btn_->setObjectName(QStringLiteral("areasEnhanceReset"));
+    reset_btn_->setProperty("flatText", true);
+    connect(reset_btn_, &QPushButton::clicked, this,
+            &CameraAreasPage::reset_enhancement);
+    side->addWidget(reset_btn_);
+
+    enhance_hint_ = dim_label(QString());
+    enhance_hint_->setObjectName(QStringLiteral("areasEnhanceHint"));
+    enhance_hint_->setWordWrap(true);
+    side->addWidget(enhance_hint_);
+
+    // Coalescer for geometry-driven re-renders (see kPreviewRefreshMs).
+    preview_timer_ = new QTimer(this);
+    preview_timer_->setSingleShot(true);
+    connect(preview_timer_, &QTimer::timeout, this,
+            &CameraAreasPage::render_background);
+
+    // Seed the widgets from the neutral default NOW, before anything can edit
+    // them. QSlider::setRange CLAMPS the current value into the new range, and a
+    // fresh slider starts at 0 — so the gamma slider, whose range is 50..300,
+    // silently sat at 50 (0.50) until something wrote to it. The first operator
+    // touch of ANY control then adopted that 0.50 into the working configuration
+    // and the preview darkened for no reason the operator could see. Pushing the
+    // neutral bundle in here makes the widgets agree with `working_` from the
+    // first instant, which is the invariant every read of them assumes.
+    sync_enhance_widgets();
 
     auto* side_host = new QWidget;
     side_host->setLayout(side);
@@ -311,11 +465,215 @@ void CameraAreasPage::load(std::vector<camera::CameraArea> areas,
     }
     update_controls();
     update_status();
+    update_enhance_controls();
+    render_background();
     canvas_->setFocus();
 }
 
 void CameraAreasPage::set_background(const QImage& oriented) {
-    canvas_->set_frame(oriented);
+    // The ORIGINAL, kept whole. Every render below reads this; nothing ever
+    // writes a rendered result back into it, which is what makes "changing
+    // strength re-renders from the snapshot" true by construction rather than by
+    // a rule someone has to follow.
+    original_background_ = oriented;
+    render_background();
+    update_controls();
+    update_status();
+}
+
+void CameraAreasPage::set_enhancement(const camera::ImageEnhancement& cfg) {
+    working_ = camera::clamp_enhancement(cfg);
+    loaded_enhancement_ = working_;   // the baseline Cancel and the dirty check use
+    sync_enhance_widgets();
+    // The preview is view state, never persisted: every entry starts with it off
+    // so the operator always begins from the picture the camera actually sends.
+    {
+        const QSignalBlocker block_preview(preview_check_);
+        preview_check_->setChecked(false);
+    }
+    update_enhance_controls();
+    render_background();
+    update_status();
+}
+
+void CameraAreasPage::sync_enhance_widgets() {
+    if (enable_check_ == nullptr) {
+        return;  // still constructing
+    }
+    // Blocked while writing, so pushing state INTO the widgets cannot be mistaken
+    // for the operator editing them — that would re-enter on_enhance_edited() and
+    // re-render once per control for no reason.
+    {
+        const QSignalBlocker b(enable_check_);
+        enable_check_->setChecked(working_.enabled);
+    }
+    {
+        const QSignalBlocker b(enhance_combo_);
+        const int idx =
+            enhance_combo_->findData(QVariant(camera::to_int(working_.local_contrast)));
+        enhance_combo_->setCurrentIndex(idx < 0 ? 0 : idx);
+    }
+    const auto put = [](QSlider* s, int v) {
+        const QSignalBlocker b(s);
+        s->setValue(v);
+    };
+    put(brightness_slider_, working_.brightness);
+    put(contrast_slider_, working_.contrast);
+    put(gamma_slider_, working_.gamma);
+    put(saturation_slider_, working_.saturation);
+    update_enhance_controls();
+}
+
+void CameraAreasPage::on_enhance_edited(bool immediate) {
+    if (brightness_slider_ == nullptr) {
+        return;  // still constructing
+    }
+    working_.brightness = brightness_slider_->value();
+    working_.contrast = contrast_slider_->value();
+    working_.gamma = gamma_slider_->value();
+    working_.saturation = saturation_slider_->value();
+    update_enhance_controls();
+    if (immediate) {
+        render_background();
+    } else {
+        request_preview_refresh();
+    }
+    update_status();
+}
+
+void CameraAreasPage::reset_enhancement() {
+    // WORKING state only. Nothing is written here: Save is still what persists,
+    // and Back/Exit still restores whatever is stored — which is exactly why a
+    // Reset the operator then abandons costs them nothing.
+    working_ = camera::neutral_enhancement();
+    sync_enhance_widgets();
+    render_background();   // immediate: a button press is a direct action
+    update_status();
+}
+
+bool CameraAreasPage::preview_enabled() const {
+    return preview_check_ != nullptr && preview_check_->isChecked();
+}
+
+std::vector<camera::CameraArea> CameraAreasPage::working_areas() const {
+    // Exactly what a save would write... plus the shape still under the cursor.
+    // An operator must not have to save an area merely to see the effect of
+    // enhancing it.
+    std::vector<camera::CameraArea> out = areas_;
+    if (canvas_->mode() == RoiCanvas::Mode::Drawing && canvas_->is_valid()) {
+        if (redrawing_row_ >= 0 && redrawing_row_ < static_cast<int>(out.size())) {
+            // A redraw in progress: the NEW shape is what the operator is
+            // judging, so the preview must not keep masking the old one.
+            out[static_cast<size_t>(redrawing_row_)].points = canvas_->polygon();
+        } else {
+            camera::CameraArea draft;
+            draft.points = canvas_->polygon();
+            out.push_back(std::move(draft));
+        }
+    }
+    // Editing mode needs no special case: apply_edited_polygon writes each vertex
+    // move straight back into areas_, so the set above is already current.
+    return out;
+}
+
+void CameraAreasPage::request_preview_refresh() {
+    if (preview_timer_ == nullptr) {
+        return;  // still constructing — nothing is on screen to refresh
+    }
+    if (!preview_enabled() || !camera::has_effect(working_)) {
+        return;  // nothing on screen depends on the geometry right now
+    }
+    preview_timer_->start(kPreviewRefreshMs);
+}
+
+void CameraAreasPage::render_background() {
+    if (canvas_ == nullptr) {
+        return;
+    }
+    if (preview_timer_ != nullptr) {
+        preview_timer_->stop();   // this render supersedes any coalesced one
+    }
+    if (original_background_.isNull()) {
+        canvas_->set_frame(QImage());
+        return;
+    }
+    if (!preview_enabled() || !camera::has_effect(working_)) {
+        // Disabled, or enabled with every control neutral: there is nothing to
+        // show but the snapshot, and showing it is not an approximation — the
+        // runtime builds no enhancer in this state either.
+        canvas_->set_frame(original_background_);
+        return;
+    }
+    // ONE authority, shared with the runtime: same strength table, same union
+    // mask, same luminance transform. The operator cannot be shown a picture the
+    // model will not receive, because there is no second implementation to drift.
+    canvas_->set_frame(
+        enhance_preview(original_background_, working_, working_areas()));
+}
+
+void CameraAreasPage::update_enhance_controls() {
+    if (preview_check_ == nullptr || enhance_hint_ == nullptr) {
+        return;  // still constructing
+    }
+    // The numeric readouts. A technician has to be able to read a value off a
+    // slider — otherwise the setting cannot be reproduced on the next camera or
+    // reported back to us. Signed for the bipolar controls so "+12" is visibly
+    // not "-12"; gamma is shown in its human form (hundredths / 100).
+    const auto signed_text = [](int v) {
+        return v > 0 ? QStringLiteral("+%1").arg(v) : QString::number(v);
+    };
+    brightness_value_->setText(signed_text(working_.brightness));
+    contrast_value_->setText(signed_text(working_.contrast));
+    gamma_value_->setText(QStringLiteral("%1").arg(working_.gamma / 100.0, 0, 'f', 2));
+    saturation_value_->setText(signed_text(working_.saturation));
+
+    // The master switch gates the tuning controls but NEVER clears them: an
+    // operator who switches the feature off and on again gets their calibration
+    // back, because "off" is a flag and not an erasure.
+    const bool on = working_.enabled;
+    for (QWidget* w : {static_cast<QWidget*>(enhance_combo_),
+                       static_cast<QWidget*>(brightness_slider_),
+                       static_cast<QWidget*>(contrast_slider_),
+                       static_cast<QWidget*>(gamma_slider_),
+                       static_cast<QWidget*>(saturation_slider_)}) {
+        w->setEnabled(on);
+    }
+    // The preview is meaningless when nothing would change — disabled, or enabled
+    // with every control neutral — so the checkbox is disabled rather than left
+    // as a control that silently does nothing.
+    preview_check_->setEnabled(camera::has_effect(working_));
+
+    if (!on) {
+        enhance_hint_->setText(QStringLiteral(
+            "Off — the reader sees the camera's own picture. Enable to tune "
+            "contrast and exposure inside this camera's areas; your values are "
+            "kept while it is off."));
+        return;
+    }
+    if (camera::is_neutral(working_)) {
+        enhance_hint_->setText(QStringLiteral(
+            "Enabled, but every control is at its neutral value, so nothing is "
+            "changed yet."));
+        return;
+    }
+    if (working_areas().empty()) {
+        // Runtime semantics, stated rather than silently performed: with no areas
+        // the whole frame IS the detection region, so the whole frame is what gets
+        // enhanced. Saying so here stops the preview from looking like a bug.
+        enhance_hint_->setText(QStringLiteral(
+            "No areas drawn yet — detection uses the whole frame, so the whole "
+            "frame is enhanced. Draw an area to confine it."));
+        return;
+    }
+    enhance_hint_->setText(QStringLiteral(
+        "Applied inside the areas above before reading, for this camera only. "
+        "The live dashboard still shows the unmodified picture."));
+}
+
+void CameraAreasPage::mark_saved() {
+    // Both baselines move together because one Save writes both.
+    loaded_ = areas_;
+    loaded_enhancement_ = working_;
     update_controls();
     update_status();
 }
@@ -323,10 +681,18 @@ void CameraAreasPage::set_background(const QImage& oriented) {
 void CameraAreasPage::show_save_error() {
     // The predictable causes are caught in attempt_save(); reaching here means
     // a genuine write fault, so say that rather than blaming the operator.
+    //
+    // It names the WHOLE save, not just the areas. One button writes the
+    // polygons, their zones and formats, and this camera's enhancement level in
+    // one transaction, so a failure leaves all of them at their stored values —
+    // saying "the areas could not be written" would leave an operator wondering
+    // whether the level went through on its own.
     QMessageBox::critical(
         this, QStringLiteral("Could not save"),
-        QStringLiteral("The areas could not be written to the database. Your "
-                       "changes are still on screen — try Save again."));
+        QStringLiteral("Nothing was saved. The areas and this camera's image "
+                       "enhancement are written together, so the whole save was "
+                       "rolled back and the stored settings are unchanged.\n\n"
+                       "Your changes are still on screen — try Save again."));
 }
 
 void CameraAreasPage::set_unfinished(bool on) {
@@ -422,6 +788,12 @@ void CameraAreasPage::push_context_areas() {
         }
     }
     canvas_->set_context_areas(others);
+    // The area SET just changed (added, deleted, renamed, reselected), so the
+    // union mask may have too, and the "no areas drawn yet" hint may no longer
+    // be true. Coalesced, because this is also called on a plain selection
+    // change where nothing about the mask actually moved.
+    update_enhance_controls();
+    request_preview_refresh();
 }
 
 QString CameraAreasPage::suggested_name() const {
@@ -719,7 +1091,12 @@ bool CameraAreasPage::is_dirty() const {
     // has_active_draw() rather than has_unfinished_draw(): a started-then-
     // cleared draw has no points but still represents unresolved intent, and a
     // draft's typed name/zone live outside `areas_` until the shape closes.
-    return !camera::areas_equal(areas_, loaded_) || has_active_draw();
+    // The enhancement bundle counts: every one of its controls is saved by the
+    // same button and lost by the same Cancel, so an operator who only moved a
+    // slider must still be warned. The preview CHECKBOX deliberately does not
+    // count — it is view state and is never written anywhere.
+    return !camera::areas_equal(areas_, loaded_) || has_active_draw() ||
+           working_ != loaded_enhancement_;
 }
 
 bool CameraAreasPage::confirm_discard(const QString& action) {

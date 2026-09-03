@@ -1122,7 +1122,15 @@ void CameraGrid::start_one(const camera::Camera& cam, CameraTile* tile,
                         });
                     },
                     // Drawn into the frame right after the detection boxes.
-                    zone_view);
+                    zone_view,
+                    // The camera's Image Enhancement bundle (schema v18). Read
+                    // straight off the camera row — there is no global or
+                    // per-area override to reconcile. It reaches ONLY the
+                    // inference copy inside the processor; nothing on the
+                    // display path changes. `areas` was moved above, so the
+                    // processor pairs this configuration with the very area set
+                    // it will filter detections against.
+                    cam.image_enhance);
             }
         } catch (const std::exception& e) {
             qCritical().noquote()

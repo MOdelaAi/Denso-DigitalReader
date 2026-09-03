@@ -566,8 +566,8 @@ the camera dialog's `page_util`. `page_util::dim_label` now delegates to
 `common::dim_label` instead of keeping its own definition.
 
 **Settings (`ui/settings/`)**
-- `settings_dialog.{h,cpp}` — modal: a left nav over five panels (Appearance,
-  Display, System, Network, About). The Network panel is extracted into
+- `settings_dialog.{h,cpp}` — modal: a left nav over six panels (Display, Mode,
+  System, Network, Server, About). The Network panel is extracted into
   `network_panel.{h,cpp}` (`NetworkPanel`), a self-contained widget that owns
   the two `NetCard`s, the DB handle, and the threaded apply/scan/connect/refresh
   handlers (`on_shown()` re-seeds editors + refreshes status, reproducing the
@@ -625,11 +625,15 @@ them, never on each other; the root entry points compose all three.
   the stream only emits when `should_emit(queued, kMaxInFlight=2)` and increments;
   `CameraTile::set_frame` decrements on consume. A GUI that falls behind drops
   frames instead of letting full-res `QImage` events pile up unboundedly (OOM).
-  `CameraTile` is a pure view — paints the latest frame aspect-fit with a name,
-  status dot, and a live per-tile FPS readout (`FpsMeter`), and overlays the
-  camera's saved ROI polygons (`set_areas`) as gold outlines. The overlay maps
-  the normalized vertices through the **same** `roi_geometry::fitted_image_rect`
-  the frame is drawn into, and the frame is already oriented (the stream's
+  `CameraTile` is a pure view — paints the latest frame **stretch-to-fill** (the
+  full-bleed CCTV/NVR look: scaled to the whole tile, no letterbox bands, nothing
+  cropped, aspect may distort slightly) with a name, status dot, and a live
+  per-tile FPS readout (`FpsMeter`), and overlays the camera's saved ROI polygons
+  (`set_areas`) as gold outlines. The overlay maps the normalized vertices
+  through the **same** rect the frame is drawn into — the whole widget rect —
+  so the polygons track the displayed image. (`roi_geometry::fitted_image_rect`
+  is the aspect-fit mapping the wizard's `RoiCanvas` uses, not the tile.)
+  The frame is already oriented (the stream's
   processor), so ROIs — stored normalized to the oriented frame — line up
   without extra transform. When detection is active the ROI is also enforced on
   the *pixels*: `DetectionProcessor` keeps only boxes whose centre falls inside
@@ -784,17 +788,18 @@ operator action. Two modes exist:
 | Mode | Token | This release |
 |---|---|---|
 | Digital Number Reader | `digit_reader` | the shipping job — `DetectionProcessor` + zone reporting |
-| Floating Ball Leveler | `ball_leveler` | persistence exists; the operator surface is **still guarded** — see below |
+| Floating Ball Leveler | `ball_leveler` | implemented — `BallLevelProcessor` + the calibration wizard step, on the shared zone reporting |
 
-**Ball Leveler persistence exists; the operator surface does not.** Schema v14
-gives Ball Leveler a durable home (`ball_level_calibration`), and
-`save_level_configuration` is its one write chokepoint. What is still NOT
-implemented: the calibration UI, inference, percentage mapping, OpenCV level
-annotation, the runtime state machine and the EngineRegistry replacement.
-Selecting `ball_leveler` therefore still persists the mode, retains every camera
-connection, and lands on an explicit "setup is not available in this release"
-state — no stream, no processor, no reporter, no wizard. `mode_setup_required`
-is no longer hardcoded `true`: it is driven by real calibration, and answers
+**Ball Leveler is implemented.** Its durable home is `ball_level_binding` +
+`ball_level_zone` (schema v15; the v14 `ball_level_calibration` it replaced is
+backfilled and retained), and `level::save_level_configuration` is its one write
+chokepoint. `CameraGrid::reload()` branches on the committed mode and builds
+either the digit pipeline or `reload_ball()` → `start_one_ball()` →
+`BallLevelProcessor` (measuring) / `LevelStateProcessor` (an explicit
+Unconfigured / CalibrationInvalid / Unavailable state on the wall). The wizard's
+fourth step is the level calibration page instead of Areas. Both modes feed the
+SAME `ZoneReporter` and brazing payload, differing only in the aggregator's two
+parameters. `mode_setup_required` is driven by real calibration, and answers
 `nullopt` (undeterminable) rather than guessing when its query fails.
 
 ### `mode.target` — a key, not a schema change
@@ -802,7 +807,8 @@ is no longer hardcoded `true`: it is driven by real calibration, and answers
 `src/core/mode/` lives in `denso_core` — **Widgets-free, `Qt6::Core`/`Sql` only**
 (the load/save/switch entry points take a `QSqlDatabase`) — and rides the existing
 `settings` key/value table under the key **`mode.target`**, so the mode key itself
-needs no migration. **The schema is at v14**, raised by the additive
+needs no migration. **The schema was at v14 when the mode key landed** (it is
+v18 today), raised then by the additive
 `ball_level_calibration` table (one row per camera, `camera_id PRIMARY KEY`), not
 by anything the mode key required.
 
@@ -1053,6 +1059,194 @@ provider DLLs and every `models/*.onnx` are copied beside the exe by a
 `third_party/gpu_ep/` (see `docs/GPU_SETUP.md`), and a missing GPU stack silently
 degrades to the CPU provider.
 
+## Image Enhancement (`camera.img_enh_*`)
+
+Per-camera image adjustment applied to the **inference copy only**, inside the
+union of that camera's ROI areas. Disabled by default, Digital Number Reader
+only. It is a **field-calibration tool**: the right values depend on the actual
+camera, exposure/WDR, meter, reflections, distance and lighting, so no preset is
+"recommended" and none is qualified here.
+
+**Scope of the setting vs extent of the effect.** The bundle is a property of the
+CAMERA (schema **v18**) because it compensates for that camera's optics, exposure
+and lighting, and every area a camera owns is drawn on one frame under one light
+— a per-area copy could only ever disagree with itself about the same photograph.
+Where it is APPLIED is the opposite: only inside the union of that camera's area
+polygons, because that is the only part of the frame the reader reads.
+
+### The controls
+
+| Control | Range | Neutral | Notes |
+|---|---|---|---|
+| **Enable** | off / on | **off** | Master switch, held SEPARATELY from the tuning |
+| **Local Contrast** | Off / Low / Medium / High | Off | CLAHE clip limit 1.5 / 2.5 / 4.0, nominal 8×8 grid |
+| **Brightness** | −100 … +100 | 0 | additive on L, scaled ×0.8 (±80 of 255) |
+| **Contrast** | −100 … +100 | 0 | multiplier about mid-grey, 0.25 … 1.75 |
+| **Gamma** | 50 … 300 (hundredths) | **100** = 1.00 | exponent is 1/γ, so >1.00 lifts midtones |
+| **Saturation** | −100 … +100 | 0 | chroma multiplier 0.0 … 2.0 |
+
+`Enable` is deliberately not implemented by zeroing the sliders: field
+calibration can only be redone in front of the real meter, so switching the
+feature off preserves the tuning and switching it back on restores it exactly.
+`Reset to Original` returns the WORKING state to disabled-and-neutral and writes
+nothing — Save still persists, and Back/Exit still restores what is stored.
+
+**Everything is an integer.** Gamma is fixed-point hundredths, so the whole
+bundle has exact equality, exact `CHECK` bounds and an exact round trip through
+SQLite. A `REAL` column would give none of those and buy nothing an operator can
+perceive.
+
+### Two halves, one authority each
+
+| Half | Where | Owns |
+|---|---|---|
+| Domain | `src/core/camera/roi_enhancement.{h,cpp}` (`denso_core`) | `ImageEnhancement`, the bounds, `is_neutral` / `has_effect`, `parse_enhancement` (fail-safe), `clamp_enhancement`, labels |
+| Runtime | `src/app/camera/roi_enhance.{h,cpp}` (`denso_camera`) | `clahe_params`, `build_tone_lut`, `build_chroma_lut`, `build_area_mask`, `effective_tiles`, `RoiEnhancer`, `enhance_preview` |
+
+The split follows the same domain/runtime line `camera::CameraArea` (core) and
+`zone_assembly` (app) sit on, and exists because `denso_core` must never link
+OpenCV. Neither half restates the other, and the UI never sees a coefficient.
+
+### The processing order
+
+ONE `BGR -> CIE Lab` conversion over the working region, then:
+
+1. **Brightness** — additive on L
+2. **Contrast** — multiplier about mid-grey
+3. **Gamma** — `255 * (L/255)^(1/γ)`
+4. **Local contrast** — CLAHE on L
+5. **Saturation** — affine scale of the a and b planes about 128
+
+…then `Lab -> BGR`, copied back **only where the union mask is non-zero**.
+
+Steps 1–3 are per-pixel monotone functions of luminance, so they compose into a
+**single 256-entry LUT** built once at construction; step 5 is a second 256-entry
+LUT shared by both chroma planes. Brightness→contrast→gamma is the conventional
+tone-curve order and the one an operator expects: set the exposure, then stretch
+it, then bend the midtones. CLAHE runs *after* that curve so local contrast is
+equalised on the image the operator actually tuned. Saturation touches only a/b,
+so its position is not observable.
+
+**Luminance for tone, chroma for colour.** Applying brightness/contrast/gamma or
+CLAHE to B, G and R independently pulls the channels apart and recolours the
+frame — a new, unqualified input distribution for a model trained on ordinary
+colour video. Lab keeps the tone work on L and the colour work on a/b. Saturation
+is a chroma scale, not a per-channel multiply, so turning the colour down does
+not also darken the picture.
+
+### Where it runs
+
+`DetectionProcessor::infer_loop()`, on the inference worker, on the Mat moved out
+of the drop-oldest slot — *after* the capture thread has already taken and
+shipped its own display Mat from the same oriented source:
+
+```
+oriented BGR --+-- display Mat -- boxes + zone overlay -- tile   (RAW, unchanged)
+               +-- bgr.copyTo(pending_) -- inference worker
+                                             +-- RoiEnhancer::apply()   <-- here
+                                                 +-- letterbox -> blob -> engine
+```
+
+The operator's wall keeps showing the picture the camera actually sent; only the
+model sees adjusted pixels. Backend values may change, but only because detection
+improved.
+
+### The rules that are not locally obvious
+
+- **No effect means nothing is built.** `RoiEnhancer::make()` returns `nullptr`
+  when the bundle is disabled OR enabled-with-everything-neutral, so there is no
+  LUT, no CLAHE, no mask, nothing to call per frame — and no Lab round trip. That
+  last part is correctness, not just cost: `BGR->Lab->BGR` is not bit-exact, so a
+  neutral configuration that still made the trip would perturb the model's input
+  for nothing.
+- **One pass, never one per area.** Areas are unioned into a single mask first, so
+  an overlapped pixel is adjusted exactly once and there is no per-area strength
+  to reconcile. `build_area_mask` calls `cv::fillPoly` **once per polygon**: one
+  call carrying every contour fills them even-odd, which would punch the
+  intersection of two overlapping areas out as a HOLE.
+- **The mask follows the DETECTION region.** The enhancer is built from the same
+  `areas_` the ROI box-centre filter uses, so an empty set — no areas, or the ROI
+  quarantine handing the processor none — means whole-frame detection *and*
+  whole-frame enhancement. One region, not two rules.
+- **The pass is computed over the mask's bounding rectangle**
+  (`EnhanceScope::MaskBounds`, the default), then copied back through the mask.
+  Measured on the Jetson: 2.2 ms vs 20.6 ms for one small ROI on a 1080p frame.
+  `EnhanceScope::WholeFrame` is kept as a first-class option if field tuning
+  prefers a result that cannot depend on ROI size; both leave the identical set of
+  pixels untouched.
+- **Ball ignores it by construction.** `BallLevelProcessor`'s constructor has no
+  enhancement parameter, so there is no way to hand it one. The bundle is
+  deliberately NOT cleared by a mode switch — Digital → Ball → Digital returns the
+  operator's field calibration.
+- **Anything unreadable is OFF.** `enabled` decodes as "exactly 1", never
+  "non-zero-ish"; an unknown local-contrast level resolves to Off rather than to
+  the nearest level this build has; the numeric controls are clamped. Nothing a
+  corrupt database, a restored backup or a newer build can say switches processing
+  on for a camera whose operator never enabled it.
+
+### Schema v18
+
+Six additive columns on `camera`, all `NOT NULL` with a **neutral DEFAULT** and a
+range `CHECK`:
+
+| Column | Type | Default | CHECK |
+|---|---|---|---|
+| `img_enh_enabled` | INTEGER | 0 | `IN (0, 1)` |
+| `img_enh_local_contrast` | INTEGER | 0 | `BETWEEN 0 AND 3` |
+| `img_enh_brightness` | INTEGER | 0 | `BETWEEN -100 AND 100` |
+| `img_enh_contrast` | INTEGER | 0 | `BETWEEN -100 AND 100` |
+| `img_enh_gamma` | INTEGER | 100 | `BETWEEN 50 AND 300` |
+| `img_enh_saturation` | INTEGER | 0 | `BETWEEN -100 AND 100` |
+
+Separate columns rather than a packed blob or JSON, because each is a scalar the
+database can validate on its own — and a `CHECK` is the only guard that also
+applies to a hand edit or a restored backup. The neutral defaults are the whole
+upgrade story: every camera on every existing appliance comes up **disabled with
+every control neutral**, which is byte-for-byte the pipeline it has today. They
+are added through the same probe-first `add_column` helper as every other v18
+column, so an interrupted migration resumes.
+
+### The operator surface, and the atomic Save
+
+The controls live on the **Areas step**, not Configure: that is the only page
+showing the ROI polygons, so it is the only place the result can be judged. One
+`Enable` checkbox, a `Local Contrast` combo, four sliders each with a numeric
+readout, a `Preview enhancement` checkbox and `Reset to Original`, below a divider
+and an `IMAGE ENHANCEMENT` eyebrow so nothing reads as a per-area field. The
+tuning controls are disabled — never cleared — while `Enable` is off.
+
+The preview renders through **the same** `enhance_preview` → `RoiEnhancer` the
+runtime uses, so the operator cannot be shown one transformation while the model
+receives another. It always renders from the stored original snapshot (never from
+its own previous output, which would compound), against the page's WORKING
+polygons and WORKING settings — including a shape still under the cursor and a
+slider never saved. Discrete controls (Enable, the combo, Reset, the preview
+toggle) repaint immediately; sliders coalesce on the same ~80 ms timer a vertex
+drag uses, because a drag emits a change per pixel of travel.
+
+**One Save, one transaction.** `camera::save_areas_and_enhancement` writes the
+polygons, their zones and number formats, and the complete six-column bundle in a
+single transaction inside the repository that owns both tables — all or nothing.
+The area logic is shared with `replace_areas` through a transaction-free
+`replace_areas_unwrapped`, so the authoritative zone-range, duplicate,
+cross-camera and cross-mode checks execute inside the caller's transaction rather
+than being duplicated. The bundle is written by a **targeted six-column UPDATE**,
+never the generic full-row `camera::update`, so a stale draft cannot overwrite a
+name or an RTSP URL edited elsewhere. The controller issues no SQL and owns no
+transaction: nesting one around the repository's would fail (SQLite has no nested
+transactions) and would leave the outer one open when the inner refused.
+
+Because the Areas page is unreachable in `ball_leveler` (the fourth step is level
+calibration, and the per-row Areas shortcut routes there too), the Digital-only
+scoping needs no visibility flag.
+
+**Tuning is NOT qualified.** The Low/Medium/High clip limits and the slider scale
+factors live in `clahe_params` and the `k*Scale` constants in `roi_enhance.h`, and
+nowhere else. Retune there after on-site calibration. Note that CLAHE's clip limit
+orders how much local contrast is ALLOWED, not the magnitude of the change on
+every scene — on a nearly flat image a low clip limit can move further from the
+original than a high one.
+
 ## Model / operating-mode compatibility
 
 Which model may be loaded, selected and attached in which operating mode. The
@@ -1259,16 +1453,16 @@ switch that never happened. Only a genuine valid wrong-mode model reports
 filename is reduced by `models::diagnostic_filename` (a fail-closed allow-list) and
 paired with the catalog row id, so an unprintable name is still identifiable.
 
-### Current Ball Leveler lock
+### Current Ball Leveler status
 
 The compatibility layer for `ball_leveler` is complete — the mode persists, the
 policy authorizes `float_ball` models for it, and the package ships their
-artifacts. The **application feature is not implemented**: no production Leveler
-wizard, `CameraStream`, `DetectionProcessor`, `ZoneHealth` wiring or reporter is
-constructed, `mode_setup_required` stays permanently true, and no ball position,
-percentage, calibration or final level-result algorithm exists anywhere in the
-tree. Packaged, declared, authorizable artifacts are not a shipped feature;
-unlocking it requires a new approved design and plan.
+artifacts — **and so is the application feature**. The calibration wizard step,
+`BallLevelProcessor`, the percentage mapping (`core/level/measure`), the level
+overlay, the `ZoneHealth` wiring and the shared reporter are all constructed and
+exercised by `test_ball_wizard` / `test_ball_runtime` / `test_level_*`. The one
+mode-specific gap that remains is noted above: `evaluate_integrity` has no
+Leveler-specific readiness checks.
 
 ## Reading log
 

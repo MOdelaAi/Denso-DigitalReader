@@ -11,6 +11,7 @@
 #pragma once
 
 #include "camera/camera.h"  // CameraArea
+#include "camera/roi_enhance.h"  // RoiEnhancer — THE enhancement authority
 #include "detection/detection.h"
 #include "brazing/zone_sink.h"  // ZoneSink (+ ZoneReading)
 #include "brazing/zone_runtime.h"  // ZoneRuntimeEntry
@@ -25,6 +26,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -95,6 +97,14 @@ struct ReadingSink {
 /// If the camera has ROI `areas`, detection is confined to them: a box is kept
 /// only when its center lands inside some area polygon. Empty `areas` means no
 /// confinement.
+///
+/// `enhancement` is the camera's Image Enhancement bundle (schema v18): the
+/// master switch plus local contrast, brightness, contrast, gamma and saturation.
+/// It applies ONLY to the inference copy, on the worker, inside the union of the
+/// SAME `areas` — the display path never sees it, so the operator's wall keeps
+/// showing the real picture the camera produced. A bundle with no effect
+/// (disabled, or enabled with every control neutral — the default) constructs no
+/// enhancer at all and leaves the pipeline byte-for-byte as it was.
 class DetectionProcessor : public FrameProcessor {
 public:
     struct ModelRun {
@@ -125,7 +135,8 @@ public:
                        int64_t camera_id = 0, ReadingSink* sink = nullptr,
                        ZoneSink* zone_sink = nullptr,
                        WorkerFailedFn on_worker_failed = {},
-                       ZoneViewFn zone_view = {});
+                       ZoneViewFn zone_view = {},
+                       denso::camera::ImageEnhancement enhancement = {});
     ~DetectionProcessor() override;  // stops + joins the inference worker
 
     DetectionProcessor(const DetectionProcessor&) = delete;
@@ -149,6 +160,11 @@ private:
     // This camera's zone rows, read once per displayed frame on the capture
     // thread. Empty = no zone annotation for this camera.
     ZoneViewFn zone_view_;
+    // The camera's Image Enhancement, or null when the bundle has no effect.
+    // Owned per processor and touched ONLY by infer_loop() on the inference
+    // worker — see the thread-safety note in roi_enhance.h. Built in the ctor
+    // body, before the worker starts.
+    std::unique_ptr<RoiEnhancer> enhancer_;
 
     // Latest-frame slot handed to the inference worker (drop-oldest).
     std::mutex slot_mtx_;

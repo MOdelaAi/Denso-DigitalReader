@@ -8,6 +8,7 @@
 #pragma once
 
 #include "camera/camera.h"
+#include "camera/roi_enhancement.h"
 
 #include <QImage>
 #include <QWidget>
@@ -17,11 +18,14 @@
 #include <string>
 #include <vector>
 
+class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
+class QSlider;
+class QTimer;
 
 namespace denso::ui {
 
@@ -41,7 +45,38 @@ public:
     /// save that the repo would reject.
     void load(std::vector<camera::CameraArea> areas,
               std::map<int, std::string> zones_taken);
-    void set_background(const QImage& oriented);  // canvas backdrop
+    /// The oriented snapshot. Stored as THE original and never overwritten by a
+    /// rendered result — every preview render starts from this image, so toggling
+    /// the preview or changing strength can never compound one enhancement on top
+    /// of another.
+    void set_background(const QImage& oriented);
+
+    /// Seed the camera's persisted Image Enhancement bundle. This is also the
+    /// baseline the dirty check compares against, so an operator who changes only
+    /// a slider and then leaves is still warned.
+    ///
+    /// It also clears the preview toggle: that is wizard view state, never
+    /// persisted, so every entry starts from the picture the camera really sends.
+    void set_enhancement(const camera::ImageEnhancement& cfg);
+
+    /// Re-baseline the dirty check against what is now on disk. Called by the
+    /// controller ONLY after the save transaction has committed.
+    ///
+    /// It matters because a terminal action can leave the operator on this page
+    /// after a successful write (finish_and_leave stays put when the camera
+    /// could not be marked complete, so the button can be pressed again). Without
+    /// this the page would keep reporting saved work as unsaved, and Back or Exit
+    /// would offer to "discard" changes that are already persisted.
+    void mark_saved();
+
+    /// The configuration currently on the page, saved or not. The controller
+    /// persists it as part of the Areas save — nothing here writes to the
+    /// database.
+    const camera::ImageEnhancement& enhancement() const { return working_; }
+
+    /// The editing canvas, so a test can drive real draw gestures (the same
+    /// accessor LevelCalibrationPage exposes for the same reason).
+    RoiCanvas* canvas() const { return canvas_; }
     void show_save_error();                       // persistence failed
     /// Show/hide the "re-verify after a source change" banner. When on, the
     /// camera's zone reporting is paused until these areas are saved (verified).
@@ -58,6 +93,36 @@ signals:
 
 private:
     void refresh_list();
+    /// Repaint the canvas backdrop from `original_background_`: the raw snapshot
+    /// when the preview is off or the level is Off, otherwise that snapshot put
+    /// through the SHARED enhancement authority (ui::enhance_preview) with the
+    /// working polygons. Always from the original — never from what is on screen.
+    void render_background();
+    /// Coalesced render request. A vertex drag emits changes at mouse-move rate;
+    /// enhancing a 1080p snapshot per motion event would make dragging crawl, so
+    /// requests collapse into one render on a short timer.
+    void request_preview_refresh();
+    /// The polygons a save WOULD write, plus any shape still being drawn — so the
+    /// preview mask follows unsaved geometry the moment it exists.
+    std::vector<camera::CameraArea> working_areas() const;
+    bool preview_enabled() const;
+    void update_enhance_controls();
+    /// Push `working_` into the widgets without re-emitting their signals, then
+    /// refresh the value readouts. Used by seeding and by Reset.
+    void sync_enhance_widgets();
+    /// One control moved: adopt the new values and refresh the readouts, then
+    /// re-render.
+    ///
+    /// `immediate` separates the two kinds of control. A combo pick, the master
+    /// switch and Reset are DISCRETE operator actions and must show their result
+    /// at once. A slider is CONTINUOUS: a drag emits a change per pixel of travel,
+    /// and enhancing a 1080p snapshot on each one would make the control unusable,
+    /// so those go through the same 80 ms coalescer a vertex drag uses.
+    void on_enhance_edited(bool immediate);
+    /// Reset the WORKING state to disabled-and-neutral. No database write — the
+    /// operator still has to press Save, and Discard still restores what is
+    /// stored.
+    void reset_enhancement();
     void select_area(int row);
     void commit_drawn_polygon();  // canvas closed → append the drafted area
     void start_new_area();
@@ -111,6 +176,31 @@ private:
     QLabel* hint_ = nullptr;
     QLabel* format_preview_ = nullptr;
     QLabel* review_banner_ = nullptr;  // "re-verify after source change" notice
+
+    // ── Digital ROI image enhancement (per CAMERA, edited here) ──────────────
+    // It lives on this page rather than on Configure because this is the only
+    // place the operator can see the ROI polygons and judge the result. It is
+    // still ONE value for the whole camera: there is deliberately no per-row
+    // control in the area list.
+    QCheckBox* enable_check_ = nullptr;
+    QComboBox* enhance_combo_ = nullptr;          // local contrast
+    QSlider* brightness_slider_ = nullptr;
+    QSlider* contrast_slider_ = nullptr;
+    QSlider* gamma_slider_ = nullptr;             // hundredths
+    QSlider* saturation_slider_ = nullptr;
+    QLabel* brightness_value_ = nullptr;
+    QLabel* contrast_value_ = nullptr;
+    QLabel* gamma_value_ = nullptr;
+    QLabel* saturation_value_ = nullptr;
+    QPushButton* reset_btn_ = nullptr;
+    QCheckBox* preview_check_ = nullptr;
+    QLabel* enhance_hint_ = nullptr;
+    QTimer* preview_timer_ = nullptr;
+    /// The unsaved working configuration, and the baseline it is dirty against.
+    camera::ImageEnhancement working_{};
+    camera::ImageEnhancement loaded_enhancement_{};
+    /// The snapshot as captured+oriented. The single source every render reads.
+    QImage original_background_;
 
     std::vector<camera::CameraArea> areas_;        // the working set
     std::vector<camera::CameraArea> loaded_;       // as loaded, for dirty checks

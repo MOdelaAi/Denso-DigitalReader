@@ -73,11 +73,11 @@ TEST_CASE("persisting a mode adds no schema migration of its own", "[mode]") {
     REQUIRE(denso::db::run_migrations(db->handle()));
     // The mode key rides the existing `settings` table and contributes NO
     // migration. v14 is Slice 1's ball_level_calibration, not the mode key.
-    REQUIRE(denso::db::supported_schema_version() == 17);
-    CHECK(denso::db::read_user_version(db->handle()) == 17);
+    REQUIRE(denso::db::supported_schema_version() == 18);
+    CHECK(denso::db::read_user_version(db->handle()) == 18);
     REQUIRE(denso::mode::save(db->handle(), TargetMode::BallLeveler));
     // The mode key rides the existing settings table; no DDL runs on save.
-    CHECK(denso::db::read_user_version(db->handle()) == 17);
+    CHECK(denso::db::read_user_version(db->handle()) == 18);
 }
 
 TEST_CASE("digit_reader mode_setup_required is true with zero completed cameras", "[mode]") {

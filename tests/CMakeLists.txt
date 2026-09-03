@@ -101,6 +101,17 @@ add_executable(denso_tests
     test_zone_namespace.cpp
     test_mode_confirm_text.cpp
     test_model_empty_state.cpp
+    # Digital ROI CLAHE (schema v18). Three suites, split by what they defend:
+    # the enhancement AUTHORITY itself (strength table, union mask, luminance
+    # transform, and the preview wrapper that shares all three), the v17 -> v18
+    # migration + persistence, and where the enhancement sits in the running
+    # pipeline. All synthetic: generated images, stub engines, in-memory DBs.
+    test_roi_enhance.cpp
+    test_roi_enhance_schema.cpp
+    test_roi_enhance_pipeline.cpp
+    # The Areas page's single Save as ONE transaction: polygons + zones +
+    # number formats + the per-camera enhancement level, all or nothing.
+    test_areas_save_atomicity.cpp
 
     # The app units under test come from the linked subsystem libs
     # (denso_detection / denso_brazing / denso_camera — see the link line below),
@@ -203,6 +214,11 @@ add_executable(denso_integration_tests
     # injected counting EngineRegistry factory, so no engine is ever deserialized
     # and no camera is contacted (every fixture camera points at a dead port).
     test_ball_runtime.cpp
+    # The Areas step's IMAGE ENHANCEMENT control and its live preview. Drives the
+    # REAL CameraAreasPage, RoiCanvas and CameraWizardController against a real
+    # database, so it needs denso_app. No camera is contacted — the snapshot is a
+    # generated QImage pushed straight into the page.
+    test_roi_enhance_ui.cpp
 )
 target_link_libraries(denso_integration_tests PRIVATE denso_app Catch2::Catch2)
 # The platform-provider static test reads the two production call sites to assert
