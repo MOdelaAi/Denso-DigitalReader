@@ -446,6 +446,15 @@ upgrade gate and its invariants — is in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) under *Install and runtime
 architecture* and *Upgrade architecture*.
 
+> **Current accepted baseline: `0.1.0+r451.g36d3deb`**, built from commit
+> `36d3deb`, sha256
+> `e8bcaf46c07699539d8cf4dbadd9e0e4d5661c3b4ab6fb2446c636217a6e0841`. Package +
+> Upgrade Acceptance is **closed**: provenance, a genuine `apt` upgrade from
+> `0.1.0+r443.gf8520bf`, the `v16 → v18` migration behind an automatic verified
+> backup, state preservation and installed-runtime acceptance all passed on the
+> Jetson at `192.168.1.15` on 2026-09-04. GUI acceptance of the installed package
+> is still outstanding — that box had no graphical session at the time.
+
 ### Fresh install
 
 ```bash
@@ -792,3 +801,10 @@ compile.
   `DENSO_DATA_DIR`.
 - `/opt/denso/data` belongs to the installed package — leave it to `denso-setup`.
 - Engines and their `.names.json` sidecars travel together.
+- For development and fresh-install testing, a clean `apt purge` → fresh install
+  cycle is fine, and is often the more representative test. We do not contort the
+  development loop to preserve the current database across every reinstall. That
+  says nothing about package behaviour: a real **upgrade** still preserves
+  customer data and still takes a verified pre-migration backup.
+- The single Jetson for development, build, package install, runtime test and
+  acceptance is **`192.168.1.15`**. `192.168.1.81` is retired.

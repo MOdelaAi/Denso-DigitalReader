@@ -934,8 +934,9 @@ unmanifested-engine checks — an idle `ball_leveler` appliance with an
 unmanifested engine reports `degraded`, not `ready`.)
 
 **Validation note:** on-device mode validation runs on the Jetson at
-`192.168.1.15` **only**. `192.168.1.81` is reserved for manual `.deb` testing and
-is excluded from all automated and remote operation.
+`192.168.1.15` **only** — it is the single development, build, install, runtime
+and acceptance appliance. `192.168.1.81` is **retired** and is no longer a
+validation target.
 
 ## Persistence model (`src/core/db/`)
 

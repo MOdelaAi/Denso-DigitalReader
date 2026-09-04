@@ -366,10 +366,10 @@ deliberately rejected — recovery is manual and explicit.
   commit**; never `--allow-dirty` for a release artifact. The canonical input is
   the **repository** `models/` dir, never the installed `/opt/denso/models`. The
   build fails if the set is incomplete or an unexpected model artifact appears.
-- **`192.168.1.15`** is the validated development/release-test Jetson.
-  **`192.168.1.81` must not be accessed** unless the operator explicitly
-  authorizes it in the current task. Do not revive the abandoned EXEC-SPEC /
-  Revision-6.x exercise unless explicitly asked.
+- **`192.168.1.15`** is the one validated Jetson — development, build, package
+  install, runtime test and acceptance. **`192.168.1.81` is retired** and is no
+  longer an acceptance device; do not plan around it. Do not revive the abandoned
+  EXEC-SPEC / Revision-6.x exercise unless explicitly asked.
 
 ## Hard rules
 
@@ -406,8 +406,8 @@ deliberately rejected — recovery is manual and explicit.
   (`ui/engine_session.h`), after the commit and after teardown, never a union
   allow-list; retire the outgoing `WarmupState` as a consequence of the COMMIT
   (its boot-wired `failed` means `app.exit(1)`, which is boot-only semantics).
-- **`192.168.1.81` is excluded from all automated/remote operation** — it is
-  reserved for manual `.deb` testing. On-device validation is `192.168.1.15` only.
+- **`192.168.1.81` is retired** — it is not an acceptance device any more. All
+  on-device validation happens on `192.168.1.15`.
 - Packaging keeps **one** definition of each rule: `packaging/lib/policy.sh` is
   the sole JetPack-damage check and is *concatenated verbatim* into the generated
   preflight guard — never hand-copy it, and never add a second emitter, or the

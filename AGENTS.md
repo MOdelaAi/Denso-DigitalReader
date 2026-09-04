@@ -87,9 +87,9 @@ Facts that will bite whoever touches this:
 - `CameraGrid` is the **single owner** of runtime `status.json` writes (live
   `refresh_status_file()` + idle `publish_idle_status()`); `mode` /
   `mode_setup_required` are **omitted, never guessed**, when the DB is unreadable.
-- **On-device mode validation is `192.168.1.15` ONLY.** `192.168.1.81` is
-  reserved for manual `.deb` testing and must not be accessed by any automated or
-  remote step.
+- **On-device mode validation is `192.168.1.15` ONLY.** It is the single
+  development, build, package-install, runtime and acceptance appliance.
+  `192.168.1.81` is **retired** and is no longer a target of any kind.
 
 ## Platform-split inference (`if(WIN32)/else()` in the top `CMakeLists.txt`)
 
@@ -139,8 +139,9 @@ will be rejected in review.
   pattern and a stray 38 MB model has been swept in before. Stage explicit paths,
   and never stage `*.engine`, `*.onnx`, `*.pt`, `*.names.json`, `*.deb`, or the
   pre-existing untracked `packaging/denso-digitalreader.service`.
-- **Never access `192.168.1.81`.** It is reserved for the user's manual `.deb`
-  testing. No automated or remote step may contact, configure or reference it.
+- **`192.168.1.81` is retired.** It no longer exists as an acceptance appliance.
+  Do not contact, configure, reference or plan around it; anything that used to
+  wait on it now happens on `192.168.1.15`.
 - **Use `192.168.1.15` for all Jetson validation** — builds, `ctest`,
   `tests/packaging/run.sh`, `tests/manual/repro_build.sh`, package inspection.
   Anything needing `sm_87`, real TensorRT or NVDEC can only be proven there.
@@ -355,10 +356,10 @@ the **repository** `models/` directory — never the installed `/opt/denso/model
 `--allow-dirty` for a release artifact. `--models-dir` fails the build if the
 canonical set is incomplete or an unexpected model artifact is present.
 
-**Target safety.** `192.168.1.15` is the validated development/release-test
-Jetson. **`192.168.1.81` must not be accessed unless the operator explicitly
-authorizes it.** Do not revive the abandoned EXEC-SPEC / Revision-6.x exercise
-unless explicitly asked.
+**Target safety.** `192.168.1.15` is the one validated Jetson: development,
+build, package install, runtime test and acceptance all happen there.
+**`192.168.1.81` is retired** and is no longer an acceptance device. Do not
+revive the abandoned EXEC-SPEC / Revision-6.x exercise unless explicitly asked.
 
 To install on **another compatible, validated appliance** — not merely any box
 that is not the build host; see the engine-compatibility note below — move the
@@ -417,11 +418,83 @@ other's), and a real-root + real-`runuser` gate rehearsal on synthetic data
 (**35/35**). This is **validation history** — do not hardcode this version into
 operational commands.
 
+**Package + Upgrade Acceptance — ACCEPTED (192.168.1.15, 2026-09-04). This is the
+current accepted baseline.** Source `36d3deb05e03b1200a28725ca866485663713e66`
+(tree `d4576f66399c6c83b92ae7702f5ef9eba635f983`) produced package
+`0.1.0+r451.g36d3deb`, sha256
+`e8bcaf46c07699539d8cf4dbadd9e0e4d5661c3b4ab6fb2446c636217a6e0841`. A rebuild
+from the same commit reproduced the identical `.deb` bytes, so the
+reproducibility invariant held across sessions and days.
+
+What passed: **package provenance** (`dpkg -V` clean, every installed file
+byte-identical to the payload, `lib/SHA256SUMS` 10/10, `models.approved` and the
+reviewed Release-B `manifest.json` `ca8e9d6d…` intact, all three engine+sidecar
+pairs present, and no `.pt`/`.onnx`/`.pth` anywhere in the package, the file list
+or the linked libraries); a genuine `apt` **upgrade** `0.1.0+r443.gf8520bf` →
+`0.1.0+r451.g36d3deb` with no purge and no uninstall; the real appliance database
+migrated **v16 → v18** by the postinst gate behind a verified
+`denso.db.pre-v16` backup; and **installed-runtime acceptance** through an
+isolated `DENSO_DATA_DIR` (READY, digitv3 validated through real TensorRT, the
+migrated Areas/Zones/`decimal_places` and model attachments all intact).
+
+**Compare a postinst backup to the pre-install database LOGICALLY, table by
+table — never by hash.** A WAL checkpoint rewrites the file, so the backup is
+legitimately not byte-identical while being row-for-row the same; hashing alone
+raises a false alarm on a perfectly good backup. Done that way, every table
+matched, and the migrated database differed from the backup only in the `camera`
+table's six new Image Enhancement columns, with every pre-existing camera landing
+on the neutral defaults `0/0/0/0/100/0`.
+
+Accepted alongside it, and not to be re-run without cause: Release `ctest`
+**1264/1264**, packaging harness **478/478**, `git diff --check` clean, mutation
+testing (all load-bearing mutations killed), and the manual Image Enhancement
+visual acceptance. Reporting API endpoint configuration, Digital Reader Image
+Enhancement and schema **v18** are complete. Enhancement tuning is
+customer-camera/site-specific field work, not a gate — do not spend a session
+hunting for "best" values.
+
+**GUI acceptance of the installed package is NOT TESTED.** At the time `.15` had
+no graphical user session (GDM greeter only), and an offscreen run is never a
+visual pass. Reopen it when someone is logged in at the console.
+
+**Development reinstall policy.** For development, commissioning and
+fresh-install testing on `192.168.1.15` it is acceptable to `apt purge` and
+perform a clean fresh installation, recreating application state as needed.
+Development workflows do **not** have to be engineered around preserving the
+current Denso database across every reinstall cycle, and a clean purge/install
+cycle is often the more representative test.
+
+That is a statement about our test loop, **not** a licence for the package. The
+accepted upgrade path still preserves customer data and still takes a verified
+pre-migration backup, and must continue to: a normal upgrade may never destroy an
+operator's database.
+
+**Autostart and autologin — factual state.** The package installs the systemd
+user service (`/usr/lib/systemd/user/denso-digitalreader.service`) and
+`/usr/bin/denso-session-check`. Fresh-install autostart logic already exists and
+arms the service. Graphical autologin support exists, but only through
+`denso-setup configure --enable-autologin`; `postinst` never passes it, so a
+fresh appliance still stops at the greeter on power-on. On `.15` the r451 upgrade
+correctly left the service **disabled** (`autostart-migrated =
+preserved-disabled`) — an upgrade must never arm something the operator did not
+ask for.
+
+A redesign in which `postinst` would configure autologin automatically was
+discussed and **not implemented**. None of it is committed architecture; do not
+document it, build against it, or treat it as a decision already taken.
+
+**Testing notes for `.15`.** GUI and runtime testing may use a disposable
+`DENSO_DATA_DIR`; never point a build-tree binary at `/opt/denso/data`. Never
+assume `DISPLAY`/`XAUTHORITY` — probe the real session first (`loginctl
+list-sessions`, `loginctl show-session <id> -p Type -p Class`, and
+`/tmp/.X11-unix/`); the GDM greeter is not a user session. A reboot is QA
+evidence for cold-boot behaviour when we deliberately choose to test it; it is
+never a requirement of installing the package.
+
 **Second-appliance bundle install verified** — HISTORICAL RECORD ONLY.
-> `192.168.1.81` is **not** an authorized target. Do not connect to it, deploy to
-> it, or test against it unless the operator explicitly authorizes that host in
-> the current task. The paragraph below records what was proven there once, in
-> 2026-07-21; it is not standing permission.
+> `192.168.1.81` is **retired**: it no longer exists as an acceptance appliance
+> and must not be planned around, waited on, or referenced as a target. The
+> paragraph below records only what was proven there once, on 2026-07-21.
 
 (192.168.1.81, 2026-07-21) — the
 first time the `.deb` was ever installed on a box that did not build it. Exact
